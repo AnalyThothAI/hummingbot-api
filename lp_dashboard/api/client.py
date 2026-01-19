@@ -164,6 +164,14 @@ class LPDashboardAPI:
             params["run_status"] = run_status
         return self._request("GET", "/bot-orchestration/bot-runs", params=params)
 
+    def delete_bot_run(self, bot_run_id: int) -> Dict[str, Any]:
+        """Delete a bot run record by ID."""
+        return self._request("DELETE", f"/bot-orchestration/bot-runs/{bot_run_id}")
+
+    def delete_bot_runs_by_name(self, bot_name: str) -> Dict[str, Any]:
+        """Delete all bot run records for a specific bot name."""
+        return self._request("DELETE", f"/bot-orchestration/bot-runs/by-name/{bot_name}")
+
     def deploy_v2_script(
         self,
         instance_name: str,
@@ -182,6 +190,37 @@ class LPDashboardAPI:
         if script_config:
             payload["script_config"] = script_config
         return self._request("POST", "/bot-orchestration/deploy-v2-script", json=payload)
+
+    def deploy_v2_controllers(
+        self,
+        instance_name: str,
+        controllers_config: List[str],
+        credentials_profile: str = "master_account",
+        image: str = "hummingbot/hummingbot:latest",
+        max_global_drawdown_quote: Optional[float] = None,
+        max_controller_drawdown_quote: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Deploy a V2 strategy with controllers.
+
+        Args:
+            instance_name: Name for the bot instance
+            controllers_config: List of controller config names to deploy
+            credentials_profile: Credentials profile for API keys
+            image: Docker image to use
+            max_global_drawdown_quote: Max drawdown across all controllers (USDT)
+            max_controller_drawdown_quote: Max drawdown per controller (USDT)
+        """
+        payload = {
+            "instance_name": instance_name,
+            "controllers_config": controllers_config,
+            "credentials_profile": credentials_profile,
+            "image": image,
+        }
+        if max_global_drawdown_quote is not None and max_global_drawdown_quote > 0:
+            payload["max_global_drawdown_quote"] = max_global_drawdown_quote
+        if max_controller_drawdown_quote is not None and max_controller_drawdown_quote > 0:
+            payload["max_controller_drawdown_quote"] = max_controller_drawdown_quote
+        return self._request("POST", "/bot-orchestration/deploy-v2-controllers", json=payload)
 
     # ==================== Docker ====================
 
@@ -252,6 +291,47 @@ class LPDashboardAPI:
     def delete_script_config(self, config_name: str) -> Dict:
         """Delete script configuration."""
         return self._request("DELETE", f"/scripts/configs/{config_name}")
+
+    # ==================== Controllers ====================
+
+    def list_controller_configs(self) -> List[Dict]:
+        """List all controller configurations."""
+        return self._request("GET", "/controllers/configs/")
+
+    def get_controller_config(self, config_name: str) -> Dict[str, Any]:
+        """Get controller configuration by name."""
+        return self._request("GET", f"/controllers/configs/{config_name}")
+
+    def save_controller_config(self, config_name: str, config: Dict[str, Any]) -> Dict:
+        """Create or update controller configuration."""
+        return self._request("POST", f"/controllers/configs/{config_name}", json=config)
+
+    def delete_controller_config(self, config_name: str) -> Dict:
+        """Delete controller configuration."""
+        return self._request("DELETE", f"/controllers/configs/{config_name}")
+
+    def get_bot_controller_configs(self, bot_name: str) -> List[Dict]:
+        """Get all controller configurations for a specific bot."""
+        return self._request("GET", f"/controllers/bots/{bot_name}/configs")
+
+    def update_bot_controller_config(
+        self,
+        bot_name: str,
+        controller_name: str,
+        config: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Update controller configuration for a specific bot.
+
+        Args:
+            bot_name: Name of the bot
+            controller_name: Name of the controller config to update
+            config: Configuration updates (e.g., {"manual_kill_switch": True})
+        """
+        return self._request(
+            "POST",
+            f"/controllers/bots/{bot_name}/{controller_name}/config",
+            json=config,
+        )
 
     # ==================== Gateway ====================
 

@@ -1,11 +1,19 @@
-"""Deploy page - Deploy new LP strategies."""
+"""Deploy page - Deploy new LP strategies.
+
+使用 deploy_v2_script 部署 Gateway LP 策略。
+"""
 import time
 from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
-from st_utils import initialize_st_page, get_backend_api_client
+from st_utils import (
+    initialize_st_page,
+    get_backend_api_client,
+    cached_list_script_configs,
+    clear_all_caches,
+)
 
 initialize_st_page(icon="🚀", show_readme=False)
 
@@ -19,38 +27,62 @@ api = get_backend_api_client()
 
 
 def generate_instance_name(config_name: str = None) -> str:
-    """Generate instance name based on config name with timestamp suffix."""
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    """Generate instance name: strategy_name + date + random chars.
+
+    Format: {strategy}-{YYYYMMDD}-{random4}
+    Example: meteora_dlmm-20250119-a3f2
+    """
+    import random
+    import string
+
+    date_str = datetime.now().strftime("%Y%m%d")
+    random_suffix = ''.join(random.choices(string.ascii_lowercase + string.digits, k=4))
+
     if config_name:
-        # Remove .yml extension if present and clean the name
+        # Remove .yml extension and clean the name
         base_name = config_name.replace(".yml", "").replace(".yaml", "")
-        # Truncate if too long (keep it reasonable for container names)
+        # Remove any existing timestamp patterns (like -20250119-1234)
+        import re
+        base_name = re.sub(r'-\d{8}(-\d+)?$', '', base_name)
+        # Truncate if too long
         if len(base_name) > 30:
             base_name = base_name[:30]
-        return f"{base_name}-{timestamp}"
-    return f"lp-strategy-{timestamp}"
+        return f"{base_name}-{date_str}-{random_suffix}"
+    return f"lp-strategy-{date_str}-{random_suffix}"
+
+
+def get_credentials_profiles():
+    """Get available credentials profiles."""
+    try:
+        if hasattr(api, 'list_accounts'):
+            return api.list_accounts() or ["master_account"]
+        return ["master_account"]
+    except Exception:
+        return ["master_account"]
 
 
 # Page Header
 st.title("🚀 Deploy Strategy")
 st.subheader("Configure and deploy your LP trading strategy")
 
-# Configuration Selection Section (moved to top so we can generate instance name based on config)
+# Configuration Selection Section
 with st.container(border=True):
     st.success("🎛️ **Configuration Selection:** Select the strategy configuration to deploy")
 
     # Fetch available configurations
-    try:
-        configs = api.list_script_configs()
-        config_list = [c.get("config_name") for c in configs if c.get("config_name")]
-    except Exception:
-        config_list = []
+    configs = cached_list_script_configs()
+    config_list = [c.get("config_name") for c in configs if c.get("config_name")]
 
     # Fetch available scripts
     try:
         scripts = api.list_scripts()
     except Exception:
         scripts = ["gateway_lp_guarded"]
+
+    # Filter for LP-related scripts
+    lp_scripts = [s for s in scripts if any(x in s.lower() for x in ["lp", "gateway", "amm"])]
+    if not lp_scripts:
+        lp_scripts = scripts if scripts else ["gateway_lp_guarded"]
 
     # Deployment method
     deploy_method = st.radio(
@@ -128,19 +160,15 @@ with st.container(border=True):
                             st.error(f"Error loading config: {e}")
     else:
         # Quick deploy - select script
-        lp_scripts = [s for s in scripts if any(x in s.lower() for x in ["lp", "gateway", "amm"])]
-        if not lp_scripts:
-            lp_scripts = scripts if scripts else ["gateway_lp_guarded"]
-
         selected_script = st.selectbox(
             "Script",
             options=lp_scripts,
             help="Select the strategy script",
         )
 
-# Bot Configuration Section (now comes after config selection)
+# Bot Configuration Section
 with st.container(border=True):
-    st.info("🤖 **Bot Configuration:** Set up your bot instance with basic configuration")
+    st.info("🤖 **Bot Configuration:** Set up your bot instance")
 
     col1, col2, col3 = st.columns(3)
 
@@ -155,31 +183,17 @@ with st.container(border=True):
         )
 
     with col2:
-        try:
-            available_credentials = api.list_accounts() if hasattr(api, 'list_accounts') else ["master_account"]
-            credentials = st.selectbox(
-                "Credentials Profile",
-                options=available_credentials if available_credentials else ["master_account"],
-                help="Credentials profile for API keys",
-            )
-        except Exception:
-            credentials = st.text_input(
-                "Credentials Profile",
-                value="master_account",
-                help="Credentials profile for API keys",
-            )
+        credentials_profiles = get_credentials_profiles()
+        credentials = st.selectbox(
+            "Credentials Profile",
+            options=credentials_profiles,
+            help="Credentials profile for API keys",
+        )
 
     with col3:
-        try:
-            all_images = api.get_available_images("hummingbot") if hasattr(api, 'get_available_images') else DOCKER_IMAGES
-            if not all_images:
-                all_images = DOCKER_IMAGES
-        except Exception:
-            all_images = DOCKER_IMAGES
-
         image_name = st.selectbox(
             "Hummingbot Image",
-            options=all_images,
+            options=DOCKER_IMAGES,
             help="Hummingbot Docker image to use",
         )
 
@@ -233,6 +247,8 @@ with st.container(border=True):
                             with st.expander("📋 Deployment Details", expanded=True):
                                 st.json(result)
 
+                            # Clear caches so Overview page shows new bot
+                            clear_all_caches()
                             time.sleep(2)
                             st.rerun()
                         else:

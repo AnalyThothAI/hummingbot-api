@@ -42,6 +42,7 @@ from services.accounts_service import AccountsService
 from services.docker_service import DockerService
 from services.gateway_service import GatewayService
 from services.market_data_feed_manager import MarketDataFeedManager
+from services.bot_state_sync import BotStateSyncService
 # from services.executor_service import ExecutorService
 from utils.bot_archiver import BotArchiver
 from routers import (
@@ -181,6 +182,14 @@ async def lifespan(app: FastAPI):
     # Initialize database
     await accounts_service.ensure_db_initialized()
 
+    # Initialize BotStateSyncService for accurate state tracking
+    # This service bridges the gap between real-time MQTT/Docker state and database records
+    bot_state_sync = BotStateSyncService(
+        bots_orchestrator=bots_orchestrator,
+        db_manager=accounts_service.db_manager,
+        sync_interval=10.0,  # Sync every 10 seconds
+    )
+
     # # Initialize ExecutorService for running executors directly via API
     # executor_service = ExecutorService(
     #     connector_manager=accounts_service.connector_manager,
@@ -200,17 +209,20 @@ async def lifespan(app: FastAPI):
     app.state.gateway_service = gateway_service
     app.state.bot_archiver = bot_archiver
     app.state.market_data_feed_manager = market_data_feed_manager
+    app.state.bot_state_sync = bot_state_sync
     # app.state.executor_service = executor_service
 
     # Start services
     bots_orchestrator.start()
     accounts_service.start()
     market_data_feed_manager.start()
+    bot_state_sync.start()  # Start bot state synchronization
     # executor_service.start()
 
     yield
 
     # Shutdown services
+    bot_state_sync.stop()  # Stop state sync first
     bots_orchestrator.stop()
     await accounts_service.stop()
 

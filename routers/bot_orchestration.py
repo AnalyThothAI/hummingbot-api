@@ -10,7 +10,8 @@ logger = logging.getLogger(__name__)
 from models import StartBotAction, StopBotAction, V2ScriptDeployment, V2ControllerDeployment
 from services.bots_orchestrator import BotsOrchestrator
 from services.docker_service import DockerService
-from deps import get_bots_orchestrator, get_docker_service, get_bot_archiver, get_database_manager
+from services.bot_state_sync import BotStateSyncService
+from deps import get_bots_orchestrator, get_docker_service, get_bot_archiver, get_database_manager, get_bot_state_sync
 from utils.file_system import fs_util
 from utils.bot_archiver import BotArchiver
 from database import AsyncDatabaseManager, BotRunRepository
@@ -148,9 +149,10 @@ async def start_bot(
 
 @router.post("/stop-bot")
 async def stop_bot(
-    action: StopBotAction, 
+    action: StopBotAction,
     bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    db_manager: AsyncDatabaseManager = Depends(get_database_manager),
+    bot_state_sync: BotStateSyncService = Depends(get_bot_state_sync)
 ):
     """
     Stop a bot with the specified configuration.
@@ -184,10 +186,14 @@ async def stop_bot(
                     final_status=final_status
                 )
                 logger.info(f"Updated bot run status to STOPPED for {action.bot_name}")
+
+            # Clear confirmed_running state to allow re-tracking if redeployed
+            bot_state_sync.clear_confirmed_running(action.bot_name)
+            logger.info(f"Cleared confirmed_running state for {action.bot_name}")
         except Exception as e:
             logger.error(f"Failed to update bot run status: {e}")
             # Don't fail the stop operation if bot run update fails
-    
+
     return {"status": "success", "response": response}
 
 
@@ -268,6 +274,32 @@ async def get_bot_runs(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.delete("/bot-runs/by-name/{bot_name}")
+async def delete_bot_runs_by_name(
+    bot_name: str,
+    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+):
+    """
+    Delete all bot run records for a specific bot name.
+
+    Args:
+        bot_name: Name of the bot to delete runs for
+        db_manager: Database manager dependency
+
+    Returns:
+        Success message with count of deleted records
+    """
+    try:
+        async with db_manager.get_session_context() as session:
+            bot_run_repo = BotRunRepository(session)
+            count = await bot_run_repo.delete_bot_run_by_name(bot_name)
+
+            return {"status": "success", "message": f"Deleted {count} bot run(s) for {bot_name}", "deleted_count": count}
+    except Exception as e:
+        logger.error(f"Failed to delete bot runs for {bot_name}: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.get("/bot-runs/{bot_run_id}")
 async def get_bot_run_by_id(
     bot_run_id: int,
@@ -275,14 +307,14 @@ async def get_bot_run_by_id(
 ):
     """
     Get a specific bot run by ID.
-    
+
     Args:
         bot_run_id: ID of the bot run
         db_manager: Database manager dependency
-        
+
     Returns:
         Bot run details
-        
+
     Raises:
         HTTPException: 404 if bot run not found
     """
@@ -326,10 +358,10 @@ async def get_bot_run_stats(
 ):
     """
     Get statistics about bot runs.
-    
+
     Args:
         db_manager: Database manager dependency
-        
+
     Returns:
         Bot run statistics
     """
@@ -337,10 +369,44 @@ async def get_bot_run_stats(
         async with db_manager.get_session_context() as session:
             bot_run_repo = BotRunRepository(session)
             stats = await bot_run_repo.get_bot_run_stats()
-            
+
             return {"status": "success", "data": stats}
     except Exception as e:
         logger.error(f"Failed to get bot run stats: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/bot-runs/{bot_run_id}")
+async def delete_bot_run(
+    bot_run_id: int,
+    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+):
+    """
+    Delete a bot run record by ID.
+
+    Args:
+        bot_run_id: ID of the bot run to delete
+        db_manager: Database manager dependency
+
+    Returns:
+        Success message if deleted
+
+    Raises:
+        HTTPException: 404 if bot run not found
+    """
+    try:
+        async with db_manager.get_session_context() as session:
+            bot_run_repo = BotRunRepository(session)
+            deleted = await bot_run_repo.delete_bot_run(bot_run_id)
+
+            if not deleted:
+                raise HTTPException(status_code=404, detail=f"Bot run {bot_run_id} not found")
+
+            return {"status": "success", "message": f"Bot run {bot_run_id} deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete bot run {bot_run_id}: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -354,7 +420,8 @@ async def _background_stop_and_archive(
     bots_manager: BotsOrchestrator,
     docker_manager: DockerService,
     bot_archiver: BotArchiver,
-    db_manager: AsyncDatabaseManager
+    db_manager: AsyncDatabaseManager,
+    bot_state_sync: BotStateSyncService
 ):
     """Background task to handle the stop and archive process"""
     try:
@@ -489,7 +556,12 @@ async def _background_stop_and_archive(
         # Always clear the stopping status when the background task completes
         bots_manager.clear_bot_stopping(bot_name_for_orchestrator)
         logger.info(f"Cleared stopping status for bot {bot_name}")
-        
+
+        # Clear confirmed_running state to allow re-tracking if redeployed
+        bot_state_sync.clear_confirmed_running(bot_name)
+        bot_state_sync.clear_confirmed_running(bot_name_for_orchestrator)
+        logger.info(f"Cleared confirmed_running state for bot {bot_name}")
+
         # Remove bot from active_bots and clear all MQTT data
         if bot_name_for_orchestrator in bots_manager.active_bots:
             bots_manager.mqtt_manager.clear_bot_data(bot_name_for_orchestrator)
@@ -507,7 +579,8 @@ async def stop_and_archive_bot(
     bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
     docker_manager: DockerService = Depends(get_docker_service),
     bot_archiver: BotArchiver = Depends(get_bot_archiver),
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    db_manager: AsyncDatabaseManager = Depends(get_database_manager),
+    bot_state_sync: BotStateSyncService = Depends(get_bot_state_sync)
 ):
     """
     Gracefully stop a bot and archive its data in the background.
@@ -562,7 +635,8 @@ async def stop_and_archive_bot(
             bots_manager=bots_manager,
             docker_manager=docker_manager,
             bot_archiver=bot_archiver,
-            db_manager=db_manager
+            db_manager=db_manager,
+            bot_state_sync=bot_state_sync
         )
         
         return {

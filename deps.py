@@ -4,6 +4,7 @@ from services.accounts_service import AccountsService
 from services.docker_service import DockerService
 from services.gateway_service import GatewayService
 from services.market_data_feed_manager import MarketDataFeedManager
+from services.bot_state_sync import BotStateSyncService
 from utils.bot_archiver import BotArchiver
 from database import AsyncDatabaseManager
 
@@ -41,3 +42,8 @@ def get_bot_archiver(request: Request) -> BotArchiver:
 def get_database_manager(request: Request) -> AsyncDatabaseManager:
     """Get AsyncDatabaseManager from app state."""
     return request.app.state.accounts_service.db_manager
+
+
+def get_bot_state_sync(request: Request) -> BotStateSyncService:
+    """Get BotStateSyncService from app state."""
+    return request.app.state.bot_state_sync

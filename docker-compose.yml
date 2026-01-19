@@ -7,6 +7,14 @@ services:
     volumes:
       - ./bots:/hummingbot-api/bots
       - /var/run/docker.sock:/var/run/docker.sock
+      # Development mounts - mount local code for live updates
+      - ./main.py:/hummingbot-api/main.py:ro
+      - ./deps.py:/hummingbot-api/deps.py:ro
+      - ./services:/hummingbot-api/services:ro
+      - ./routers:/hummingbot-api/routers:ro
+      - ./database:/hummingbot-api/database:ro
+      - ./models:/hummingbot-api/models:ro
+      - ./utils:/hummingbot-api/utils:ro
     env_file:
       - .env
     environment:
@@ -26,6 +34,9 @@ services:
       dockerfile: Dockerfile.dashboard
     ports:
       - "8502:8502"
+    volumes:
+      # Development mount - use local code for live updates
+      - ./lp_dashboard:/app/lp_dashboard:ro
     environment:
       - API_URL=http://hummingbot-api:8000
       - API_USERNAME=${USERNAME:-admin}
@@ -53,10 +64,11 @@ services:
     networks:
       - emqx-bridge
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:15888/"]
+      test: ["CMD-SHELL", "node -e \"fetch('http://localhost:15888/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))\""]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 30s
 
   emqx:
     container_name: hummingbot-broker

@@ -5,7 +5,13 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from st_utils import initialize_st_page, get_backend_api_client
+from st_utils import (
+    initialize_st_page,
+    get_backend_api_client,
+    cached_get_active_containers,
+    cached_list_script_configs,
+    cached_get_gateway_status,
+)
 
 initialize_st_page(layout="wide", show_readme=False)
 
@@ -69,26 +75,15 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# Get data for stats
-try:
-    containers = api.get_active_containers(name_filter="hummingbot")
-    active_count = len(containers) if containers else 0
-except Exception:
-    active_count = 0
-    containers = []
+# Get data for stats using cached functions
+containers = cached_get_active_containers("hummingbot")
+active_count = len(containers) if containers else 0
 
-try:
-    configs = api.list_script_configs()
-    config_count = len(configs) if configs else 0
-except Exception:
-    config_count = 0
+configs = cached_list_script_configs()
+config_count = len(configs) if configs else 0
 
-try:
-    gateway = api.get_gateway_status()
-    # API returns {"running": bool, "container_id": str, "port": int, ...}
-    gw_status = "Online" if gateway.get("running") else "Offline"
-except Exception:
-    gw_status = "Unknown"
+gateway = cached_get_gateway_status()
+gw_status = "Online" if gateway.get("running") else "Offline"
 
 try:
     is_healthy = api.is_healthy()

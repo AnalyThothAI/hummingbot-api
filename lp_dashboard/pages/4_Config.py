@@ -2,7 +2,12 @@
 import yaml
 import streamlit as st
 
-from st_utils import initialize_st_page, get_backend_api_client
+from st_utils import (
+    initialize_st_page,
+    get_backend_api_client,
+    cached_list_script_configs,
+    clear_all_caches,
+)
 
 initialize_st_page(icon="⚙️", show_readme=False)
 
@@ -24,7 +29,7 @@ with tab1:
 
         with col1:
             try:
-                configs = api.list_script_configs()
+                configs = cached_list_script_configs()
 
                 if not configs:
                     st.warning("No configurations found")
@@ -134,6 +139,7 @@ with tab1:
                                 try:
                                     api.save_script_config(editing_config, edited_config)
                                     st.success("✅ Configuration saved!")
+                                    clear_all_caches()
                                 except Exception as e:
                                     st.error(f"Error saving: {e}")
 
@@ -144,6 +150,7 @@ with tab1:
                                         api.delete_script_config(editing_config)
                                         st.session_state.editing_config = None
                                         st.success("✅ Configuration deleted!")
+                                        clear_all_caches()
                                         st.rerun()
                                     except Exception as e:
                                         st.error(f"Error deleting: {e}")
@@ -218,6 +225,7 @@ markets: {{}}
                         api.save_script_config(config_name, config_data)
                         st.success(f"✅ Configuration '{config_name}' created!")
                         st.session_state.editing_config = config_name
+                        clear_all_caches()
                         st.balloons()
                         st.rerun()
                     except yaml.YAMLError as e:

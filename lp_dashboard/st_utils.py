@@ -5,12 +5,127 @@ Following the design patterns from official Hummingbot Dashboard.
 """
 import atexit
 import os
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
 import streamlit as st
 
 from api.client import APIConfig, LPDashboardAPI
 from utils.config import get_config
+
+
+# ==================== Cached Data Functions ====================
+# Following official dashboard pattern: use @st.cache_data for API calls
+# with appropriate TTL to reduce redundant requests
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cached_get_bot_runs(limit: int = 50) -> List[Dict]:
+    """Get bot runs with caching."""
+    try:
+        api = get_backend_api_client()
+        response = api.get_bot_runs(limit=limit)
+        return response.get("data", [])
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cached_get_all_bots_status() -> Dict[str, Any]:
+    """Get all bots status with caching."""
+    try:
+        api = get_backend_api_client()
+        response = api.get_all_bots_status()
+        return response.get("data", {}) if response.get("status") == "success" else {}
+    except Exception:
+        return {}
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cached_get_active_containers(name_filter: str = "hummingbot") -> List[Dict]:
+    """Get active containers with caching."""
+    try:
+        api = get_backend_api_client()
+        return api.get_active_containers(name_filter=name_filter)
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cached_list_script_configs() -> List[Dict]:
+    """Get script configs with caching."""
+    try:
+        api = get_backend_api_client()
+        return api.list_script_configs()
+    except Exception:
+        return []
+
+
+@st.cache_data(ttl=60, show_spinner=False)
+def cached_get_gateway_status() -> Dict[str, Any]:
+    """Get gateway status with caching."""
+    try:
+        api = get_backend_api_client()
+        return api.get_gateway_status()
+    except Exception:
+        return {"running": False}
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def cached_get_mqtt_status() -> Dict[str, Any]:
+    """Get MQTT status with caching."""
+    try:
+        api = get_backend_api_client()
+        response = api.get_mqtt_status()
+        return response.get("data", {})
+    except Exception:
+        return {"mqtt_connected": False, "discovered_bots": []}
+
+
+def clear_all_caches():
+    """Clear all cached data - useful after mutations."""
+    cached_get_bot_runs.clear()
+    cached_get_all_bots_status.clear()
+    cached_get_active_containers.clear()
+    cached_list_script_configs.clear()
+    cached_get_gateway_status.clear()
+    cached_get_mqtt_status.clear()
+
+
+# ==================== State Management ====================
+# Centralized state initialization following official dashboard patterns
+
+def init_page_state(page_name: str, defaults: Dict[str, Any] = None):
+    """Initialize page-specific session state with defaults.
+
+    Args:
+        page_name: Unique identifier for the page
+        defaults: Dictionary of default values for state variables
+    """
+    if defaults is None:
+        defaults = {}
+
+    # Mark page as initialized
+    init_key = f"{page_name}_initialized"
+    if init_key not in st.session_state:
+        st.session_state[init_key] = True
+
+        # Set all defaults
+        for key, value in defaults.items():
+            state_key = f"{page_name}_{key}"
+            if state_key not in st.session_state:
+                st.session_state[state_key] = value
+
+
+def get_page_state(page_name: str, key: str, default: Any = None) -> Any:
+    """Get a page-specific state value."""
+    state_key = f"{page_name}_{key}"
+    return st.session_state.get(state_key, default)
+
+
+def set_page_state(page_name: str, key: str, value: Any):
+    """Set a page-specific state value."""
+    state_key = f"{page_name}_{key}"
+    st.session_state[state_key] = value
 
 
 def initialize_st_page(
@@ -132,3 +247,76 @@ def format_percentage(value: float, decimals: int = 2, with_sign: bool = True) -
     if with_sign and pct >= 0:
         return f"+{pct:.{decimals}f}%"
     return f"{pct:.{decimals}f}%"
+
+
+# ==================== UI Components ====================
+# Reusable UI patterns following official dashboard
+
+def status_badge(status: str, size: str = "normal") -> str:
+    """Generate status badge HTML.
+
+    Args:
+        status: One of 'running', 'stopped', 'error', 'unknown'
+        size: 'small' or 'normal'
+    """
+    colors = {
+        "running": ("#4CAF50", "🟢"),
+        "stopped": ("#FFA500", "🟡"),
+        "error": ("#f44336", "🔴"),
+        "archived": ("#9E9E9E", "⚪"),
+        "unknown": ("#9E9E9E", "❓"),
+    }
+    color, icon = colors.get(status.lower(), colors["unknown"])
+    return f"{icon} {status.title()}"
+
+
+def show_error_with_details(message: str, error: Exception, expanded: bool = False):
+    """Show error message with expandable details."""
+    st.error(message)
+    with st.expander("Error Details", expanded=expanded):
+        st.code(str(error))
+
+
+def confirm_action(action_name: str, key: str) -> bool:
+    """Two-step confirmation pattern for destructive actions.
+
+    Returns True if action is confirmed.
+    """
+    confirm_key = f"confirm_{key}"
+
+    if st.session_state.get(confirm_key):
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button(f"✅ Yes, {action_name}", key=f"yes_{key}", type="primary"):
+                st.session_state[confirm_key] = False
+                return True
+        with col2:
+            if st.button("❌ Cancel", key=f"cancel_{key}"):
+                st.session_state[confirm_key] = False
+                st.rerun()
+        return False
+    return False
+
+
+def action_with_feedback(action_func, success_msg: str, error_msg: str, rerun: bool = True):
+    """Execute action with loading spinner and feedback.
+
+    Args:
+        action_func: Callable to execute
+        success_msg: Message to show on success
+        error_msg: Message prefix on error
+        rerun: Whether to rerun page on success
+    """
+    import time
+
+    with st.spinner("Processing..."):
+        try:
+            result = action_func()
+            st.success(success_msg)
+            clear_all_caches()  # Clear caches after mutation
+            if rerun:
+                time.sleep(0.5)
+                st.rerun()
+            return result
+        except Exception as e:
+            show_error_with_details(f"{error_msg}: {e}", e)

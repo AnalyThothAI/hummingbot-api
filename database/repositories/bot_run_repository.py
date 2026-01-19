@@ -43,6 +43,32 @@ class BotRunRepository:
         return bot_run
 
 
+    async def update_bot_run_running(self, bot_name: str) -> Optional[BotRun]:
+        """Mark a bot run as RUNNING when first performance data is received.
+
+        This is a critical state transition that was missing in the original design.
+        Called when the bot starts sending performance data via MQTT.
+
+        State transition: CREATED -> RUNNING
+        """
+        stmt = select(BotRun).where(
+            and_(
+                BotRun.bot_name == bot_name,
+                BotRun.run_status == "CREATED",
+                BotRun.deployment_status == "DEPLOYED"
+            )
+        ).order_by(desc(BotRun.deployed_at))
+
+        result = await self.session.execute(stmt)
+        bot_run = result.scalar_one_or_none()
+
+        if bot_run:
+            bot_run.run_status = "RUNNING"
+            await self.session.flush()
+            await self.session.refresh(bot_run)
+
+        return bot_run
+
     async def update_bot_run_stopped(
         self,
         bot_name: str,
@@ -56,10 +82,10 @@ class BotRunRepository:
                 or_(BotRun.run_status == "RUNNING", BotRun.run_status == "CREATED")
             )
         ).order_by(desc(BotRun.deployed_at))
-        
+
         result = await self.session.execute(stmt)
         bot_run = result.scalar_one_or_none()
-        
+
         if bot_run:
             bot_run.run_status = "STOPPED" if not error_message else "ERROR"
             bot_run.stopped_at = datetime.utcnow()
@@ -67,7 +93,7 @@ class BotRunRepository:
             bot_run.error_message = error_message
             await self.session.flush()
             await self.session.refresh(bot_run)
-            
+
         return bot_run
 
     async def update_bot_run_archived(self, bot_name: str) -> Optional[BotRun]:
@@ -146,9 +172,78 @@ class BotRunRepository:
                 BotRun.deployment_status == "DEPLOYED"
             )
         ).order_by(desc(BotRun.deployed_at))
-        
+
         result = await self.session.execute(stmt)
         return result.scalars().all()
+
+    async def get_created_bot_runs(self) -> List[BotRun]:
+        """Get all bot runs in CREATED state (deployed but not yet confirmed running).
+
+        Used by the sync task to detect bots that should be marked as RUNNING
+        (if they have performance data) or STOPPED (if container is gone).
+        """
+        stmt = select(BotRun).where(
+            and_(
+                BotRun.run_status == "CREATED",
+                BotRun.deployment_status == "DEPLOYED"
+            )
+        ).order_by(desc(BotRun.deployed_at))
+
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
+
+    async def mark_orphan_as_stopped(self, bot_name: str) -> Optional[BotRun]:
+        """Mark an orphan bot run as STOPPED.
+
+        Called when a bot's container no longer exists and MQTT has no data.
+        This handles the case where a container crashed without graceful shutdown.
+        """
+        stmt = select(BotRun).where(
+            and_(
+                BotRun.bot_name == bot_name,
+                BotRun.run_status == "CREATED",
+                BotRun.deployment_status == "DEPLOYED"
+            )
+        ).order_by(desc(BotRun.deployed_at))
+
+        result = await self.session.execute(stmt)
+        bot_run = result.scalar_one_or_none()
+
+        if bot_run:
+            bot_run.run_status = "STOPPED"
+            bot_run.stopped_at = datetime.now(timezone.utc)
+            bot_run.error_message = "Container no longer exists (possible crash or manual removal)"
+            await self.session.flush()
+            await self.session.refresh(bot_run)
+
+        return bot_run
+
+    async def delete_bot_run(self, bot_run_id: int) -> bool:
+        """Delete a bot run record by ID."""
+        stmt = select(BotRun).where(BotRun.id == bot_run_id)
+        result = await self.session.execute(stmt)
+        bot_run = result.scalar_one_or_none()
+
+        if bot_run:
+            await self.session.delete(bot_run)
+            await self.session.flush()
+            return True
+        return False
+
+    async def delete_bot_run_by_name(self, bot_name: str) -> int:
+        """Delete all bot run records for a specific bot name. Returns count of deleted records."""
+        stmt = select(BotRun).where(BotRun.bot_name == bot_name)
+        result = await self.session.execute(stmt)
+        bot_runs = result.scalars().all()
+
+        count = 0
+        for bot_run in bot_runs:
+            await self.session.delete(bot_run)
+            count += 1
+
+        if count > 0:
+            await self.session.flush()
+        return count
 
     async def get_bot_run_stats(self) -> Dict[str, Any]:
         """Get statistics about bot runs."""
