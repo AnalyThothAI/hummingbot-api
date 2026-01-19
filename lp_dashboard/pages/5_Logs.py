@@ -1,6 +1,5 @@
-"""Logs page - View strategy logs."""
-from datetime import datetime, timedelta
-import random
+"""Logs page - View strategy logs (Real Data)."""
+from datetime import datetime
 
 import streamlit as st
 
@@ -11,14 +10,22 @@ initialize_st_page(icon="📋", show_readme=False)
 api = get_backend_api_client()
 
 
+def get_bot_list():
+    """Get list of available bots from MQTT."""
+    try:
+        mqtt_response = api.get_mqtt_status()
+        mqtt_data = mqtt_response.get("data", {})
+        return mqtt_data.get("discovered_bots", [])
+    except Exception:
+        return []
+
+
 def get_container_list():
     """Get list of available containers."""
     try:
-        # Get active containers
         containers = api.get_active_containers(name_filter="hummingbot")
         container_names = [c.get("name", "") for c in containers if c.get("name")]
 
-        # Also get exited containers
         exited = api.get_exited_containers(name_filter="hummingbot")
         exited_names = [c.get("name", "") for c in exited if c.get("name")]
 
@@ -29,190 +36,214 @@ def get_container_list():
         return []
 
 
-def generate_sample_logs(container_name: str, lines: int) -> list:
-    """Generate sample log entries for demo."""
-    log_templates = [
-        "[{time}] INFO - Strategy initialized successfully",
-        "[{time}] INFO - Connected to exchange gateway",
-        "[{time}] DEBUG - Fetching market data...",
-        "[{time}] INFO - Position created: SOL-USDC",
-        "[{time}] INFO - Monitoring active positions",
-        "[{time}] DEBUG - Price update: ${price}",
-        "[{time}] INFO - Collecting fees: ${fee}",
-        "[{time}] WARNING - Price approaching range boundary",
-        "[{time}] INFO - Rebalancing position",
-        "[{time}] DEBUG - Heartbeat received",
-        "[{time}] INFO - Trade executed successfully",
-        "[{time}] WARNING - High gas prices detected",
-        "[{time}] INFO - Position still in range",
-        "[{time}] DEBUG - Checking position status...",
-        "[{time}] ERROR - Connection timeout, retrying...",
-    ]
-
-    logs = []
-    now = datetime.now()
-    random.seed(hash(container_name))
-
-    for i in range(min(lines, 50)):
-        time_str = (now - timedelta(minutes=i * 2)).strftime("%Y-%m-%d %H:%M:%S")
-        template = random.choice(log_templates)
-
-        log = template.format(
-            time=time_str,
-            price=f"{random.uniform(90, 110):.4f}",
-            fee=f"{random.uniform(0.01, 0.5):.4f}",
-        )
-        logs.append(log)
-
-    return logs[::-1]  # Reverse to show newest last
-
-
 # Page Header
-st.title("📋 Logs")
-st.subheader("View strategy and container logs")
+st.title("📋 Logs (Real Data)")
+st.subheader("View strategy and Gateway logs")
 
-# Container Selection Section
+# Log Source Selection
 with st.container(border=True):
-    st.info("🎯 **Container Selection:** Choose a container to view logs")
+    st.info("🎯 **Log Source Selection:** Choose what logs to view")
 
-    col1, col2, col3 = st.columns([2, 1, 1])
+    log_source = st.radio(
+        "Log Source",
+        options=["Gateway Logs", "Bot Logs"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
 
-    container_list = get_container_list()
+# Gateway Logs Section
+if log_source == "Gateway Logs":
+    with st.container(border=True):
+        st.success("🌐 **Gateway Logs:** Real-time logs from Hummingbot Gateway")
 
-    with col1:
-        if container_list:
-            selected_container = st.selectbox(
-                "Container",
-                options=container_list,
-                label_visibility="collapsed",
+        col1, col2 = st.columns([1, 1])
+
+        with col1:
+            lines = st.selectbox(
+                "Lines",
+                options=[50, 100, 200, 500],
+                index=1,
+                help="Number of log lines to display",
             )
-        else:
-            selected_container = None
-            st.warning("No containers available")
 
-    with col2:
-        lines = st.selectbox(
-            "Lines",
-            options=[50, 100, 200, 500],
-            index=1,
-            label_visibility="collapsed",
-            help="Number of log lines to display",
-        )
+        with col2:
+            if st.button("🔄 Refresh", use_container_width=True, type="primary"):
+                st.rerun()
 
-    with col3:
-        if st.button("🔄 Refresh", use_container_width=True, type="primary"):
-            st.rerun()
+    # Log Filters
+    with st.container(border=True):
+        st.warning("🔍 **Log Filters:** Filter and search logs")
 
-if not selected_container:
-    st.warning("⚠️ Select a container to view logs")
-    st.stop()
+        col1, col2 = st.columns([2, 1])
 
-# Container Status Section
-with st.container(border=True):
-    st.success(f"🐳 **Container Status:** {selected_container}")
+        with col1:
+            search = st.text_input(
+                "🔎 Search",
+                placeholder="Filter logs by keyword...",
+            )
 
+        with col2:
+            level = st.selectbox(
+                "📊 Level",
+                options=["ALL", "debug", "info", "warning", "error"],
+            )
+
+    # Log Viewer
+    with st.container(border=True):
+        st.info("📜 **Log Viewer:** Gateway logs")
+
+        try:
+            logs_response = api.get_gateway_logs(lines=lines)
+            logs_text = logs_response.get("logs", "")
+
+            if logs_text:
+                # Split into lines
+                log_lines = logs_text.strip().split("\n")
+
+                # Apply level filter
+                if level != "ALL":
+                    log_lines = [line for line in log_lines if f"| {level} |" in line.lower()]
+
+                # Apply search filter
+                if search:
+                    log_lines = [line for line in log_lines if search.lower() in line.lower()]
+
+                if log_lines:
+                    # Display logs
+                    log_display = "\n".join(log_lines[-lines:])
+                    st.code(log_display, language="log")
+
+                    # Log Statistics
+                    info_count = sum(1 for line in log_lines if "| info |" in line.lower())
+                    warn_count = sum(1 for line in log_lines if "| warning |" in line.lower() or "| warn |" in line.lower())
+                    error_count = sum(1 for line in log_lines if "| error |" in line.lower())
+                    debug_count = sum(1 for line in log_lines if "| debug |" in line.lower())
+
+                    st.markdown("**Log Statistics:**")
+                    col1, col2, col3, col4 = st.columns(4)
+                    with col1:
+                        st.metric("ℹ️ INFO", info_count)
+                    with col2:
+                        st.metric("⚠️ WARNING", warn_count)
+                    with col3:
+                        st.metric("❌ ERROR", error_count)
+                    with col4:
+                        st.metric("🔧 DEBUG", debug_count)
+                else:
+                    st.info("No logs match the current filters")
+            else:
+                st.info("No Gateway logs available")
+
+        except Exception as e:
+            st.error(f"Error fetching Gateway logs: {e}")
+
+# Bot Logs Section
+else:
+    bot_list = get_bot_list()
+
+    with st.container(border=True):
+        st.success("🤖 **Bot Logs:** Logs from connected bots via MQTT")
+
+        col1, col2 = st.columns([2, 1])
+
+        with col1:
+            if bot_list:
+                selected_bot = st.selectbox(
+                    "Select Bot",
+                    options=bot_list,
+                    label_visibility="collapsed",
+                )
+            else:
+                selected_bot = None
+                st.warning("No bots connected via MQTT")
+
+        with col2:
+            if st.button("🔄 Refresh", use_container_width=True, type="primary"):
+                st.rerun()
+
+    if not selected_bot:
+        st.warning("⚠️ No bots available. Start a bot to view its logs.")
+        st.stop()
+
+    # Get bot status which includes logs
     try:
-        containers = api.get_active_containers()
-        container = next(
-            (c for c in containers if c.get("name") == selected_container),
-            None
-        )
+        status_response = api.get_bot_status(selected_bot)
+        bot_data = status_response.get("data", {})
 
-        if container:
-            col1, col2, col3 = st.columns(3)
+        general_logs = bot_data.get("general_logs", [])
+        error_logs = bot_data.get("error_logs", [])
+
+        # Log Filters
+        with st.container(border=True):
+            st.warning("🔍 **Log Filters:** Filter and search logs")
+
+            col1, col2 = st.columns([2, 1])
 
             with col1:
-                status = container.get("status", "Unknown")
-                if "Up" in status:
-                    st.metric("📊 Status", f"🟢 {status}")
-                else:
-                    st.metric("📊 Status", f"🟡 {status}")
+                search = st.text_input(
+                    "🔎 Search",
+                    placeholder="Filter logs by keyword...",
+                    key="bot_search",
+                )
 
             with col2:
-                image = container.get("image", "Unknown")
-                st.metric("🖼️ Image", image[:30] + "..." if len(image) > 30 else image)
+                log_type = st.selectbox(
+                    "📊 Log Type",
+                    options=["All Logs", "General Logs", "Error Logs"],
+                )
 
-            with col3:
-                created = container.get("created", "Unknown")
-                st.metric("📅 Created", created)
-        else:
-            # Check exited containers
-            exited = api.get_exited_containers()
-            container = next(
-                (c for c in exited if c.get("name") == selected_container),
-                None
-            )
+        # Log Viewer
+        with st.container(border=True):
+            st.info(f"📜 **Log Viewer:** {selected_bot}")
 
-            if container:
-                st.warning(f"⚠️ Container {selected_container} is stopped")
+            # Combine and format logs
+            all_logs = []
+
+            if log_type in ["All Logs", "General Logs"]:
+                for log in general_logs:
+                    timestamp = datetime.fromtimestamp(log.get("timestamp", 0)).strftime("%Y-%m-%d %H:%M:%S")
+                    level = log.get("level_name", "INFO")
+                    msg = log.get("msg", "")
+                    all_logs.append(f"[{timestamp}] {level} - {msg}")
+
+            if log_type in ["All Logs", "Error Logs"]:
+                for log in error_logs:
+                    timestamp = datetime.fromtimestamp(log.get("timestamp", 0)).strftime("%Y-%m-%d %H:%M:%S")
+                    level = log.get("level_name", "ERROR")
+                    msg = log.get("msg", "")
+                    all_logs.append(f"[{timestamp}] {level} - {msg}")
+
+            # Sort by timestamp
+            all_logs.sort()
+
+            # Apply search filter
+            if search:
+                all_logs = [log for log in all_logs if search.lower() in log.lower()]
+
+            if all_logs:
+                log_display = "\n".join(all_logs[-200:])  # Show last 200 lines
+                st.code(log_display, language="log")
+
+                # Statistics
+                st.markdown("**Log Statistics:**")
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("📝 General Logs", len(general_logs))
+                with col2:
+                    st.metric("❌ Error Logs", len(error_logs))
+                with col3:
+                    st.metric("📊 Total", len(general_logs) + len(error_logs))
             else:
-                st.error(f"❌ Container {selected_container} not found")
+                st.info("No logs available for this bot")
 
     except Exception as e:
-        st.error(f"Error getting container info: {e}")
+        st.error(f"Error fetching bot logs: {e}")
 
-# Log Filters Section
-with st.container(border=True):
-    st.warning("🔍 **Log Filters:** Filter and search logs")
-
-    col1, col2 = st.columns([2, 1])
-
-    with col1:
-        search = st.text_input(
-            "🔎 Search",
-            placeholder="Filter logs by keyword...",
-        )
-
-    with col2:
-        level = st.selectbox(
-            "📊 Level",
-            options=["ALL", "DEBUG", "INFO", "WARNING", "ERROR"],
-        )
-
-# Log Viewer Section
-with st.container(border=True):
-    st.info(f"📜 **Log Viewer:** Showing logs for {selected_container}")
-
-    # Command hint
-    with st.expander("💻 View Live Logs (Terminal Command)"):
-        st.code(f"docker logs -f --tail {lines} {selected_container}", language="bash")
-
-    # Generate/fetch logs
-    sample_logs = generate_sample_logs(selected_container, lines)
-
-    # Apply filters
-    if level != "ALL":
-        sample_logs = [log for log in sample_logs if level in log]
-
-    if search:
-        sample_logs = [log for log in sample_logs if search.lower() in log.lower()]
-
-    # Display logs
-    if sample_logs:
-        log_text = "\n".join(sample_logs)
-        st.code(log_text, language="log")
+# Docker Command Hint
+with st.expander("💻 View Live Logs via Docker (Terminal Command)"):
+    container_list = get_container_list()
+    if container_list:
+        selected_container = st.selectbox("Select Container", options=container_list)
+        st.code(f"docker logs -f --tail 100 {selected_container}", language="bash")
     else:
-        st.info("No logs match the current filters")
-
-# Log Statistics Section
-with st.container(border=True):
-    st.success("📊 **Log Statistics:** Summary of log levels")
-
-    # Recalculate from original logs before filtering
-    all_logs = generate_sample_logs(selected_container, lines)
-
-    col1, col2, col3, col4 = st.columns(4)
-
-    info_count = sum(1 for log in all_logs if "INFO" in log)
-    warn_count = sum(1 for log in all_logs if "WARNING" in log)
-    error_count = sum(1 for log in all_logs if "ERROR" in log)
-    debug_count = sum(1 for log in all_logs if "DEBUG" in log)
-
-    with col1:
-        st.metric("ℹ️ INFO", info_count)
-    with col2:
-        st.metric("⚠️ WARNING", warn_count)
-    with col3:
-        st.metric("❌ ERROR", error_count)
-    with col4:
-        st.metric("🔧 DEBUG", debug_count)
+        st.info("No containers available")

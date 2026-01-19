@@ -17,55 +17,25 @@ DOCKER_IMAGES = [
 
 api = get_backend_api_client()
 
+
+def generate_instance_name(config_name: str = None) -> str:
+    """Generate instance name based on config name with timestamp suffix."""
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    if config_name:
+        # Remove .yml extension if present and clean the name
+        base_name = config_name.replace(".yml", "").replace(".yaml", "")
+        # Truncate if too long (keep it reasonable for container names)
+        if len(base_name) > 30:
+            base_name = base_name[:30]
+        return f"{base_name}-{timestamp}"
+    return f"lp-strategy-{timestamp}"
+
+
 # Page Header
 st.title("🚀 Deploy Strategy")
 st.subheader("Configure and deploy your LP trading strategy")
 
-# Bot Configuration Section
-with st.container(border=True):
-    st.info("🤖 **Bot Configuration:** Set up your bot instance with basic configuration")
-
-    col1, col2, col3 = st.columns(3)
-
-    with col1:
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        instance_name = st.text_input(
-            "Instance Name",
-            value=f"lp-strategy-{timestamp}",
-            placeholder="Enter a unique name for your bot instance",
-            help="Unique name for this strategy instance",
-        )
-
-    with col2:
-        try:
-            available_credentials = api.list_accounts() if hasattr(api, 'list_accounts') else ["master_account"]
-            credentials = st.selectbox(
-                "Credentials Profile",
-                options=available_credentials if available_credentials else ["master_account"],
-                help="Credentials profile for API keys",
-            )
-        except Exception:
-            credentials = st.text_input(
-                "Credentials Profile",
-                value="master_account",
-                help="Credentials profile for API keys",
-            )
-
-    with col3:
-        try:
-            all_images = api.get_available_images("hummingbot") if hasattr(api, 'get_available_images') else DOCKER_IMAGES
-            if not all_images:
-                all_images = DOCKER_IMAGES
-        except Exception:
-            all_images = DOCKER_IMAGES
-
-        image_name = st.selectbox(
-            "Hummingbot Image",
-            options=all_images,
-            help="Hummingbot Docker image to use",
-        )
-
-# Configuration Selection Section
+# Configuration Selection Section (moved to top so we can generate instance name based on config)
 with st.container(border=True):
     st.success("🎛️ **Configuration Selection:** Select the strategy configuration to deploy")
 
@@ -92,10 +62,12 @@ with st.container(border=True):
 
     st.divider()
 
+    selected_config = None
+    selected_script = None
+
     if deploy_method == "From Existing Config":
         if not config_list:
             st.warning("⚠️ No configurations found. Please create a configuration first in the Config page.")
-            selected_config = None
         else:
             # Build data for config selection table
             data = []
@@ -154,8 +126,6 @@ with st.container(border=True):
                             st.json(config_data)
                         except Exception as e:
                             st.error(f"Error loading config: {e}")
-            else:
-                selected_config = None
     else:
         # Quick deploy - select script
         lp_scripts = [s for s in scripts if any(x in s.lower() for x in ["lp", "gateway", "amm"])]
@@ -167,7 +137,51 @@ with st.container(border=True):
             options=lp_scripts,
             help="Select the strategy script",
         )
-        selected_config = None
+
+# Bot Configuration Section (now comes after config selection)
+with st.container(border=True):
+    st.info("🤖 **Bot Configuration:** Set up your bot instance with basic configuration")
+
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        # Generate instance name based on selected config
+        default_name = generate_instance_name(selected_config)
+        instance_name = st.text_input(
+            "Instance Name",
+            value=default_name,
+            placeholder="Auto-generated from config name",
+            help="Unique name for this strategy instance (auto-generated from config name + timestamp)",
+        )
+
+    with col2:
+        try:
+            available_credentials = api.list_accounts() if hasattr(api, 'list_accounts') else ["master_account"]
+            credentials = st.selectbox(
+                "Credentials Profile",
+                options=available_credentials if available_credentials else ["master_account"],
+                help="Credentials profile for API keys",
+            )
+        except Exception:
+            credentials = st.text_input(
+                "Credentials Profile",
+                value="master_account",
+                help="Credentials profile for API keys",
+            )
+
+    with col3:
+        try:
+            all_images = api.get_available_images("hummingbot") if hasattr(api, 'get_available_images') else DOCKER_IMAGES
+            if not all_images:
+                all_images = DOCKER_IMAGES
+        except Exception:
+            all_images = DOCKER_IMAGES
+
+        image_name = st.selectbox(
+            "Hummingbot Image",
+            options=all_images,
+            help="Hummingbot Docker image to use",
+        )
 
 # Deploy Actions Section
 with st.container(border=True):
@@ -241,9 +255,9 @@ with st.container(border=True):
             for run in runs_data:
                 data.append({
                     "Bot Name": run.get("bot_name", "Unknown"),
+                    "Config": run.get("config_name", "N/A"),
                     "Status": run.get("run_status", "UNKNOWN"),
-                    "Deployed At": run.get("deployed_at", "")[:10] if run.get("deployed_at") else "N/A",
-                    "Script": run.get("script", "N/A"),
+                    "Deployed At": run.get("deployed_at", "")[:19] if run.get("deployed_at") else "N/A",
                 })
 
             st.dataframe(

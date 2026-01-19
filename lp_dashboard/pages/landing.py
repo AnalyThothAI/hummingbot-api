@@ -1,5 +1,4 @@
 """Landing page - LP Dashboard home."""
-import random
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -86,7 +85,8 @@ except Exception:
 
 try:
     gateway = api.get_gateway_status()
-    gw_status = "Online" if gateway.get("data", {}).get("status") == "ok" else "Offline"
+    # API returns {"running": bool, "container_id": str, "port": int, ...}
+    gw_status = "Online" if gateway.get("running") else "Offline"
 except Exception:
     gw_status = "Unknown"
 
@@ -145,38 +145,73 @@ st.divider()
 col1, col2 = st.columns([2, 1])
 
 with col1:
-    st.markdown("### 📈 Portfolio Performance (Sample)")
+    st.markdown("### 📈 Portfolio Performance (Real Data)")
 
-    # Generate sample performance data
-    dates = pd.date_range(start=datetime.now() - timedelta(days=30), end=datetime.now(), freq='D')
-    portfolio_values = []
-    base_value = 10000
-    for i in range(len(dates)):
-        change = random.uniform(-0.02, 0.03)
-        base_value *= (1 + change)
-        portfolio_values.append(base_value)
+    # Get real portfolio history data
+    try:
+        now = datetime.now()
+        start_time = int((now - timedelta(days=7)).timestamp() * 1000)
+        end_time = int(now.timestamp() * 1000)
 
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=dates,
-        y=portfolio_values,
-        mode='lines+markers',
-        line=dict(color='#4CAF50', width=3),
-        fill='tonexty',
-        fillcolor='rgba(76, 175, 80, 0.1)',
-        name='Portfolio Value'
-    ))
+        history_response = api.get_portfolio_history(
+            start_time=start_time,
+            end_time=end_time,
+            interval="1h",
+            limit=168,  # 7 days * 24 hours
+        )
 
-    fig.update_layout(
-        template='plotly_dark',
-        height=400,
-        showlegend=False,
-        margin=dict(l=0, r=0, t=0, b=0),
-        xaxis=dict(showgrid=False),
-        yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.1)')
-    )
+        history_data = history_response.get("data", [])
 
-    st.plotly_chart(fig, use_container_width=True)
+        if history_data:
+            # Parse history data
+            timestamps = []
+            portfolio_values = []
+
+            for record in reversed(history_data):  # Reverse to get chronological order
+                ts = record.get("timestamp")
+                if ts:
+                    timestamps.append(pd.to_datetime(ts))
+
+                    # Calculate total value from all accounts
+                    # Data structure: {"timestamp": ..., "state": {"account": {"connector": [{"value": ...}]}}}
+                    total_value = 0
+                    state = record.get("state", {})
+                    for account_name, account_data in state.items():
+                        if isinstance(account_data, dict):
+                            for connector_name, tokens in account_data.items():
+                                if isinstance(tokens, list):
+                                    for token_data in tokens:
+                                        total_value += token_data.get("value", 0)
+                    portfolio_values.append(total_value)
+
+            if timestamps and portfolio_values:
+                fig = go.Figure()
+                fig.add_trace(go.Scatter(
+                    x=timestamps,
+                    y=portfolio_values,
+                    mode='lines+markers',
+                    line=dict(color='#4CAF50', width=3),
+                    fill='tonexty',
+                    fillcolor='rgba(76, 175, 80, 0.1)',
+                    name='Portfolio Value'
+                ))
+
+                fig.update_layout(
+                    template='plotly_dark',
+                    height=400,
+                    showlegend=False,
+                    margin=dict(l=0, r=0, t=0, b=0),
+                    xaxis=dict(showgrid=False),
+                    yaxis=dict(showgrid=True, gridcolor='rgba(255,255,255,0.1)', tickprefix='$')
+                )
+
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("No portfolio history data available yet. Start trading to see your performance!")
+        else:
+            st.info("No portfolio history data available yet. Start trading to see your performance!")
+    except Exception as e:
+        st.warning(f"Could not load portfolio history: {e}")
 
 with col2:
     st.markdown("### 🎯 Strategy Status")

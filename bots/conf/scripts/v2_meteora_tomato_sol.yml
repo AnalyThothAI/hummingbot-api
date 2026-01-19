@@ -8,13 +8,13 @@ price_source: pool_info
 trading_pair: TOMATO-SOL
 pool_address: 2QGiarpiwwEpvt7aTEEdTDikb1HqFZBKFaxuDJZUoXx6
 
-target_price: 0.00017
+target_price: 0.00015
 trigger_above: true
 
 base_amount: 0
 quote_amount: 0.5
 
-position_width_pct: 18
+position_width_pct: 28
 swap_slippage_pct: 1.0
 swap_retry_attempts: 3
 swap_retry_delay_sec: 1
@@ -35,7 +35,7 @@ budget_all_or_none: true
 gas_token_symbol: SOL
 gas_min_reserve: 0.06
 
-stop_loss_pnl_pct: 0.15
+stop_loss_pnl_pct: 0.2
 stop_loss_pause_sec: 1800
 auto_liquidate_on_stop_loss: true
 

@@ -263,6 +263,109 @@ class LPDashboardAPI:
         """Get available Gateway connectors."""
         return self._request("GET", "/gateway/connectors")
 
+    def get_gateway_logs(self, lines: int = 100) -> Dict[str, Any]:
+        """Get Gateway logs."""
+        return self._request("GET", "/gateway/logs", params={"lines": lines})
+
+    # ==================== Portfolio ====================
+
+    def get_portfolio_state(
+        self,
+        account_names: Optional[List[str]] = None,
+        connector_names: Optional[List[str]] = None,
+        refresh: bool = False,
+        skip_gateway: bool = False,
+    ) -> Dict[str, Any]:
+        """Get current portfolio state."""
+        payload = {
+            "refresh": refresh,
+            "skip_gateway": skip_gateway,
+        }
+        if account_names:
+            payload["account_names"] = account_names
+        if connector_names:
+            payload["connector_names"] = connector_names
+        return self._request("POST", "/portfolio/state", json=payload)
+
+    def get_portfolio_history(
+        self,
+        account_names: Optional[List[str]] = None,
+        connector_names: Optional[List[str]] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        interval: str = "1h",
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get portfolio history."""
+        payload = {
+            "interval": interval,
+            "limit": limit,
+        }
+        if account_names:
+            payload["account_names"] = account_names
+        if connector_names:
+            payload["connector_names"] = connector_names
+        if start_time:
+            payload["start_time"] = start_time
+        if end_time:
+            payload["end_time"] = end_time
+        if cursor:
+            payload["cursor"] = cursor
+        return self._request("POST", "/portfolio/history", json=payload)
+
+    def get_portfolio_distribution(
+        self,
+        account_names: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Get portfolio distribution by tokens."""
+        payload = {}
+        if account_names:
+            payload["account_names"] = account_names
+        return self._request("POST", "/portfolio/distribution", json=payload)
+
+    # ==================== Trading ====================
+
+    def get_trades(
+        self,
+        account_names: Optional[List[str]] = None,
+        connector_names: Optional[List[str]] = None,
+        trading_pairs: Optional[List[str]] = None,
+        start_time: Optional[int] = None,
+        end_time: Optional[int] = None,
+        limit: int = 100,
+        cursor: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Get trade history."""
+        payload = {"limit": limit}
+        if account_names:
+            payload["account_names"] = account_names
+        if connector_names:
+            payload["connector_names"] = connector_names
+        if trading_pairs:
+            payload["trading_pairs"] = trading_pairs
+        if start_time:
+            payload["start_time"] = start_time
+        if end_time:
+            payload["end_time"] = end_time
+        if cursor:
+            payload["cursor"] = cursor
+        return self._request("POST", "/trading/trades", json=payload)
+
+    # ==================== CLMM Positions ====================
+
+    def get_clmm_positions(
+        self,
+        status: Optional[str] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> Dict[str, Any]:
+        """Get CLMM positions from database."""
+        payload = {"limit": limit, "offset": offset}
+        if status:
+            payload["status"] = status
+        return self._request("POST", "/gateway/clmm/positions/search", json=payload)
+
     # ==================== Health Check ====================
 
     def health_check(self) -> Dict[str, Any]:

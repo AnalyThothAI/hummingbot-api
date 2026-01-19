@@ -70,7 +70,8 @@ def render_connection_status():
     # Gateway Status
     try:
         gateway_response = api.get_gateway_status()
-        if gateway_response.get("status") == "online":
+        # API returns {"running": bool, "container_id": str, "port": int, ...}
+        if gateway_response.get("running"):
             st.markdown(":white_check_mark: **Gateway**: Online")
         else:
             st.markdown(":orange_circle: **Gateway**: Offline")

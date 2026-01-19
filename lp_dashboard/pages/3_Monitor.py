@@ -1,7 +1,6 @@
 """Monitor page - Real-time strategy monitoring."""
 import time
 from datetime import datetime, timedelta
-import random
 
 import pandas as pd
 import plotly.express as px
@@ -186,68 +185,148 @@ performance_section()
 with st.container(border=True):
     st.info("📉 **Charts:** Visual representation of strategy performance")
 
-    tab1, tab2 = st.tabs(["📈 PnL History", "🎯 Position Range"])
+    tab1, tab2 = st.tabs(["📈 PnL History (Real Data)", "🎯 Position Range (Real Data)"])
 
     with tab1:
-        # Generate sample PnL history (replace with real data when available)
-        now = datetime.now()
-        timestamps = [now - timedelta(hours=i) for i in range(24, 0, -1)]
-        random.seed(hash(selected_bot))
-        pnl_values = []
-        current = 0
-        for _ in range(24):
-            current += random.uniform(-10, 15)
-            pnl_values.append(current)
+        # Get real PnL history from portfolio history
+        try:
+            now = datetime.now()
+            start_time = int((now - timedelta(hours=24)).timestamp() * 1000)
+            end_time = int(now.timestamp() * 1000)
 
-        df = pd.DataFrame({
-            "Time": timestamps,
-            "PnL": pnl_values,
-        })
+            history_response = api.get_portfolio_history(
+                start_time=start_time,
+                end_time=end_time,
+                interval="15m",
+                limit=96,  # 24 hours * 4 (15-min intervals)
+            )
 
-        fig = px.area(
-            df,
-            x="Time",
-            y="PnL",
-            title="PnL History (24h)",
-            color_discrete_sequence=["#00D26A"],
-        )
-        fig.update_layout(
-            template="plotly_dark",
-            height=400,
-            margin=dict(l=20, r=20, t=50, b=20),
-            xaxis_title="Time",
-            yaxis_title="PnL (USD)",
-        )
-        st.plotly_chart(fig, use_container_width=True)
+            history_data = history_response.get("data", [])
+
+            if history_data and len(history_data) > 1:
+                # Parse history data to calculate PnL changes
+                timestamps = []
+                pnl_values = []
+                base_value = None
+
+                for record in reversed(history_data):  # Reverse to get chronological order
+                    ts = record.get("timestamp")
+                    if ts:
+                        timestamps.append(pd.to_datetime(ts))
+
+                        # Calculate total value from all accounts
+                        # Data structure: {"timestamp": ..., "state": {"account": {"connector": [{"value": ...}]}}}
+                        total_value = 0
+                        state = record.get("state", {})
+                        for account_name, account_data in state.items():
+                            if isinstance(account_data, dict):
+                                for connector_name, tokens in account_data.items():
+                                    if isinstance(tokens, list):
+                                        for token_data in tokens:
+                                            total_value += token_data.get("value", 0)
+
+                        if base_value is None:
+                            base_value = total_value
+
+                        # PnL is the change from base value
+                        pnl_values.append(total_value - base_value)
+
+                if timestamps and pnl_values:
+                    df = pd.DataFrame({
+                        "Time": timestamps,
+                        "PnL": pnl_values,
+                    })
+
+                    fig = px.area(
+                        df,
+                        x="Time",
+                        y="PnL",
+                        title="PnL History (24h)",
+                        color_discrete_sequence=["#00D26A"],
+                    )
+                    fig.update_layout(
+                        template="plotly_dark",
+                        height=400,
+                        margin=dict(l=20, r=20, t=50, b=20),
+                        xaxis_title="Time",
+                        yaxis_title="PnL (USD)",
+                    )
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No PnL history data available yet.")
+            else:
+                st.info("No PnL history data available yet. The bot needs to run for a while to collect data.")
+        except Exception as e:
+            st.warning(f"Could not load PnL history: {e}")
 
     with tab2:
-        position = bot_data.get("position", {})
-        current_price = position.get("current_price", 100)
-        lower_price = position.get("lower_price", 90)
-        upper_price = position.get("upper_price", 110)
+        # Get real CLMM positions from database
+        try:
+            positions_response = api.get_clmm_positions(limit=10)
+            positions_data = positions_response.get("data", [])
 
-        # Simple position range visualization
-        in_range = lower_price <= current_price <= upper_price
+            if positions_data:
+                # Get the most recent position (first one, as they're sorted by created_at desc)
+                latest_position = positions_data[0]
 
-        col1, col2, col3 = st.columns(3)
+                current_price = latest_position.get("current_price", 0)
+                lower_price = latest_position.get("lower_price", 0)
+                upper_price = latest_position.get("upper_price", 0)
+                in_range_status = latest_position.get("in_range", "UNKNOWN")
+                trading_pair = latest_position.get("trading_pair", "Unknown")
+                position_status = latest_position.get("status", "UNKNOWN")
+                pnl_summary = latest_position.get("pnl_summary", {})
 
-        with col1:
-            st.metric("📉 Lower Bound", f"${lower_price:.4f}")
+                # Display position info header
+                status_emoji = "🟢" if position_status == "OPEN" else "🔴"
+                range_emoji = "✅" if in_range_status == "IN_RANGE" else "⚠️"
+                st.caption(f"{status_emoji} Position: {trading_pair} | {range_emoji} {in_range_status}")
 
-        with col2:
-            if in_range:
-                st.metric("💹 Current Price", f"${current_price:.4f}", delta="In Range")
+                col1, col2, col3 = st.columns(3)
+
+                with col1:
+                    st.metric("📉 Lower Bound", f"{lower_price:.8f}")
+
+                with col2:
+                    in_range = in_range_status == "IN_RANGE"
+                    if in_range:
+                        st.metric("💹 Current Price", f"{current_price:.8f}", delta="In Range")
+                    else:
+                        st.metric("💹 Current Price", f"{current_price:.8f}", delta="Out of Range", delta_color="inverse")
+
+                with col3:
+                    st.metric("📈 Upper Bound", f"{upper_price:.8f}")
+
+                # Progress bar showing position in range
+                if upper_price > lower_price:
+                    range_pct = (current_price - lower_price) / (upper_price - lower_price)
+                    range_pct = max(0, min(1, range_pct))
+                    st.progress(range_pct, text=f"Position: {range_pct:.1%} through range")
+
+                # PnL Summary
+                if pnl_summary:
+                    st.markdown("**PnL Summary:**")
+                    pnl_col1, pnl_col2, pnl_col3, pnl_col4 = st.columns(4)
+                    with pnl_col1:
+                        total_pnl = pnl_summary.get("total_pnl_quote", 0)
+                        total_pnl_pct = pnl_summary.get("total_pnl_pct", 0)
+                        st.metric("Total PnL", f"${total_pnl:.6f}", delta=f"{total_pnl_pct:.2f}%")
+                    with pnl_col2:
+                        fees = pnl_summary.get("total_fees_value_quote", 0)
+                        st.metric("Fees Earned", f"${fees:.6f}")
+                    with pnl_col3:
+                        il = pnl_summary.get("impermanent_loss_quote", 0)
+                        st.metric("IL", f"${il:.6f}")
+                    with pnl_col4:
+                        apr = pnl_summary.get("fee_apr_estimate")
+                        if apr:
+                            st.metric("Fee APR", f"{apr:.1f}%")
+                        else:
+                            st.metric("Fee APR", "N/A")
             else:
-                st.metric("💹 Current Price", f"${current_price:.4f}", delta="Out of Range", delta_color="inverse")
-
-        with col3:
-            st.metric("📈 Upper Bound", f"${upper_price:.4f}")
-
-        # Progress bar showing position in range
-        if upper_price > lower_price:
-            range_pct = (current_price - lower_price) / (upper_price - lower_price)
-            range_pct = max(0, min(1, range_pct))
-            st.progress(range_pct, text=f"Position: {range_pct:.1%} through range")
+                st.info("No CLMM positions found. Open a position to see range data.")
+        except Exception as e:
+            st.warning(f"Could not load position data: {e}")
 
 
 # Controller Details Section
