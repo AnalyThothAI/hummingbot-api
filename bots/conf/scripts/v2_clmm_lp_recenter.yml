@@ -1,0 +1,61 @@
+script_file_name: v2_clmm_lp_recenter.py
+
+connector: meteora/clmm
+router_connector: jupiter/router
+
+# 价格源：pool_info 或 amm_gateway
+price_source: pool_info
+price_connector: ""           # 留空则使用 router_connector
+price_order_amount_in_base: 1
+target_price: 0        # 入场触发价/中心价（0=禁用）
+trigger_above: true
+
+trading_pair: SOL-USDC
+pool_address: ""
+
+# 预算：只给 quote 也可以；脚本会自动按目标比例换仓
+base_amount: 0
+quote_amount: 0.2
+
+# 固定区间（无再平衡）
+position_width_pct: 12
+check_interval: 2
+status_log_interval_sec: 30
+suppress_rate_oracle_warnings: true
+collect_fees_interval_sec: 1200
+collect_fees_to_quote: false
+collect_fees_swap_min_quote_value: 0
+collect_fees_min_quote_value: 0
+max_rebalances_per_hour: 0
+
+# 止损与清算（0-1 比例）
+stop_loss_pnl_pct: 0.2
+stop_loss_pause_sec: 1800
+auto_liquidate_on_stop_loss: true
+reenter_enabled: true
+
+# 预算保护（quote_floor 为额外保留，gas_min_reserve 为 gas 预留）
+quote_floor: 0.02
+budget_max_wallet_pct: 0
+budget_all_or_none: true
+gas_token_symbol: SOL
+gas_min_reserve: 0.06
+
+# 自动换仓
+auto_swap_enabled: true
+target_base_value_pct: 0.5
+swap_min_quote_value: 0.01
+swap_safety_buffer_pct: 2
+swap_timeout_sec: 120
+swap_poll_interval_sec: 2
+swap_slippage_pct: 1
+swap_retry_attempts: 0
+swap_retry_delay_sec: 1
+close_dust_quote_value: 0
+
+# 可靠性
+open_timeout_sec: 180
+close_timeout_sec: 180
+pause_on_failure_sec: 180
+max_consecutive_failures: 4
+orphan_scan_interval_sec: 120

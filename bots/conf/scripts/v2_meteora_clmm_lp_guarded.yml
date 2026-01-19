@@ -1,0 +1,49 @@
+script_file_name: v2_meteora_clmm_lp_guarded.py
+
+connector: meteora/clmm
+router_connector: jupiter/router
+price_source: pool_info
+
+trading_pair: TOMATO-SOL
+pool_address: 2QGiarpiwwEpvt7aTEEdTDikb1HqFZBKFaxuDJZUoXx6
+
+# 入场触发（0=禁用）
+target_price: 0.00017
+trigger_above: true
+
+# 预算：只给 SOL 也可以；脚本会自动 swap 一半变成 GAS
+base_amount: 0
+quote_amount: 0.5
+
+position_width_pct: 18
+swap_slippage_pct: 1.0
+swap_retry_attempts: 3
+swap_retry_delay_sec: 1
+max_rebalances_per_hour: 5
+
+# 诊断日志
+status_log_interval_sec: 60
+
+collect_fees_interval_sec: 1800
+rebalance_collect_fees_ratio_pct: 0.5
+rebalance_collect_fees_min_quote_value: 0.01
+collect_fees_to_quote: false
+collect_fees_swap_min_quote_value: 0
+collect_fees_min_quote_value: 0
+
+
+# 预算保护（quote_floor 为额外保留，gas_min_reserve 为 gas 预留）
+quote_floor: 0.06
+budget_max_wallet_pct: 0.90
+budget_all_or_none: true
+
+gas_token_symbol: SOL
+gas_min_reserve: 0.06
+
+# 止损（0-1 比例）
+stop_loss_pnl_pct: 0.15
+stop_loss_pause_sec: 1800
+auto_liquidate_on_stop_loss: true
+
+reenter_enabled: true
+reopen_delay_sec: 5
