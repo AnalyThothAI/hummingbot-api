@@ -33,12 +33,39 @@ networks_response = backend_api_request("GET", "/gateway/networks")
 api_online = connectors_response.get("ok")
 
 
-def build_connector_rows(connectors_payload):
+def build_connector_rows_and_meta(connectors_payload):
     rows = []
+    meta = {}
+
     if isinstance(connectors_payload, dict):
         connectors_value = connectors_payload.get("connectors", connectors_payload)
     else:
         connectors_value = connectors_payload
+
+    def collect_meta(name, details):
+        if not name:
+            return
+        chain = None
+        networks = []
+        trading_types = []
+        if isinstance(details, dict):
+            chain = details.get("chain") or details.get("chain_type") or details.get("chainName")
+            raw_networks = details.get("networks") or details.get("network") or []
+            if isinstance(raw_networks, list):
+                networks = [str(item) for item in raw_networks]
+            elif raw_networks:
+                networks = [str(raw_networks)]
+            raw_trading = details.get("trading_types") or details.get("trading_type") or []
+            if isinstance(raw_trading, list):
+                trading_types = [str(item) for item in raw_trading]
+            elif raw_trading:
+                trading_types = [str(raw_trading)]
+
+        meta[name] = {
+            "chain": chain,
+            "networks": networks,
+            "trading_types": trading_types,
+        }
 
     if isinstance(connectors_value, dict):
         for name, details in connectors_value.items():
@@ -55,12 +82,33 @@ def build_connector_rows(connectors_payload):
                     row["trading_types"] = ", ".join(str(item) for item in trading_types)
                 elif trading_types:
                     row["trading_types"] = str(trading_types)
+            collect_meta(name, details)
             rows.append(row)
     elif isinstance(connectors_value, list):
         for item in connectors_value:
-            rows.append({"connector": str(item)})
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("connector") or item.get("connector_name")
+                if name:
+                    row = {"connector": name}
+                    row["chain"] = item.get("chain") or item.get("chain_type") or item.get("chainName")
+                    networks = item.get("networks") or item.get("network")
+                    if isinstance(networks, list):
+                        row["networks"] = ", ".join(str(val) for val in networks)
+                    elif networks:
+                        row["networks"] = str(networks)
+                    trading_types = item.get("trading_types") or item.get("trading_type")
+                    if isinstance(trading_types, list):
+                        row["trading_types"] = ", ".join(str(val) for val in trading_types)
+                    elif trading_types:
+                        row["trading_types"] = str(trading_types)
+                    rows.append(row)
+                    collect_meta(name, item)
+                else:
+                    rows.append({"connector": str(item)})
+            else:
+                rows.append({"connector": str(item)})
 
-    return rows
+    return rows, meta
 
 
 def parse_chain_options(chains_payload):
@@ -82,6 +130,28 @@ def parse_chain_options(chains_payload):
                     if chain:
                         chains.append(chain)
     return sorted({str(chain) for chain in chains})
+
+
+def parse_chain_defaults(chains_payload):
+    defaults = {}
+    if isinstance(chains_payload, dict):
+        chains_value = chains_payload.get("chains", chains_payload)
+    else:
+        chains_value = chains_payload
+    if isinstance(chains_value, list):
+        for item in chains_value:
+            if isinstance(item, dict):
+                chain = item.get("chain")
+                default_network = item.get("defaultNetwork") or item.get("default_network")
+                if chain and default_network:
+                    defaults[str(chain)] = str(default_network)
+    elif isinstance(chains_value, dict):
+        for chain, details in chains_value.items():
+            if isinstance(details, dict):
+                default_network = details.get("defaultNetwork") or details.get("default_network")
+                if default_network:
+                    defaults[str(chain)] = str(default_network)
+    return defaults
 
 
 def parse_network_options(networks_payload, chains_payload):
@@ -133,12 +203,20 @@ def parse_network_options(networks_payload, chains_payload):
 
 
 def select_connector(label, key_prefix, connector_options):
+    def normalize_value(value):
+        if isinstance(value, dict):
+            for key in ("name", "connector", "connector_name"):
+                if value.get(key):
+                    return str(value.get(key))
+            return str(value)
+        return str(value)
+
     if connector_options:
         choices = connector_options + ["(custom)"]
         selection = st.selectbox(label, choices, key=key_prefix)
         if selection == "(custom)":
             return st.text_input("Connector Name", key=f"{key_prefix}_custom")
-        return selection
+        return normalize_value(selection)
     return st.text_input("Connector Name", key=f"{key_prefix}_text")
 
 
@@ -180,12 +258,71 @@ def format_api_error(response, fallback: str):
     return error or fallback
 
 
+def networks_for_connector(connector_name: str, fallback: list[str]):
+    meta = connectors_meta.get(connector_name) if connector_name else None
+    if not meta:
+        return fallback
+    chain = meta.get("chain")
+    networks = meta.get("networks") or []
+    if chain and networks:
+        return sorted({f"{chain}-{network}" for network in networks})
+    return fallback
+
+
+def default_network_id_for_connector(
+    connector_name: str,
+    network_options: list[str],
+    chain_defaults: dict[str, str],
+):
+    if not connector_name:
+        return None
+    meta = connectors_meta.get(connector_name)
+    if not meta:
+        return None
+    chain = meta.get("chain")
+    if not chain:
+        return None
+    default_network = chain_defaults.get(chain)
+    if default_network:
+        candidate = f"{chain}-{default_network}"
+        if candidate in network_options:
+            return candidate
+    candidates = [opt for opt in network_options if opt.startswith(f"{chain}-")] or list(network_options)
+    for suffix in ("mainnet", "mainnet-beta"):
+        for option in candidates:
+            if option.endswith(f"-{suffix}"):
+                return option
+    return candidates[0] if candidates else None
+
+
+def set_default_selection(state_key: str, context_key: str, context_value: str, default_value: str | None):
+    if not default_value:
+        return
+    if st.session_state.get(context_key) != context_value:
+        st.session_state[context_key] = context_value
+        st.session_state[state_key] = default_value
+
+
+def set_default_choice(state_key: str, default_value: str, options: list[str]):
+    if default_value in options and state_key not in st.session_state:
+        st.session_state[state_key] = default_value
+
+
+def preferred_pool_network(connector_name: str, network_options: list[str]):
+    if connector_name == "uniswap" and "ethereum-bsc" in network_options:
+        return "ethereum-bsc"
+    return None
+
+
+
+
 connectors_payload = connectors_response.get("data", {}) if connectors_response.get("ok") else {}
-connectors_rows = build_connector_rows(connectors_payload)
-connectors_list = sorted({row.get("connector") for row in connectors_rows if row.get("connector")})
+connectors_rows, connectors_meta = build_connector_rows_and_meta(connectors_payload)
+connectors_list = sorted({str(name) for name in connectors_meta.keys() if name})
 
 chains_payload = chains_response.get("data", {}) if chains_response.get("ok") else {}
 chain_options = parse_chain_options(chains_payload)
+chain_defaults = parse_chain_defaults(chains_payload)
 
 networks_payload = networks_response.get("data", {}) if networks_response.get("ok") else {}
 network_options = parse_network_options(networks_payload, chains_payload)
@@ -205,16 +342,30 @@ with status_cols[3]:
 
 action_cols = st.columns([1, 2, 2])
 with action_cols[0]:
+    st.caption("Restart can take up to 60 seconds.")
     if st.button("Restart Gateway", type="primary", use_container_width=True):
-        restart_response = backend_api_request("POST", "/gateway/restart")
+        with st.spinner("Restarting Gateway..."):
+            restart_response = backend_api_request("POST", "/gateway/restart", timeout=60)
+
         if restart_response.get("ok"):
             st.success("Gateway restart requested.")
         else:
             status_code = restart_response.get("status_code")
+            error_text = str(restart_response.get("error", ""))
             if status_code == 401:
                 st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+            elif status_code is None and "timed out" in error_text.lower():
+                st.info("Restart request timed out. Gateway may still be restarting.")
             else:
-                st.error("Failed to restart Gateway. Check API connectivity and logs.")
+                st.error(format_api_error(restart_response, "Failed to restart Gateway. Check API connectivity and logs."))
+
+        status_check = backend_api_request("GET", "/gateway/status")
+        if status_check.get("ok"):
+            running_now = status_check.get("data", {}).get("running")
+            if running_now:
+                st.success("Gateway is running.")
+            else:
+                st.warning("Gateway is still restarting.")
 
 if not container_running:
     st.warning("Gateway container is not running. Start Gateway before deploying bots.")
@@ -317,8 +468,20 @@ with tabs[1]:
 
     st.markdown("**Add Pool**")
     with st.form("gateway_add_pool"):
+        set_default_choice("pool_connector", "uniswap", connectors_list)
         connector_name = select_connector("Connector", "pool_connector", connectors_list)
-        network_id = select_network("Network", "pool_network", network_options)
+        pool_network_options = networks_for_connector(connector_name, network_options)
+        preferred_network = preferred_pool_network(connector_name, pool_network_options)
+        if preferred_network:
+            set_default_selection("pool_network", "pool_network_ctx", connector_name, preferred_network)
+        else:
+            default_pool_network = default_network_id_for_connector(
+                connector_name,
+                pool_network_options,
+                chain_defaults,
+            )
+            set_default_selection("pool_network", "pool_network_ctx", connector_name, default_pool_network)
+        network_id = select_network("Network", "pool_network", pool_network_options)
         pool_type = st.selectbox("Pool Type", ["clmm", "amm"])
 
         col1a, col2a, col3a = st.columns(3)
@@ -384,8 +547,20 @@ with tabs[1]:
     st.divider()
     st.markdown("**Pools by Network**")
     st.caption("Select a connector and network to view pools.")
+    set_default_choice("pool_lookup_connector", "uniswap", connectors_list)
     browse_connector = select_connector("Connector", "pool_lookup_connector", connectors_list)
-    browse_network = select_network("Network", "pool_lookup_network", network_options)
+    browse_network_options = networks_for_connector(browse_connector, network_options)
+    preferred_browse_network = preferred_pool_network(browse_connector, browse_network_options)
+    if preferred_browse_network:
+        set_default_selection("pool_lookup_network", "pool_lookup_network_ctx", browse_connector, preferred_browse_network)
+    else:
+        default_browse_network = default_network_id_for_connector(
+            browse_connector,
+            browse_network_options,
+            chain_defaults,
+        )
+        set_default_selection("pool_lookup_network", "pool_lookup_network_ctx", browse_connector, default_browse_network)
+    browse_network = select_network("Network", "pool_lookup_network", browse_network_options)
 
     if browse_connector and browse_network:
         if "-" in browse_network:

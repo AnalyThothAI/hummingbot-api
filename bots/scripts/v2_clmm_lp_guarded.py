@@ -19,7 +19,7 @@ from .lp.lp_executor import LPExecutor, LPExecutorConfig
 from .lp.status_formatter import format_lp_status_lines
 
 
-class MeteoraCLMMLPGuardedConfig(StrategyV2ConfigBase):
+class CLMMLPGuardedConfig(StrategyV2ConfigBase):
     """
     Meteora CLMM LP Guarded 策略配置（Executor 模式，含手续费兑换选项）。
     """
@@ -333,13 +333,13 @@ class MeteoraCLMMLPGuardedConfig(StrategyV2ConfigBase):
     )
 
 
-class MeteoraCLMMLPGuarded(StrategyV2Base):
+class CLMMLPGuarded(StrategyV2Base):
     """
     Meteora CLMM LP Guarded 策略（Executor 模式）。
     """
 
     @classmethod
-    def init_markets(cls, config: MeteoraCLMMLPGuardedConfig):
+    def init_markets(cls, config: CLMMLPGuardedConfig):
         """
         初始化策略所需的市场订阅。
         """
@@ -352,7 +352,7 @@ class MeteoraCLMMLPGuarded(StrategyV2Base):
             markets.setdefault(price_connector, set()).add(config.trading_pair)
         cls.markets = markets
 
-    def __init__(self, connectors: Dict[str, object], config: MeteoraCLMMLPGuardedConfig):
+    def __init__(self, connectors: Dict[str, object], config: CLMMLPGuardedConfig):
         """
         初始化策略（同步性能日志开关）。
 
