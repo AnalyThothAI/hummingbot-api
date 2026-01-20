@@ -1,5 +1,6 @@
 import pandas as pd
 import streamlit as st
+from eth_utils import is_address, is_checksum_address, to_checksum_address
 
 from CONFIG import GATEWAY_ENABLED
 from frontend.st_utils import backend_api_request, initialize_st_page
@@ -151,6 +152,24 @@ def select_network(label, key_prefix, network_options):
     return st.text_input("Network ID (chain-network)", key=f"{key_prefix}_text")
 
 
+def split_network_id(network_id: str):
+    if not network_id:
+        return "", ""
+    if "-" in network_id:
+        chain, network = network_id.split("-", 1)
+        return chain, network
+    return network_id, ""
+
+
+def normalize_evm_address(address: str):
+    if not is_address(address):
+        return None, "Invalid EVM address."
+    checksum = to_checksum_address(address)
+    if not is_checksum_address(address):
+        return checksum, f"Checksum address applied: {checksum}"
+    return checksum, None
+
+
 connectors_payload = connectors_response.get("data", {}) if connectors_response.get("ok") else {}
 connectors_rows = build_connector_rows(connectors_payload)
 connectors_list = sorted({row.get("connector") for row in connectors_rows if row.get("connector")})
@@ -272,143 +291,196 @@ with tabs[0]:
 
 with tabs[1]:
     st.subheader("Tokens")
-    st.caption("Add custom tokens to Gateway. Restart Gateway after adding tokens.")
+    st.caption("Add custom tokens and browse the token registry by network. Restart Gateway after adding tokens.")
 
+    st.markdown("**Add Token**")
+    st.caption("EVM chains require checksum addresses (mixed-case).")
     with st.form("gateway_add_token"):
         network_id = select_network("Network", "token_network", network_options)
         token_address = st.text_input("Token Address")
         symbol = st.text_input("Symbol")
         name = st.text_input("Name (optional)")
         decimals = st.number_input("Decimals", min_value=0, max_value=36, step=1, value=6)
-        submitted = st.form_submit_button("Add Token")
+        submit_add_token = st.form_submit_button("Add Token")
 
-        if submitted:
+        if submit_add_token:
             if not network_id or not token_address or not symbol:
                 st.error("Network, token address, and symbol are required.")
             else:
-                payload = {
-                    "address": token_address,
-                    "symbol": symbol,
-                    "decimals": int(decimals),
-                }
-                if name:
-                    payload["name"] = name
-                response = backend_api_request(
-                    "POST",
-                    f"/gateway/networks/{network_id}/tokens",
-                    json_body=payload,
-                )
-                if response.get("ok"):
-                    message = response.get("data", {}).get(
-                        "message",
-                        "Token added. Restart Gateway for changes to take effect.",
-                    )
-                    st.success(message)
-                else:
-                    status_code = response.get("status_code")
-                    if status_code == 401:
-                        st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+                checksum_notice = None
+                if token_address.startswith("0x"):
+                    checksum_address, checksum_notice = normalize_evm_address(token_address)
+                    if checksum_address is None:
+                        st.error("Invalid EVM address. Check the address format.")
                     else:
-                        st.error(response.get("error", "Failed to add token."))
+                        token_address = checksum_address
+
+                if token_address:
+                    payload = {
+                        "address": token_address,
+                        "symbol": symbol,
+                        "decimals": int(decimals),
+                    }
+                    if name:
+                        payload["name"] = name
+                    response = backend_api_request(
+                        "POST",
+                        f"/gateway/networks/{network_id}/tokens",
+                        json_body=payload,
+                    )
+                    if response.get("ok"):
+                        message = response.get("data", {}).get(
+                            "message",
+                            "Token added. Restart Gateway for changes to take effect.",
+                        )
+                        st.success(message)
+                        if checksum_notice:
+                            st.info(checksum_notice)
+                    else:
+                        status_code = response.get("status_code")
+                        if status_code == 401:
+                            st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+                        else:
+                            st.error(response.get("error", "Failed to add token."))
 
     st.divider()
-    st.markdown("**Lookup Tokens**")
-    with st.form("gateway_token_lookup"):
-        lookup_network = select_network("Network", "token_lookup_network", network_options)
-        search = st.text_input("Search (symbol or name)", key="token_lookup_search")
-        submitted = st.form_submit_button("Search Tokens")
+    st.markdown("**Tokens by Network**")
+    st.caption("Select a network to view tokens. No search required.")
+    lookup_network = select_network("Network", "token_list_network", network_options)
 
-    if submitted:
-        if not lookup_network:
-            st.error("Network is required.")
-        else:
-            response = backend_api_request(
-                "GET",
-                f"/gateway/networks/{lookup_network}/tokens",
-                params={"search": search} if search else None,
-            )
-            if response.get("ok"):
-                payload = response.get("data", {})
-                tokens = payload.get("tokens", payload if isinstance(payload, list) else [])
-                if tokens:
-                    st.dataframe(pd.DataFrame(tokens), use_container_width=True, hide_index=True)
-                else:
-                    st.info("No tokens found.")
+    if lookup_network:
+        response = backend_api_request(
+            "GET",
+            f"/gateway/networks/{lookup_network}/tokens",
+        )
+        if response.get("ok"):
+            payload = response.get("data", {})
+            tokens = payload.get("tokens", payload if isinstance(payload, list) else [])
+            if tokens:
+                chain, network = split_network_id(lookup_network)
+                token_rows = []
+                for token in tokens:
+                    if isinstance(token, dict):
+                        row = dict(token)
+                        row["chain"] = chain
+                        row["network"] = network
+                        row["network_id"] = lookup_network
+                        token_rows.append(row)
+                st.dataframe(pd.DataFrame(token_rows), use_container_width=True, hide_index=True)
             else:
-                status_code = response.get("status_code")
-                if status_code == 401:
-                    st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
-                else:
-                    st.error(response.get("error", "Failed to fetch tokens."))
+                st.info("No tokens found for this network.")
+        else:
+            status_code = response.get("status_code")
+            if status_code == 401:
+                st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+            else:
+                st.error(response.get("error", "Failed to fetch tokens."))
 
 with tabs[2]:
     st.subheader("Pools")
     st.caption("Add custom pools for supported connectors. Restart Gateway after adding pools.")
 
-    with st.form("gateway_add_pool"):
-        connector_name = select_connector("Connector", "pool_connector", connectors_list)
-        network_id = select_network("Network", "pool_network", network_options)
-        pool_type = st.selectbox("Pool Type", ["clmm", "amm"])
+    col1, col2 = st.columns(2)
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            base_symbol = st.text_input("Base Symbol")
-        with col2:
-            quote_symbol = st.text_input("Quote Symbol")
-        with col3:
-            fee_pct = st.number_input(
-                "Fee Pct (optional)",
-                min_value=0.0,
-                step=0.01,
-                format="%.4f",
-                value=0.0,
-            )
+    with col1:
+        st.markdown("**Add Pool**")
+        with st.form("gateway_add_pool"):
+            connector_name = select_connector("Connector", "pool_connector", connectors_list)
+            network_id = select_network("Network", "pool_network", network_options)
+            pool_type = st.selectbox("Pool Type", ["clmm", "amm"])
 
-        col1, col2 = st.columns(2)
-        with col1:
-            base_address = st.text_input("Base Token Address")
-        with col2:
-            quote_address = st.text_input("Quote Token Address")
+            col1a, col2a, col3a = st.columns(3)
+            with col1a:
+                base_symbol = st.text_input("Base Symbol")
+            with col2a:
+                quote_symbol = st.text_input("Quote Symbol")
+            with col3a:
+                fee_pct = st.number_input(
+                    "Fee Pct (optional)",
+                    min_value=0.0,
+                    step=0.01,
+                    format="%.4f",
+                    value=0.0,
+                )
 
-        pool_address = st.text_input("Pool Address")
-        submitted = st.form_submit_button("Add Pool")
+            col1b, col2b = st.columns(2)
+            with col1b:
+                base_address = st.text_input("Base Token Address")
+            with col2b:
+                quote_address = st.text_input("Quote Token Address")
 
-        if submitted:
-            if not connector_name or not network_id:
-                st.error("Connector and network are required.")
-            elif not base_symbol or not quote_symbol:
-                st.error("Base and quote symbols are required.")
-            elif not base_address or not quote_address or not pool_address:
-                st.error("Token addresses and pool address are required.")
-            else:
-                if "-" in network_id:
-                    _, network_value = network_id.split("-", 1)
+            pool_address = st.text_input("Pool Address")
+            submit_add_pool = st.form_submit_button("Add Pool")
+
+            if submit_add_pool:
+                if not connector_name or not network_id:
+                    st.error("Connector and network are required.")
+                elif not base_symbol or not quote_symbol:
+                    st.error("Base and quote symbols are required.")
+                elif not base_address or not quote_address or not pool_address:
+                    st.error("Token addresses and pool address are required.")
                 else:
-                    network_value = network_id
+                    if "-" in network_id:
+                        _, network_value = network_id.split("-", 1)
+                    else:
+                        network_value = network_id
 
-                payload = {
-                    "connector_name": connector_name,
-                    "type": pool_type,
-                    "network": network_value,
-                    "address": pool_address,
-                    "base": base_symbol,
-                    "quote": quote_symbol,
-                    "base_address": base_address,
-                    "quote_address": quote_address,
-                }
-                if fee_pct and fee_pct > 0:
-                    payload["fee_pct"] = float(fee_pct)
+                    payload = {
+                        "connector_name": connector_name,
+                        "type": pool_type,
+                        "network": network_value,
+                        "address": pool_address,
+                        "base": base_symbol,
+                        "quote": quote_symbol,
+                        "base_address": base_address,
+                        "quote_address": quote_address,
+                    }
+                    if fee_pct and fee_pct > 0:
+                        payload["fee_pct"] = float(fee_pct)
 
-                response = backend_api_request("POST", "/gateway/pools", json_body=payload)
+                    response = backend_api_request("POST", "/gateway/pools", json_body=payload)
+                    if response.get("ok"):
+                        message = response.get("data", {}).get("message", "Pool added.")
+                        st.success(message)
+                    else:
+                        status_code = response.get("status_code")
+                        if status_code == 401:
+                            st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+                        else:
+                            st.error(response.get("error", "Failed to add pool."))
+
+    with col2:
+        st.markdown("**Browse Pools**")
+        with st.form("gateway_pool_lookup"):
+            browse_connector = select_connector("Connector", "pool_lookup_connector", connectors_list)
+            browse_network = select_network("Network", "pool_lookup_network", network_options)
+            submit_pool_lookup = st.form_submit_button("Load Pools")
+
+        if submit_pool_lookup:
+            if not browse_connector or not browse_network:
+                st.error("Connector and network are required.")
+            else:
+                if "-" in browse_network:
+                    _, network_value = browse_network.split("-", 1)
+                else:
+                    network_value = browse_network
+                response = backend_api_request(
+                    "GET",
+                    "/gateway/pools",
+                    params={"connector_name": browse_connector, "network": network_value},
+                )
                 if response.get("ok"):
-                    message = response.get("data", {}).get("message", "Pool added.")
-                    st.success(message)
+                    pools = response.get("data", [])
+                    if pools:
+                        st.dataframe(pd.DataFrame(pools), use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No pools found for this connector/network.")
                 else:
                     status_code = response.get("status_code")
                     if status_code == 401:
                         st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
                     else:
-                        st.error(response.get("error", "Failed to add pool."))
+                        st.error(response.get("error", "Failed to fetch pools."))
 
 with tabs[3]:
     st.subheader("Connectors")

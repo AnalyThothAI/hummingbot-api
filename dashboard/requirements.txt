@@ -9,3 +9,4 @@
 - pandas_ta
 - sqlalchemy
 - pyyaml
+- eth-utils
