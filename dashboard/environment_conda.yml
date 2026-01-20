@@ -1,0 +1,27 @@
+name: dashboard
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.12
+  - sqlalchemy
+  - pip
+  - pip:
+      - hummingbot
+      - hummingbot-api-client
+      - nest_asyncio
+      - pydantic
+      - streamlit>=1.36.0
+      - watchdog
+      - python-dotenv
+      - plotly==5.24.1
+      - pycoingecko
+      - glom
+      - defillama
+      - statsmodels
+      - pyyaml
+      - pathlib
+      - streamlit-authenticator==0.3.2
+      - flake8
+      - isort
+      - pre-commit

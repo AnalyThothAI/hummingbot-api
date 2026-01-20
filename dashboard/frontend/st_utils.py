@@ -1,0 +1,214 @@
+import base64
+import inspect
+import json
+import os.path
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Optional, Union, Dict, Any
+
+import pandas as pd
+import streamlit as st
+import streamlit_authenticator as stauth
+import yaml
+from streamlit.commands.page_config import InitialSideBarState, Layout
+from yaml import SafeLoader
+
+from CONFIG import AUTH_SYSTEM_ENABLED
+from frontend.pages.permissions import main_page, private_pages, public_pages
+
+
+def initialize_st_page(title: Optional[str] = None, icon: str = "🤖", layout: Layout = 'wide',
+                       initial_sidebar_state: InitialSideBarState = "expanded",
+                       show_readme: bool = True):
+    st.set_page_config(
+        page_title=title,
+        page_icon=icon,
+        layout=layout,
+        initial_sidebar_state=initial_sidebar_state
+    )
+
+    # Add page title
+    if title:
+        st.title(title)
+
+    # Get caller frame info safely
+    frame: Optional[Union[inspect.FrameInfo, inspect.Traceback]] = None
+    try:
+        caller_frame = inspect.currentframe()
+        if caller_frame is not None:
+            caller_frame = caller_frame.f_back
+            if caller_frame is not None:
+                frame = inspect.getframeinfo(caller_frame)
+    except Exception:
+        pass
+
+    if frame is not None and show_readme:
+        current_directory = Path(os.path.dirname(frame.filename))
+        readme_path = current_directory / "README.md"
+        if readme_path.exists():
+            with st.expander("About This Page"):
+                st.write(readme_path.read_text())
+        else:
+            # Only show expander if README exists
+            pass
+
+
+def download_csv_button(df: pd.DataFrame, filename: str, key: str):
+    csv = df.to_csv(index=False).encode('utf-8')
+    return st.download_button(
+        label="Download CSV",
+        data=csv,
+        file_name=f"{filename}.csv",
+        mime="text/csv",
+        key=key
+    )
+
+
+def style_metric_cards():
+    # Removed custom metric styling to use default Streamlit styling
+    pass
+
+
+def get_backend_api_base_url() -> str:
+    from CONFIG import BACKEND_API_HOST, BACKEND_API_PORT
+
+    if not BACKEND_API_HOST.startswith(('http://', 'https://')):
+        return f"http://{BACKEND_API_HOST}:{BACKEND_API_PORT}"
+    return f"{BACKEND_API_HOST}:{BACKEND_API_PORT}"
+
+
+def backend_api_request(method: str, path: str, params: Optional[Dict[str, Any]] = None,
+                        json_body: Optional[Dict[str, Any]] = None, timeout: int = 10) -> Dict[str, Any]:
+    from CONFIG import BACKEND_API_USERNAME, BACKEND_API_PASSWORD
+
+    base_url = get_backend_api_base_url()
+    normalized_path = path if path.startswith("/") else f"/{path}"
+    url = f"{base_url}{normalized_path}"
+
+    if params:
+        url = f"{url}?{urllib.parse.urlencode(params)}"
+
+    auth_token = base64.b64encode(f"{BACKEND_API_USERNAME}:{BACKEND_API_PASSWORD}".encode("utf-8")).decode("utf-8")
+    headers = {
+        "Authorization": f"Basic {auth_token}",
+    }
+
+    data = None
+    if json_body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(json_body).encode("utf-8")
+
+    request = urllib.request.Request(url=url, method=method.upper(), headers=headers, data=data)
+
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            payload = response.read()
+            return {
+                "ok": True,
+                "status_code": response.status,
+                "data": json.loads(payload) if payload else {}
+            }
+    except urllib.error.HTTPError as e:
+        payload = e.read().decode("utf-8") if e.fp else ""
+        try:
+            error_data = json.loads(payload) if payload else {}
+        except json.JSONDecodeError:
+            error_data = {}
+        return {
+            "ok": False,
+            "status_code": e.code,
+            "error": payload or e.reason,
+            "data": error_data,
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "status_code": None,
+            "error": str(e),
+            "data": {},
+        }
+
+
+def get_backend_api_client():
+    import atexit
+
+    from hummingbot_api_client import SyncHummingbotAPIClient
+
+    from CONFIG import BACKEND_API_HOST, BACKEND_API_PASSWORD, BACKEND_API_PORT, BACKEND_API_USERNAME
+
+    # Use Streamlit session state to store singleton instance
+    if 'backend_api_client' not in st.session_state or st.session_state.backend_api_client is None:
+        try:
+            base_url = get_backend_api_base_url()
+
+            client = SyncHummingbotAPIClient(
+                base_url=base_url,
+                username=BACKEND_API_USERNAME,
+                password=BACKEND_API_PASSWORD
+            )
+            # Initialize the client using context manager
+            client.__enter__()
+
+            # Register cleanup function to properly exit the context manager
+            def cleanup_client():
+                try:
+                    if 'backend_api_client' in st.session_state and st.session_state.backend_api_client is not None:
+                        st.session_state.backend_api_client.__exit__(None, None, None)
+                        st.session_state.backend_api_client = None
+                except Exception:
+                    pass  # Ignore cleanup errors
+
+            # Register cleanup with atexit and session state
+            atexit.register(cleanup_client)
+            if 'cleanup_registered' not in st.session_state:
+                st.session_state.cleanup_registered = True
+                # Also register cleanup for session state changes
+                st.session_state.backend_api_client_cleanup = cleanup_client
+
+            st.session_state.backend_api_client = client
+        except Exception as e:
+            st.error(f"Failed to initialize API client: {str(e)}")
+            st.stop()
+
+    return st.session_state.backend_api_client
+
+
+def auth_system():
+    if not AUTH_SYSTEM_ENABLED:
+        return {
+            "Main": main_page(),
+            **private_pages(),
+            **public_pages(),
+        }
+    else:
+        with open('credentials.yml') as file:
+            config = yaml.load(file, Loader=SafeLoader)
+        if "authenticator" not in st.session_state or "authentication_status" not in st.session_state or not st.session_state.get(
+                "authentication_status", False):
+            st.session_state.authenticator = stauth.Authenticate(
+                config['credentials'],
+                config['cookie']['name'],
+                config['cookie']['key'],
+                config['cookie']['expiry_days'],
+            )
+            # Show only public pages for non-authenticated users
+            st.session_state.authenticator.login()
+            if st.session_state["authentication_status"] is False:
+                st.error('Username/password is incorrect')
+            elif st.session_state["authentication_status"] is None:
+                st.warning('Please enter your username and password')
+            return {
+                "Main": main_page(),
+                **public_pages()
+            }
+        else:
+            st.session_state.authenticator.logout(location="sidebar")
+            st.sidebar.write(f'Welcome *{st.session_state["name"]}*')
+            # Show all pages for authenticated users
+            return {
+                "Main": main_page(),
+                **private_pages(),
+                **public_pages(),
+            }
