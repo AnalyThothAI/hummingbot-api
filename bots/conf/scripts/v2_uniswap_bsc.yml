@@ -1,5 +1,5 @@
 # 策略实例 1: TOMATO-SOL 池
-script_file_name: v2_meteora_clmm_lp_guarded.py
+script_file_name: v2_clmm_lp_guarded.py
 
 connector: uniswap/clmm
 router_connector: uniswap/router
@@ -12,7 +12,7 @@ target_price: 0.000017
 trigger_above: true
 
 base_amount: 0
-quote_amount: 0.5
+quote_amount: 50
 
 position_width_pct: 28
 swap_slippage_pct: 1.0
@@ -34,8 +34,8 @@ quote_floor: 0.06
 budget_max_wallet_pct: 0.90
 budget_all_or_none: true
 
-gas_token_symbol: SOL
-gas_min_reserve: 0.06
+gas_token_symbol: BNB
+gas_min_reserve: 0.0005
 
 stop_loss_pnl_pct: 0.2
 stop_loss_pause_sec: 1800
