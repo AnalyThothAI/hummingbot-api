@@ -9,6 +9,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       # Development mounts - mount local code for live updates
       - ./main.py:/hummingbot-api/main.py:ro
+      - ./config.py:/hummingbot-api/config.py:ro
       - ./deps.py:/hummingbot-api/deps.py:ro
       - ./services:/hummingbot-api/services:ro
       - ./routers:/hummingbot-api/routers:ro
@@ -17,31 +18,24 @@ services:
       - ./utils:/hummingbot-api/utils:ro
     env_file:
       - .env
-    environment:
-      - BROKER_HOST=emqx
-      - DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@postgres:5432/hummingbot_api
-      - GATEWAY_URL=http://gateway:15888
     networks:
       - emqx-bridge
     depends_on:
       - postgres
       - gateway
 
-  lp-dashboard:
-    container_name: lp-dashboard
+  dashboard:
+    container_name: dashboard
     build:
-      context: .
-      dockerfile: Dockerfile.dashboard
+      context: ./dashboard
+      dockerfile: Dockerfile
     ports:
-      - "8502:8502"
+      - "8502:8501"
     volumes:
       # Development mount - use local code for live updates
-      - ./lp_dashboard:/app/lp_dashboard:ro
-    environment:
-      - API_URL=http://hummingbot-api:8000
-      - API_USERNAME=${USERNAME:-admin}
-      - API_PASSWORD=${PASSWORD:-admin}
-      - REFRESH_INTERVAL=5
+      - ./dashboard:/home/dashboard
+    env_file:
+      - .env
     networks:
       - emqx-bridge
     depends_on:

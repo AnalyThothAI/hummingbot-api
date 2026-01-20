@@ -46,11 +46,21 @@ class SecuritySettings(BaseSettings):
     username: str = Field(default="admin", description="API basic auth username")
     password: str = Field(default="admin", description="API basic auth password")
     debug_mode: bool = Field(default=False, description="Enable debug mode (disables auth)")
+
+    model_config = SettingsConfigDict(
+        env_prefix="BACKEND_API_",
+        extra="ignore"  # Ignore extra environment variables
+    )
+
+
+class SecretsSettings(BaseSettings):
+    """Secrets for bot configuration encryption."""
+
     config_password: str = Field(default="a", description="Bot configuration encryption password")
 
     model_config = SettingsConfigDict(
         env_prefix="",
-        extra="ignore"  # Ignore extra environment variables
+        extra="ignore"
     )
 
 
@@ -73,6 +83,29 @@ class GatewaySettings(BaseSettings):
     )
 
     model_config = SettingsConfigDict(env_prefix="GATEWAY_", extra="ignore")
+
+
+class BotDeploymentSettings(BaseSettings):
+    """Bot container networking defaults."""
+
+    mqtt_host: str = Field(
+        default="emqx",
+        description="Default MQTT host for bot containers when running in bridge mode"
+    )
+    gateway_host: str = Field(
+        default="gateway",
+        description="Default Gateway host for bot containers when running in bridge mode"
+    )
+    networks: str = Field(
+        default="hummingbot-api_emqx-bridge,emqx-bridge",
+        description="Comma-separated Docker networks to connect bot containers to"
+    )
+    use_host_network_linux: bool = Field(
+        default=True,
+        description="Use host networking on native Linux when not running inside a container"
+    )
+
+    model_config = SettingsConfigDict(env_prefix="BOT_", extra="ignore")
 
 
 class AppSettings(BaseSettings):
@@ -110,8 +143,10 @@ class Settings(BaseSettings):
     database: DatabaseSettings = Field(default_factory=DatabaseSettings)
     market_data: MarketDataSettings = Field(default_factory=MarketDataSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    secrets: SecretsSettings = Field(default_factory=SecretsSettings)
     aws: AWSSettings = Field(default_factory=AWSSettings)
     gateway: GatewaySettings = Field(default_factory=GatewaySettings)
+    bot_deployment: BotDeploymentSettings = Field(default_factory=BotDeploymentSettings)
     app: AppSettings = Field(default_factory=AppSettings)
     
     # Direct banned_tokens field to handle env parsing

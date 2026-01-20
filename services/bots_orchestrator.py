@@ -314,10 +314,10 @@ class BotsOrchestrator:
             discovered_bots = self.mqtt_manager.get_discovered_bots(timeout_seconds=30)
             recently_active = bot_name in discovered_bots
 
-            # Determine status based on performance data and recent activity
-            if len(performance) > 0 and recently_active:
+            # Determine status based on recent MQTT activity first, then performance data.
+            if recently_active:
                 status = "running"
-            elif len(performance) > 0 and not recently_active:
+            elif len(performance) > 0:
                 status = "idle"  # Has performance data but no recent activity
             else:
                 status = "stopped"

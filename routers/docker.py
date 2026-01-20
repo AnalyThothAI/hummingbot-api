@@ -1,6 +1,6 @@
 import os
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Query
 
 from models import DockerImage
 from utils.bot_archiver import BotArchiver
@@ -70,6 +70,28 @@ async def exited_containers(name_filter: str = None, docker_service: DockerServi
         List of exited container information
     """
     return docker_service.get_exited_containers(name_filter)
+
+
+@router.get("/containers/{container_name}/logs")
+async def container_logs(
+    container_name: str,
+    tail: int = Query(default=100, ge=1, le=10000),
+    docker_service: DockerService = Depends(get_docker_service),
+):
+    """
+    Get logs for a specific container.
+
+    Args:
+        container_name: Docker container name
+        tail: Number of lines to return
+    """
+    result = docker_service.get_container_logs(container_name, tail=tail)
+    if not result.get("success"):
+        detail = result.get("message", "Failed to fetch logs")
+        if result.get("error_type") == "not_found":
+            raise HTTPException(status_code=404, detail=detail)
+        raise HTTPException(status_code=500, detail=detail)
+    return result
 
 
 @router.post("/clean-exited-containers")

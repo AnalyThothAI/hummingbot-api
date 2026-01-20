@@ -95,7 +95,7 @@ async def lifespan(app: FastAPI):
     # Ensure password verification file exists
     if BackendAPISecurity.new_password_required():
         # Create secrets manager with CONFIG_PASSWORD
-        secrets_manager = ETHKeyFileSecretManger(password=settings.security.config_password)
+        secrets_manager = ETHKeyFileSecretManger(password=settings.secrets.config_password)
         BackendAPISecurity.store_password_verification(secrets_manager)
         logging.info("Created password verification file for master_account")
 

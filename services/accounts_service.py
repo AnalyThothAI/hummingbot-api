@@ -56,7 +56,7 @@ class AccountsService:
             market_data_feed_manager: Market data feed manager for price caching (optional)
             gateway_url: URL for Gateway service (default: "http://localhost:15888")
         """
-        self.secrets_manager = ETHKeyFileSecretManger(settings.security.config_password)
+        self.secrets_manager = ETHKeyFileSecretManger(settings.secrets.config_password)
         self.accounts_state = {}
         self.update_account_state_interval = account_update_interval * 60
         self.order_status_poll_interval = 60  # Poll order status every 1 minute
@@ -1552,14 +1552,46 @@ class AccountsService:
         Get all wallets from Gateway. Gateway manages its own encrypted wallets.
 
         Returns:
-            List of wallet information from Gateway
+            List of wallet information from Gateway, normalized to a flat format:
+            [{"chain": "solana", "address": "xxx", "isDefault": true}, ...]
         """
         if not await self.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
         try:
-            wallets = await self.gateway_client.get_wallets()
-            return wallets
+            raw_wallets = await self.gateway_client.get_wallets()
+            if not raw_wallets:
+                return []
+
+            # Get default wallet for each chain from Gateway config
+            default_wallets = {}
+            for wallet_group in raw_wallets:
+                chain = wallet_group.get("chain")
+                if chain:
+                    try:
+                        config = await self.gateway_client.get_config(chain)
+                        if config and not config.get("error"):
+                            default_wallets[chain] = config.get("defaultWallet")
+                    except Exception:
+                        pass
+
+            # Normalize wallet data to flat format
+            # Gateway returns: [{"chain": "solana", "walletAddresses": ["addr1", "addr2"]}]
+            # We need: [{"chain": "solana", "address": "addr1", "isDefault": true}, ...]
+            normalized = []
+            for wallet_group in raw_wallets:
+                chain = wallet_group.get("chain", "unknown")
+                addresses = wallet_group.get("walletAddresses", [])
+                chain_default = default_wallets.get(chain)
+
+                for address in addresses:
+                    normalized.append({
+                        "chain": chain,
+                        "address": address,
+                        "isDefault": address == chain_default if chain_default else False,
+                    })
+
+            return normalized
         except Exception as e:
             logger.error(f"Error getting Gateway wallets: {e}")
             raise HTTPException(status_code=500, detail=f"Failed to get wallets: {str(e)}")

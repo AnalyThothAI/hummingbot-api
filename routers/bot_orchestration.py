@@ -65,6 +65,94 @@ def get_mqtt_status(bots_manager: BotsOrchestrator = Depends(get_bots_orchestrat
     }
 
 
+@router.get("/instances")
+def get_instances_summary(
+    bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator),
+    docker_service: DockerService = Depends(get_docker_service),
+):
+    """Return a unified instance view that merges Docker and MQTT states."""
+    infrastructure = {
+        "hummingbot-api",
+        "hummingbot-broker",
+        "hummingbot-postgres",
+        "gateway",
+        "lp-dashboard",
+        "dashboard",
+    }
+
+    running = docker_service.get_active_containers()
+    exited = docker_service.get_exited_containers()
+
+    if isinstance(running, str) or isinstance(exited, str):
+        detail = running if isinstance(running, str) else exited
+        raise HTTPException(status_code=500, detail=f"Failed to read Docker containers: {detail}")
+
+    containers = {}
+
+    def add_container(container_info):
+        name = container_info.get("name")
+        if not name or name in infrastructure:
+            return
+        containers[name] = {
+            "name": name,
+            "docker_status": container_info.get("status", "unknown"),
+            "image": container_info.get("image", "unknown"),
+        }
+
+    for container in exited:
+        add_container(container)
+    for container in running:
+        add_container(container)
+
+    discovered = set(bots_manager.mqtt_manager.get_discovered_bots(timeout_seconds=30))
+    active_bots = set(bots_manager.active_bots.keys())
+
+    for name, info in containers.items():
+        if name in discovered:
+            mqtt_status = "connected"
+        elif name in active_bots:
+            mqtt_status = "stale"
+        else:
+            mqtt_status = "disconnected"
+
+        docker_status = info.get("docker_status")
+
+        if docker_status == "running" and mqtt_status == "connected":
+            health_state = "running"
+            reason = None
+        elif docker_status == "running" and mqtt_status != "connected":
+            health_state = "degraded"
+            reason = "mqtt_disconnected"
+        elif docker_status in {"exited", "created", "dead"}:
+            health_state = "stopped"
+            reason = "container_stopped"
+        else:
+            health_state = "unknown"
+            reason = None
+
+        info.update(
+            mqtt_status=mqtt_status,
+            recently_active=name in discovered,
+            health_state=health_state,
+            reason=reason,
+        )
+
+    for name in discovered:
+        if name not in containers:
+            containers[name] = {
+                "name": name,
+                "docker_status": "missing",
+                "image": "unknown",
+                "mqtt_status": "connected",
+                "recently_active": True,
+                "health_state": "orphaned",
+                "reason": "container_missing",
+            }
+
+    instances = sorted(containers.values(), key=lambda item: item["name"])
+    return {"status": "success", "data": {"instances": instances}}
+
+
 @router.get("/{bot_name}/status")
 def get_bot_status(bot_name: str, bots_manager: BotsOrchestrator = Depends(get_bots_orchestrator)):
     """

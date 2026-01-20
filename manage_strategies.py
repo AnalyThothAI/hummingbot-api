@@ -28,9 +28,9 @@ except ImportError:
     sys.exit(1)
 
 # 配置
-API_URL = os.getenv("HUMMINGBOT_API_URL", "http://localhost:8000")
-API_USERNAME = os.getenv("HUMMINGBOT_API_USERNAME", "admin")
-API_PASSWORD = os.getenv("HUMMINGBOT_API_PASSWORD", "admin")
+API_URL = os.getenv("BACKEND_API_URL", "http://localhost:8000")
+API_USERNAME = os.getenv("BACKEND_API_USERNAME", "admin")
+API_PASSWORD = os.getenv("BACKEND_API_PASSWORD", "admin")
 
 
 class StrategyConfig:

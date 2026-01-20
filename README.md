@@ -87,8 +87,8 @@ Once running, Gateway is available at http://localhost:15888
 The `.env` file contains all configuration. Key settings:
 
 ```bash
-USERNAME=admin              # API username
-PASSWORD=admin              # API password
+BACKEND_API_USERNAME=admin  # API username
+BACKEND_API_PASSWORD=admin  # API password
 CONFIG_PASSWORD=admin       # Encrypts bot credentials
 DATABASE_URL=...            # PostgreSQL connection
 GATEWAY_URL=...             # Gateway URL (for DEX)

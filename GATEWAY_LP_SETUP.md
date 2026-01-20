@@ -212,7 +212,7 @@ ls gateway-files/conf/wallets/solana/
 3. 确认 `conf_client.yml` 中 Gateway 地址正确:
    ```yaml
    gateway:
-     gateway_api_host: host.docker.internal
+     gateway_api_host: gateway
      gateway_api_port: '15888'
    ```
 
@@ -222,7 +222,7 @@ ls gateway-files/conf/wallets/solana/
 2. 检查 `conf_client.yml` 中 MQTT 配置:
    ```yaml
    mqtt_bridge:
-     mqtt_host: host.docker.internal
+     mqtt_host: emqx
      mqtt_port: 1883
    ```
 

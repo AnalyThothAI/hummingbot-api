@@ -8,6 +8,7 @@ import docker
 from docker.errors import DockerException
 from docker.types import LogConfig
 
+from config import settings
 from models.gateway import GatewayConfig, GatewayStatus
 
 # Create module-specific logger
@@ -32,6 +33,11 @@ class GatewayService:
         except DockerException as e:
             logger.error(f"Failed to connect to Docker. Error: {e}")
             raise
+
+    @staticmethod
+    def _get_gateway_networks() -> list:
+        raw_networks = settings.bot_deployment.networks or ""
+        return [name.strip() for name in raw_networks.split(",") if name.strip()]
 
     def _ensure_gateway_directories(self):
         """Create necessary directories for Gateway if they don't exist"""
@@ -146,7 +152,11 @@ class GatewayService:
         in_container = os.path.exists('/.dockerenv') or os.path.exists('/run/.containerenv')
 
         # Only use host networking on native Linux (not inside a container)
-        use_host_network = system_platform == "Linux" and not in_container
+        use_host_network = (
+            settings.bot_deployment.use_host_network_linux
+            and system_platform == "Linux"
+            and not in_container
+        )
 
         if use_host_network:
             logger.info("Detected native Linux - using host network mode for Gateway")
@@ -174,9 +184,12 @@ class GatewayService:
 
             container = self.client.containers.run(**container_config)
 
-            # On macOS/Windows, connect to emqx-bridge network if it exists
+            # On macOS/Windows, connect to configured networks if they exist
             if not use_host_network:
-                possible_networks = ["hummingbot-api_emqx-bridge", "emqx-bridge"]
+                possible_networks = self._get_gateway_networks()
+                if not possible_networks:
+                    logger.info("No gateway networks configured; skipping network attachment")
+                    possible_networks = []
                 for net in possible_networks:
                     try:
                         network = self.client.networks.get(net)

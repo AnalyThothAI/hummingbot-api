@@ -208,30 +208,36 @@ fi
 echo "Hummingbot API Setup"
 echo ""
 
-read -p "API password [default: admin]: " PASSWORD
-PASSWORD=${PASSWORD:-admin}
+read -p "Backend API password [default: admin]: " BACKEND_API_PASSWORD
+BACKEND_API_PASSWORD=${BACKEND_API_PASSWORD:-admin}
 
 read -p "Config password [default: admin]: " CONFIG_PASSWORD
 CONFIG_PASSWORD=${CONFIG_PASSWORD:-admin}
 
 cat > .env << EOF
-# Hummingbot API Configuration
-USERNAME=admin
-PASSWORD=$PASSWORD
+# Backend API (auth + dashboard)
+BACKEND_API_USERNAME=admin
+BACKEND_API_PASSWORD=$BACKEND_API_PASSWORD
+BACKEND_API_DEBUG_MODE=false
+BACKEND_API_HOST=hummingbot-api
+BACKEND_API_PORT=8000
+AUTH_SYSTEM_ENABLED=false
+GATEWAY_ENABLED=true
+
+# Bot config encryption
 CONFIG_PASSWORD=$CONFIG_PASSWORD
-DEBUG_MODE=false
 
 # MQTT Broker
-BROKER_HOST=localhost
+BROKER_HOST=emqx
 BROKER_PORT=1883
 BROKER_USERNAME=admin
 BROKER_PASSWORD=password
 
 # Database (auto-configured by docker-compose)
-DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@localhost:5432/hummingbot_api
+DATABASE_URL=postgresql+asyncpg://hbot:hummingbot-api@postgres:5432/hummingbot_api
 
 # Gateway (optional)
-GATEWAY_URL=http://localhost:15888
+GATEWAY_URL=http://gateway:15888
 GATEWAY_PASSPHRASE=admin
 
 # Paths

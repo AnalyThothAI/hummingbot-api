@@ -1,15 +1,17 @@
 import logging
 import os
+import platform
 import shutil
 import time
 import threading
+from urllib.parse import urlparse
 from typing import Dict
 
 # Create module-specific logger
 logger = logging.getLogger(__name__)
 
 import docker
-from docker.errors import DockerException
+from docker.errors import DockerException, NotFound
 from docker.types import LogConfig
 
 from config import settings
@@ -35,6 +37,74 @@ class DockerService:
             self._start_cleanup_thread()
         except DockerException as e:
             logger.error(f"It was not possible to connect to Docker. Please make sure Docker is running. Error: {e}")
+
+    def _resolve_bot_network_mode(self):
+        system_platform = platform.system()
+        in_container = os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+        use_host_network = (
+            settings.bot_deployment.use_host_network_linux
+            and system_platform == "Linux"
+            and not in_container
+        )
+        return use_host_network, system_platform, in_container
+
+    @staticmethod
+    def _normalize_bot_host(current_host: str, use_host_network: bool, bridge_default: str) -> str:
+        if not current_host:
+            current_host = ""
+
+        local_hosts = {"localhost", "127.0.0.1", "host.docker.internal"}
+        bridge_service_hosts = {"emqx", "gateway"}
+
+        if use_host_network:
+            if current_host in local_hosts or current_host in bridge_service_hosts:
+                return "localhost"
+            return current_host
+
+        if current_host in local_hosts or current_host == "":
+            return bridge_default
+        return current_host
+
+    def _resolve_bot_hosts(self, client_config: dict, use_host_network: bool) -> Dict[str, str]:
+        mqtt_bridge = client_config.get("mqtt_bridge") or {}
+        current_mqtt_host = mqtt_bridge.get("mqtt_host")
+        default_mqtt_host = settings.bot_deployment.mqtt_host or "emqx"
+        mqtt_host = self._normalize_bot_host(current_mqtt_host, use_host_network, default_mqtt_host)
+
+        gateway_cfg = client_config.get("gateway") or {}
+        current_gateway_host = gateway_cfg.get("gateway_api_host")
+        if not current_gateway_host:
+            try:
+                current_gateway_host = urlparse(settings.gateway.url).hostname
+            except Exception:
+                current_gateway_host = None
+        default_gateway_host = settings.bot_deployment.gateway_host or "gateway"
+        gateway_host = self._normalize_bot_host(current_gateway_host, use_host_network, default_gateway_host)
+
+        return {"mqtt_host": mqtt_host, "gateway_host": gateway_host}
+
+    def _get_bot_networks(self) -> list:
+        raw_networks = settings.bot_deployment.networks or ""
+        return [name.strip() for name in raw_networks.split(",") if name.strip()]
+
+    def _connect_to_bot_network(self, container):
+        possible_networks = self._get_bot_networks()
+        if not possible_networks:
+            logger.info("No bot networks configured; skipping network attachment")
+            return False
+        for net in possible_networks:
+            try:
+                network = self.client.networks.get(net)
+                network.connect(container)
+                logger.info(f"Connected bot container to {net} network")
+                return True
+            except docker.errors.NotFound:
+                continue
+            except DockerException as e:
+                logger.warning(f"Failed to connect bot container to {net}: {e}")
+                return False
+        logger.warning("No emqx-bridge network found for bot container")
+        return False
 
     def get_active_containers(self, name_filter: str = None):
         try:
@@ -153,6 +223,29 @@ class DockerService:
         except DockerException as e:
             return {"success": False, "message": str(e)}
 
+    def get_container_logs(self, container_name: str, tail: int = 100):
+        """Get container logs with timestamps."""
+        try:
+            container = self.client.containers.get(container_name)
+        except NotFound:
+            return {
+                "success": False,
+                "message": f"Container {container_name} not found",
+                "error_type": "not_found",
+            }
+        except DockerException as e:
+            return {"success": False, "message": str(e)}
+
+        try:
+            logs = container.logs(tail=tail, timestamps=True).decode("utf-8")
+            return {
+                "success": True,
+                "container": container_name,
+                "logs": logs,
+            }
+        except DockerException as e:
+            return {"success": False, "message": str(e)}
+
     def remove_container(self, container_name, force=True):
         try:
             container = self.client.containers.get(container_name)
@@ -165,6 +258,7 @@ class DockerService:
         bots_path = os.environ.get('BOTS_PATH', self.SOURCE_PATH)  # Default to 'SOURCE_PATH' if BOTS_PATH is not set
         instance_name = config.instance_name
         instance_dir = os.path.join("bots", 'instances', instance_name)
+        use_host_network, system_platform, in_container = self._resolve_bot_network_mode()
         if not os.path.exists(instance_dir):
             os.makedirs(instance_dir)
             os.makedirs(os.path.join(instance_dir, 'data'))
@@ -226,6 +320,13 @@ class DockerService:
         conf_file_path = f"instances/{instance_name}/conf/conf_client.yml"
         client_config = fs_util.read_yaml_file(conf_file_path)
         client_config['instance_id'] = instance_name
+        resolved_hosts = self._resolve_bot_hosts(client_config, use_host_network)
+        mqtt_bridge = client_config.get("mqtt_bridge") or {}
+        mqtt_bridge["mqtt_host"] = resolved_hosts["mqtt_host"]
+        client_config["mqtt_bridge"] = mqtt_bridge
+        gateway_cfg = client_config.get("gateway") or {}
+        gateway_cfg["gateway_api_host"] = resolved_hosts["gateway_host"]
+        client_config["gateway"] = gateway_cfg
         fs_util.dump_dict_to_yaml(conf_file_path, client_config)
 
         # Set up Docker volumes
@@ -242,7 +343,7 @@ class DockerService:
 
         # Set up environment variables
         environment = {}
-        password = settings.security.config_password
+        password = settings.secrets.config_password
         if password:
             environment["CONFIG_PASSWORD"] = password
 
@@ -263,18 +364,33 @@ class DockerService:
                 'max-size': '10m',
                 'max-file': "5",
             })
-        try:
-            self.client.containers.run(
-                image=config.image,
-                name=instance_name,
-                volumes=volumes,
-                environment=environment,
-                network_mode="host",
-                detach=True,
-                tty=True,
-                stdin_open=True,
-                log_config=log_config,
+        if use_host_network:
+            logger.info("Detected native Linux - using host network mode for bot instances")
+        else:
+            logger.info(
+                f"Detected {system_platform} (in_container={in_container}) - using bridge networking for bot instances"
             )
+
+        try:
+            container_config = {
+                "image": config.image,
+                "name": instance_name,
+                "volumes": volumes,
+                "environment": environment,
+                "detach": True,
+                "tty": True,
+                "stdin_open": True,
+                "log_config": log_config,
+            }
+
+            if use_host_network:
+                container_config["network_mode"] = "host"
+
+            container = self.client.containers.run(**container_config)
+
+            if not use_host_network:
+                self._connect_to_bot_network(container)
+
             return {"success": True, "message": f"Instance {instance_name} created successfully."}
         except docker.errors.DockerException as e:
             return {"success": False, "message": str(e)}
