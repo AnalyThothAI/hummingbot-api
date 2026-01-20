@@ -27,7 +27,7 @@ services:
   dashboard:
     container_name: dashboard
     build:
-      context: ./dashboard
+      context: ./lp-dashboard
       dockerfile: Dockerfile
     ports:
       - "8502:8501"
