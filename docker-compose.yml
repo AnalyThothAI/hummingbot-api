@@ -26,8 +26,9 @@ services:
 
   dashboard:
     container_name: dashboard
+    # image: qinghuanlyke/hummingbot-dashboard:v0.0.1
     build:
-      context: ./lp-dashboard
+      context: ./dashboard
       dockerfile: Dockerfile
     ports:
       - "8502:8501"
