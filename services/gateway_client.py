@@ -612,4 +612,3 @@ class GatewayClient:
         except Exception as e:
             logger.error(f"Error polling transaction {tx_hash}: {e}")
             return None
-

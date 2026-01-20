@@ -290,8 +290,15 @@ async def list_pools(
 
         pools = await accounts_service.gateway_client.get_pools(connector_name, network)
 
+        if isinstance(pools, dict) and "error" in pools:
+            status = pools.get("status", 500)
+            raise HTTPException(status_code=status, detail=f"Gateway error: {pools.get('error')}")
+
         if not pools:
             raise HTTPException(status_code=400, detail=f"No pools found for {connector_name}/{network}")
+
+        if not isinstance(pools, list):
+            raise HTTPException(status_code=502, detail="Unexpected Gateway response for pools.")
 
         # Normalize each pool
         normalized_pools = [normalize_gateway_response(pool) for pool in pools]
