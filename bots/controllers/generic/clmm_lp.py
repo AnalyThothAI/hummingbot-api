@@ -1,11 +1,11 @@
 import logging
 from collections import deque
+from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 from typing import Deque, Dict, List, Optional, Set, Tuple
 
 from pydantic import Field
-
 from hummingbot.core.data_type.common import MarketDict, TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.logger import HummingbotLogger
@@ -41,6 +41,181 @@ class ControllerState(str, Enum):
     MANUAL_STOP = "MANUAL_STOP"
 
 
+class RebalanceStage(str, Enum):
+    WAIT_REOPEN = "WAIT_REOPEN"
+    SWAP_PENDING = "SWAP_PENDING"
+    READY_TO_OPEN = "READY_TO_OPEN"
+
+
+@dataclass
+class RebalancePlan:
+    info: Dict
+    reopen_after_ts: float
+    stage: RebalanceStage = RebalanceStage.WAIT_REOPEN
+    swap_attempted: bool = False
+    swap_failed: Optional[bool] = None
+
+
+# Fixed cost-filter constants to keep behavior deterministic and avoid parameter sprawl.
+COST_FILTER_FEE_EWMA_ALPHA = Decimal("0.1")
+COST_FILTER_FEE_SAMPLE_MIN_SECONDS = Decimal("10")
+COST_FILTER_IN_RANGE_TIME_SEC = Decimal("3600")
+COST_FILTER_SWAP_NOTIONAL_PCT = Decimal("0.5")
+COST_FILTER_SWAP_FEE_BUFFER_PCT = Decimal("0.3")
+COST_FILTER_FEE_RATE_FLOOR = Decimal("0.000000001")
+COST_FILTER_SAFETY_FACTOR = Decimal("2")
+COST_FILTER_FORCE_REBALANCE_MULTIPLIER = 10
+COST_FILTER_FORCE_REBALANCE_MIN_SEC = 600
+
+
+def evaluate_cost_filter(
+    *,
+    enabled: bool,
+    current_price: Decimal,
+    position_value: Decimal,
+    fee_rate_ewma: Optional[Decimal],
+    fee_rate_bootstrap_quote_per_hour: Decimal,
+    position_width_pct: Decimal,
+    auto_swap_enabled: bool,
+    swap_slippage_pct: Decimal,
+    fixed_cost_quote: Decimal,
+    max_payback_sec: int,
+) -> Tuple[bool, Dict[str, object]]:
+    details: Dict[str, object] = {}
+    if not enabled:
+        details["reason"] = "disabled"
+        return True, details
+    if current_price <= 0:
+        details["reason"] = "invalid_price"
+        return False, details
+
+    fee_rate = fee_rate_ewma
+    fee_rate_source = "ewma"
+    if fee_rate is None or fee_rate <= 0:
+        fee_rate = fee_rate_bootstrap_quote_per_hour / Decimal("3600")
+        fee_rate_source = "bootstrap" if fee_rate > 0 else "zero"
+
+    half_width = (position_width_pct / Decimal("100")) / Decimal("2")
+    in_range_time = COST_FILTER_IN_RANGE_TIME_SEC
+
+    expected_fees = fee_rate * in_range_time
+    fixed_cost = max(Decimal("0"), fixed_cost_quote)
+    if auto_swap_enabled:
+        swap_notional_pct = COST_FILTER_SWAP_NOTIONAL_PCT
+    else:
+        swap_notional_pct = Decimal("0")
+    swap_notional = position_value * swap_notional_pct
+    swap_fee_pct = max(Decimal("0"), swap_slippage_pct + COST_FILTER_SWAP_FEE_BUFFER_PCT)
+    swap_cost = swap_notional * (swap_fee_pct / Decimal("100"))
+    cost = fixed_cost + swap_cost
+
+    details.update({
+        "fee_rate": fee_rate,
+        "fee_rate_source": fee_rate_source,
+        "in_range_time": in_range_time,
+        "in_range_source": "fixed",
+        "lower_width": half_width,
+        "upper_width": half_width,
+        "expected_fees": expected_fees,
+        "position_value": position_value,
+        "fixed_cost": fixed_cost,
+        "swap_notional": swap_notional,
+        "swap_cost": swap_cost,
+        "cost": cost,
+    })
+    if cost <= 0:
+        details["reason"] = "zero_cost"
+        return True, details
+
+    if expected_fees < (cost * COST_FILTER_SAFETY_FACTOR):
+        details["reason"] = "fee_rate_zero" if fee_rate <= 0 else "expected_fee_below_threshold"
+        return False, details
+
+    min_fee_rate = max(Decimal("0"), COST_FILTER_FEE_RATE_FLOOR)
+    payback = cost / max(fee_rate, min_fee_rate)
+    details["payback_sec"] = payback
+    details["max_payback_sec"] = Decimal(str(max_payback_sec))
+    if payback > Decimal(str(max_payback_sec)):
+        details["reason"] = "payback_exceeded"
+        return False, details
+    details["reason"] = "approved"
+    return True, details
+
+
+def should_force_rebalance(now: float, out_of_range_since: float, rebalance_seconds: int) -> bool:
+    if rebalance_seconds <= 0:
+        return False
+    threshold = max(
+        rebalance_seconds * COST_FILTER_FORCE_REBALANCE_MULTIPLIER,
+        COST_FILTER_FORCE_REBALANCE_MIN_SEC,
+    )
+    return (now - out_of_range_since) >= threshold
+
+
+def apply_inventory_skew_to_widths(
+    *,
+    total_width: Decimal,
+    skew: Decimal,
+    min_width: Decimal,
+) -> Tuple[Decimal, Decimal]:
+    half_width = total_width / Decimal("2")
+    upper_width = half_width * (Decimal("1") - skew)
+    lower_width = half_width * (Decimal("1") + skew)
+
+    min_width = min(min_width, half_width)
+    if upper_width < min_width:
+        upper_width = min_width
+        lower_width = total_width - upper_width
+    elif lower_width < min_width:
+        lower_width = min_width
+        upper_width = total_width - lower_width
+
+    if upper_width < min_width or lower_width < min_width:
+        upper_width = half_width
+        lower_width = half_width
+    return lower_width, upper_width
+
+
+def required_base_ratio_from_range(
+    *,
+    price: Decimal,
+    lower_price: Decimal,
+    upper_price: Decimal,
+) -> Optional[Decimal]:
+    if price <= 0 or lower_price <= 0 or upper_price <= 0:
+        return None
+    if lower_price >= upper_price:
+        return None
+    if price <= lower_price:
+        return Decimal("1")
+    if price >= upper_price:
+        return Decimal("0")
+
+    sp = price.sqrt()
+    sl = lower_price.sqrt()
+    su = upper_price.sqrt()
+    if sp <= 0 or su <= 0:
+        return None
+
+    amount_base = (su - sp) / (sp * su)
+    amount_quote = sp - sl
+    if amount_base <= 0 and amount_quote <= 0:
+        return None
+    if amount_base <= 0:
+        return Decimal("0")
+
+    base_value = amount_base * price
+    total_value = base_value + amount_quote
+    if total_value <= 0:
+        return None
+    ratio = base_value / total_value
+    if ratio < 0:
+        return Decimal("0")
+    if ratio > 1:
+        return Decimal("1")
+    return ratio
+
+
 class CLMMLPGuardedControllerConfig(ControllerConfigBase):
     controller_type: str = "generic"
     controller_name: str = "clmm_lp"
@@ -73,6 +248,23 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
     swap_slippage_pct: Decimal = Field(default=Decimal("1"), json_schema_extra={"is_updatable": True})
     swap_retry_attempts: int = Field(default=0, json_schema_extra={"is_updatable": True})
     swap_retry_delay_sec: Decimal = Field(default=Decimal("1"), json_schema_extra={"is_updatable": True})
+
+    cost_filter_enabled: bool = Field(default=False, json_schema_extra={"is_updatable": True})
+    cost_filter_fee_rate_bootstrap_quote_per_hour: Decimal = Field(
+        default=Decimal("0"),
+        json_schema_extra={"is_updatable": True},
+    )
+    cost_filter_fixed_cost_quote: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
+    cost_filter_max_payback_sec: int = Field(default=3600, json_schema_extra={"is_updatable": True})
+
+    inventory_skew_enabled: bool = Field(default=False, json_schema_extra={"is_updatable": True})
+    inventory_skew_k: Decimal = Field(default=Decimal("2"), json_schema_extra={"is_updatable": True})
+    inventory_skew_max: Decimal = Field(default=Decimal("0.6"), json_schema_extra={"is_updatable": True})
+    inventory_skew_ema_alpha: Decimal = Field(default=Decimal("0.1"), json_schema_extra={"is_updatable": True})
+    inventory_skew_step_min: Decimal = Field(default=Decimal("0.05"), json_schema_extra={"is_updatable": True})
+    inventory_skew_min_width_pct: Decimal = Field(default=Decimal("0.5"), json_schema_extra={"is_updatable": True})
+    inventory_soft_band_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
+    inventory_hard_band_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
 
     stop_loss_pnl_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     stop_loss_pause_sec: int = Field(default=1800, json_schema_extra={"is_updatable": True})
@@ -125,14 +317,23 @@ class CLMMLPGuardedController(ControllerBase):
         self._state: ControllerState = ControllerState.IDLE
         self._last_rebalance_ts: float = 0.0
         self._rebalance_timestamps: Deque[float] = deque(maxlen=200)
-        self._reopen_after_ts: float = 0.0
-        self._pending_rebalance_info: Optional[Dict] = None
+        self._rebalance_plan: Optional[RebalancePlan] = None
         self._pending_liquidation: bool = False
         self._inventory_swap_attempted: bool = False
         self._inventory_swap_failed: Optional[bool] = None
         self._stop_loss_until_ts: float = 0.0
         self._last_exit_reason: Optional[str] = None
         self._anchor_value_by_executor: Dict[str, Decimal] = {}
+
+        self._fee_rate_ewma: Optional[Decimal] = None
+        self._last_fee_value: Optional[Decimal] = None
+        self._last_fee_ts: Optional[float] = None
+        self._last_fee_position: Optional[str] = None
+        self._inventory_ratio: Optional[Decimal] = None
+        self._inventory_ratio_ema: Optional[Decimal] = None
+        self._inventory_deviation: Optional[Decimal] = None
+        self._inventory_skew: Decimal = Decimal("0")
+        self._last_cost_filter_log_ts: float = 0.0
 
         self._wallet_base: Decimal = Decimal("0")
         self._wallet_quote: Decimal = Decimal("0")
@@ -152,9 +353,14 @@ class CLMMLPGuardedController(ControllerBase):
 
     async def update_processed_data(self):
         await self._update_wallet_balances()
+        now = self.market_data_provider.time()
+        current_price = self._get_current_price()
+        lp_executor = self._get_active_lp_executor()
+        self._update_inventory_metrics(current_price, lp_executor)
+        self._update_fee_rate_estimate(current_price, now, lp_executor)
         budget_snapshot = self._budget_pool.snapshot() if self._budget_pool else None
         self.processed_data = {
-            "current_price": self._get_current_price(),
+            "current_price": current_price,
             "wallet_base": self._wallet_base,
             "wallet_quote": self._wallet_quote,
             "controller_state": self._state.value,
@@ -170,77 +376,96 @@ class CLMMLPGuardedController(ControllerBase):
         lp_executor = self._get_active_lp_executor()
         swap_executor = self._get_active_swap_executor()
 
-        if self.config.manual_kill_switch:
-            self._set_state(ControllerState.MANUAL_STOP, "manual_kill_switch")
-            if lp_executor:
-                actions.append(StopExecutorAction(controller_id=self.config.id, executor_id=lp_executor.id))
+        if self._handle_manual_kill_switch(lp_executor, actions):
+            return actions
+        if self._handle_swap_in_progress(swap_executor):
+            return actions
+        if self._handle_active_lp(lp_executor, now, actions):
+            return actions
+        if self._handle_pending_liquidation(actions):
+            return actions
+        if self._handle_stop_loss_cooldown(now):
+            return actions
+        if self._handle_rebalance_plan(now, actions):
             return actions
 
-        if swap_executor:
-            swap_label = swap_executor.config.level_id or "swap"
-            self._set_state(ControllerState.WAIT_SWAP, f"{swap_label}_in_progress")
-            return actions
+        self._handle_entry(now, actions)
+        return actions
 
-        if self._pending_liquidation:
-            self._set_state(ControllerState.WAIT_SWAP, "stop_loss_liquidation")
-            swap_action = self._build_liquidation_action()
-            if swap_action:
-                actions.append(swap_action)
-                self._pending_liquidation = False
-            return actions
-
+    def _handle_manual_kill_switch(self, lp_executor: Optional[ExecutorInfo], actions: List[ExecutorAction]) -> bool:
+        if not self.config.manual_kill_switch:
+            return False
+        self._set_state(ControllerState.MANUAL_STOP, "manual_kill_switch")
         if lp_executor:
-            self._set_state(ControllerState.ACTIVE)
-            stop_action = self._maybe_stop_for_stop_loss(lp_executor, now)
-            if stop_action:
-                self._set_state(ControllerState.STOPLOSS_PAUSE, "stop_loss_triggered")
-                actions.append(stop_action)
-                return actions
+            actions.append(StopExecutorAction(controller_id=self.config.id, executor_id=lp_executor.id))
+        return True
 
-            stop_action = self._maybe_stop_for_rebalance(lp_executor, now)
-            if stop_action:
-                self._set_state(ControllerState.REBALANCE_WAIT_CLOSE, "out_of_range_rebalance")
-                actions.append(stop_action)
-                return actions
+    def _handle_swap_in_progress(self, swap_executor: Optional[ExecutorInfo]) -> bool:
+        if not swap_executor:
+            return False
+        swap_label = swap_executor.config.level_id or "swap"
+        self._set_state(ControllerState.WAIT_SWAP, f"{swap_label}_in_progress")
+        return True
 
-            return actions
+    def _handle_active_lp(
+        self,
+        lp_executor: Optional[ExecutorInfo],
+        now: float,
+        actions: List[ExecutorAction],
+    ) -> bool:
+        if not lp_executor:
+            return False
+        self._set_state(ControllerState.ACTIVE)
+        stop_action = self._maybe_stop_for_stop_loss(lp_executor, now)
+        if stop_action:
+            self._set_state(ControllerState.STOPLOSS_PAUSE, "stop_loss_triggered")
+            actions.append(stop_action)
+            return True
 
-        if now < self._stop_loss_until_ts:
-            self._set_state(ControllerState.STOPLOSS_PAUSE, "cooldown")
-            return actions
+        stop_action = self._maybe_stop_for_rebalance(lp_executor, now)
+        if stop_action:
+            self._set_state(ControllerState.REBALANCE_WAIT_CLOSE, "out_of_range_rebalance")
+            actions.append(stop_action)
+            return True
 
-        if self._pending_rebalance_info is not None:
-            if now < self._reopen_after_ts:
-                self._set_state(ControllerState.REBALANCE_WAIT_CLOSE, "reopen_delay")
-                return actions
+        return True
 
-            if self.config.auto_swap_enabled and not self._inventory_swap_attempted and not self._should_use_single_sided_rebalance():
-                swap_action = self._build_inventory_swap_action()
-                if swap_action:
-                    self._set_state(ControllerState.INVENTORY_SWAP, "rebalance_inventory")
-                    actions.append(swap_action)
-                    return actions
+    def _handle_pending_liquidation(self, actions: List[ExecutorAction]) -> bool:
+        if not self._pending_liquidation:
+            return False
+        swap_action = self._build_liquidation_action()
+        if swap_action:
+            self._pending_liquidation = False
+            self._set_state(ControllerState.WAIT_SWAP, "stop_loss_liquidation")
+            actions.append(swap_action)
+        else:
+            self._pending_liquidation = False
+            self._set_state(ControllerState.STOPLOSS_PAUSE, "stop_loss_no_liquidation")
+        return True
 
-            use_single_sided = self._should_use_single_sided_rebalance()
-            self._set_state(ControllerState.READY_TO_OPEN, "rebalance_open")
-            lp_action = self._create_lp_executor_action(use_single_sided=use_single_sided)
-            if lp_action:
-                actions.append(lp_action)
-                self._set_state(ControllerState.ACTIVE, "lp_open")
-            else:
-                self._set_state(ControllerState.IDLE, "lp_open_failed")
-            return actions
+    def _handle_stop_loss_cooldown(self, now: float) -> bool:
+        if now >= self._stop_loss_until_ts:
+            return False
+        self._set_state(ControllerState.STOPLOSS_PAUSE, "cooldown")
+        return True
 
+    def _handle_rebalance_plan(self, now: float, actions: List[ExecutorAction]) -> bool:
+        if self._rebalance_plan is None:
+            return False
+        actions.extend(self._advance_rebalance_plan(now))
+        return True
+
+    def _handle_entry(self, now: float, actions: List[ExecutorAction]):
         if not self._can_start_new_position(now):
             self._set_state(ControllerState.IDLE, "entry_blocked")
-            return actions
+            return
 
         if self.config.auto_swap_enabled and not self._inventory_swap_attempted:
             swap_action = self._build_inventory_swap_action()
             if swap_action:
                 self._set_state(ControllerState.INVENTORY_SWAP, "entry_inventory")
                 actions.append(swap_action)
-                return actions
+                return
 
         self._set_state(ControllerState.READY_TO_OPEN, "entry_open")
         lp_action = self._create_lp_executor_action(use_single_sided=False)
@@ -249,14 +474,19 @@ class CLMMLPGuardedController(ControllerBase):
             self._set_state(ControllerState.ACTIVE, "lp_open")
         else:
             self._set_state(ControllerState.IDLE, "lp_open_failed")
-        return actions
 
     def _get_active_lp_executor(self) -> Optional[ExecutorInfo]:
-        active = [e for e in self.executors_info if e.is_active and e.type == "lp_position_executor"]
+        active = [
+            e for e in self.executors_info
+            if e.is_active and e.type == "lp_position_executor" and e.controller_id == self.config.id
+        ]
         return active[0] if active else None
 
     def _get_active_swap_executor(self) -> Optional[ExecutorInfo]:
-        active = [e for e in self.executors_info if e.is_active and e.type == "gateway_swap_executor"]
+        active = [
+            e for e in self.executors_info
+            if e.is_active and e.type == "gateway_swap_executor" and e.controller_id == self.config.id
+        ]
         return active[0] if active else None
 
     def _get_current_price(self) -> Optional[Decimal]:
@@ -279,6 +509,177 @@ class CLMMLPGuardedController(ControllerBase):
         except Exception:
             return
 
+    def _update_fee_rate_estimate(
+        self,
+        current_price: Optional[Decimal],
+        now: float,
+        executor: Optional[ExecutorInfo],
+    ):
+        if current_price is None or current_price <= 0 or executor is None:
+            return
+        custom = executor.custom_info or {}
+        if custom.get("state") != LPPositionStates.IN_RANGE.value:
+            return
+        position_address = custom.get("position_address")
+        if position_address and self._last_fee_position != position_address:
+            self._last_fee_position = position_address
+            self._last_fee_value = None
+            self._last_fee_ts = None
+            self._fee_rate_ewma = None
+            return
+
+        base_fee = Decimal(str(custom.get("base_fee", 0)))
+        quote_fee = Decimal(str(custom.get("quote_fee", 0)))
+        pending_fee = base_fee * current_price + quote_fee
+
+        if self._last_fee_ts is None or self._last_fee_value is None:
+            self._last_fee_ts = now
+            self._last_fee_value = pending_fee
+            return
+
+        dt = Decimal(str(now - self._last_fee_ts))
+        if dt <= 0:
+            return
+        if dt < COST_FILTER_FEE_SAMPLE_MIN_SECONDS:
+            return
+
+        delta = pending_fee - self._last_fee_value
+        if delta < 0:
+            self._last_fee_ts = now
+            self._last_fee_value = pending_fee
+            return
+
+        fee_rate = delta / dt
+        alpha = COST_FILTER_FEE_EWMA_ALPHA
+        if self._fee_rate_ewma is None:
+            self._fee_rate_ewma = fee_rate
+        else:
+            self._fee_rate_ewma = (self._fee_rate_ewma * (Decimal("1") - alpha)) + (fee_rate * alpha)
+
+        self._last_fee_ts = now
+        self._last_fee_value = pending_fee
+
+    def _normalize_ratio_value(self, value: Decimal) -> Decimal:
+        ratio = Decimal(str(value))
+        if ratio > 1:
+            ratio = ratio / Decimal("100")
+        if ratio < 0:
+            return Decimal("0")
+        if ratio > 1:
+            return Decimal("1")
+        return ratio
+
+    def _update_inventory_metrics(self, current_price: Optional[Decimal], executor: Optional[ExecutorInfo]):
+        if not self.config.inventory_skew_enabled:
+            self._inventory_ratio = None
+            self._inventory_ratio_ema = None
+            self._inventory_deviation = None
+            self._inventory_skew = Decimal("0")
+            return
+        if current_price is None or current_price <= 0:
+            return
+
+        base_available, quote_available = self._get_budget_balances()
+        deployed_base, deployed_quote = self._get_deployed_amounts(executor)
+        base_total = base_available + deployed_base
+        quote_total = quote_available + deployed_quote
+        total_value = base_total * current_price + quote_total
+        if total_value <= 0:
+            return
+
+        ratio = (base_total * current_price) / total_value
+        self._inventory_ratio = ratio
+
+        alpha = self.config.inventory_skew_ema_alpha
+        if self._inventory_ratio_ema is None:
+            self._inventory_ratio_ema = ratio
+        else:
+            self._inventory_ratio_ema = (self._inventory_ratio_ema * (Decimal("1") - alpha)) + (ratio * alpha)
+
+        target_ratio = self._normalized_target_ratio()
+        deviation = self._inventory_ratio_ema - target_ratio
+        self._inventory_deviation = deviation
+
+        skew_raw = deviation * self.config.inventory_skew_k
+        skew = max(-self.config.inventory_skew_max, min(self.config.inventory_skew_max, skew_raw))
+        if abs(skew - self._inventory_skew) >= self.config.inventory_skew_step_min:
+            self._inventory_skew = skew
+
+    def _get_deployed_amounts(self, executor: Optional[ExecutorInfo]) -> Tuple[Decimal, Decimal]:
+        if executor is None:
+            return Decimal("0"), Decimal("0")
+        custom = executor.custom_info or {}
+        if custom.get("state") in [LPPositionStates.OPENING.value, LPPositionStates.CLOSING.value]:
+            return Decimal("0"), Decimal("0")
+        base_amount = Decimal(str(custom.get("base_amount", 0)))
+        quote_amount = Decimal(str(custom.get("quote_amount", 0)))
+        base_fee = Decimal(str(custom.get("base_fee", 0)))
+        quote_fee = Decimal(str(custom.get("quote_fee", 0)))
+        return base_amount + base_fee, quote_amount + quote_fee
+
+    def _get_planned_widths(self) -> Tuple[Decimal, Decimal]:
+        total_width = self.config.position_width_pct / Decimal("100")
+        half_width = total_width / Decimal("2")
+        if not self.config.inventory_skew_enabled:
+            return half_width, half_width
+        min_width = self.config.inventory_skew_min_width_pct / Decimal("100")
+        return apply_inventory_skew_to_widths(
+            total_width=total_width,
+            skew=self._inventory_skew,
+            min_width=min_width,
+        )
+
+    def _maybe_log_cost_filter(self, allowed: bool, details: Dict, now: float):
+        interval = max(self.config.cooldown_seconds, 60)
+        if (now - self._last_cost_filter_log_ts) < interval:
+            return
+        self._last_cost_filter_log_ts = now
+        reason = details.get("reason", "unknown")
+        self.logger().info(
+            "Cost filter %s: reason=%s fee_rate=%.8f(%s) in_range=%.2f(%s) "
+            "widths=%.4f/%.4f expected=%.6f cost=%.6f fixed=%.6f swap_notional=%.6f "
+            "swap_cost=%.6f payback=%.2f",
+            "ALLOW" if allowed else "BLOCK",
+            reason,
+            float(details.get("fee_rate", Decimal("0"))),
+            details.get("fee_rate_source", "n/a"),
+            float(details.get("in_range_time", Decimal("0"))),
+            details.get("in_range_source", "n/a"),
+            float(details.get("lower_width", Decimal("0"))),
+            float(details.get("upper_width", Decimal("0"))),
+            float(details.get("expected_fees", Decimal("0"))),
+            float(details.get("cost", Decimal("0"))),
+            float(details.get("fixed_cost", Decimal("0"))),
+            float(details.get("swap_notional", Decimal("0"))),
+            float(details.get("swap_cost", Decimal("0"))),
+            float(details.get("payback_sec", Decimal("0"))),
+        )
+
+    def _estimate_position_value(self, executor: ExecutorInfo, current_price: Decimal) -> Decimal:
+        custom = executor.custom_info or {}
+        base_amount = Decimal(str(custom.get("base_amount", 0)))
+        quote_amount = Decimal(str(custom.get("quote_amount", 0)))
+        base_fee = Decimal(str(custom.get("base_fee", 0)))
+        quote_fee = Decimal(str(custom.get("quote_fee", 0)))
+        return (base_amount + base_fee) * current_price + (quote_amount + quote_fee)
+
+    def _is_inventory_swap_allowed(self) -> bool:
+        if not self.config.inventory_skew_enabled:
+            return True
+        if self._inventory_deviation is None:
+            return False
+        deviation = abs(self._inventory_deviation)
+        soft_band = self._normalize_ratio_value(self.config.inventory_soft_band_pct)
+        hard_band = self._normalize_ratio_value(self.config.inventory_hard_band_pct)
+        if hard_band > 0:
+            hard_band = max(hard_band, soft_band)
+            if deviation < soft_band:
+                return False
+            return deviation >= hard_band
+        if soft_band <= 0:
+            return True
+        return deviation >= soft_band
+
     def _can_start_new_position(self, now: float) -> bool:
         if not self._is_entry_triggered():
             return False
@@ -286,7 +687,7 @@ class CLMMLPGuardedController(ControllerBase):
             return False
         if now < self._stop_loss_until_ts:
             return False
-        if self._pending_rebalance_info is not None and now < self._reopen_after_ts:
+        if self._rebalance_plan is not None:
             return False
         return True
 
@@ -318,7 +719,7 @@ class CLMMLPGuardedController(ControllerBase):
         return None
 
     def _maybe_stop_for_rebalance(self, executor: ExecutorInfo, now: float) -> Optional[StopExecutorAction]:
-        if self._pending_rebalance_info is not None:
+        if self._rebalance_plan is not None:
             return None
         custom = executor.custom_info
         state = custom.get("state")
@@ -350,9 +751,37 @@ class CLMMLPGuardedController(ControllerBase):
             return None
         if not self._can_rebalance_now(now):
             return None
+        allow_rebalance, cost_details = evaluate_cost_filter(
+            enabled=self.config.cost_filter_enabled,
+            current_price=current_price,
+            position_value=self._estimate_position_value(executor, current_price),
+            fee_rate_ewma=self._fee_rate_ewma,
+            fee_rate_bootstrap_quote_per_hour=self.config.cost_filter_fee_rate_bootstrap_quote_per_hour,
+            position_width_pct=self.config.position_width_pct,
+            auto_swap_enabled=self.config.auto_swap_enabled,
+            swap_slippage_pct=self.config.swap_slippage_pct,
+            fixed_cost_quote=self.config.cost_filter_fixed_cost_quote,
+            max_payback_sec=self.config.cost_filter_max_payback_sec,
+        )
+        if not allow_rebalance and should_force_rebalance(
+            now,
+            out_of_range_since,
+            self.config.rebalance_seconds,
+        ):
+            cost_details["reason"] = "force_rebalance"
+            allow_rebalance = True
+        if self.config.cost_filter_enabled:
+            self._maybe_log_cost_filter(allow_rebalance, cost_details, now)
+        if not allow_rebalance:
+            return None
 
-        self._pending_rebalance_info = custom.copy()
-        self._reopen_after_ts = now + self.config.reopen_delay_sec
+        self._rebalance_plan = RebalancePlan(
+            info=custom.copy(),
+            reopen_after_ts=now + self.config.reopen_delay_sec,
+            stage=RebalanceStage.WAIT_REOPEN,
+            swap_attempted=False,
+            swap_failed=None,
+        )
         self._record_rebalance(now)
         self._reset_inventory_swap_state()
         return StopExecutorAction(controller_id=self.config.id, executor_id=executor.id)
@@ -416,9 +845,26 @@ class CLMMLPGuardedController(ControllerBase):
             executor_config=executor_config,
         )
 
+    def _build_rebalance_swap_action(self) -> Optional[CreateExecutorAction]:
+        plan = self._rebalance_plan
+        if plan is None:
+            return None
+        executor_config = self._calculate_inventory_swap_config()
+        if executor_config is None:
+            return None
+        self._record_swap_adjustment(executor_config)
+        plan.swap_attempted = True
+        plan.swap_failed = None
+        return CreateExecutorAction(
+            controller_id=self.config.id,
+            executor_config=executor_config,
+        )
+
     def _calculate_inventory_swap_config(self) -> Optional[GatewaySwapExecutorConfig]:
         price = self._get_current_price()
         if price is None or price <= 0:
+            return None
+        if not self._is_inventory_swap_allowed():
             return None
 
         base_balance, quote_balance = self._get_budget_balances()
@@ -483,18 +929,16 @@ class CLMMLPGuardedController(ControllerBase):
         return amount * (Decimal("1") - (buffer_pct / Decimal("100")))
 
     def _normalized_target_ratio(self) -> Decimal:
-        ratio = self.config.target_base_value_pct
-        if ratio > 1:
-            ratio = ratio / Decimal("100")
-        if ratio < 0:
-            return Decimal("0")
-        if ratio > 1:
-            return Decimal("1")
-        return ratio
+        return self._normalize_ratio_value(self.config.target_base_value_pct)
 
-    def _calculate_target_allocation_amounts(self, price: Decimal) -> Tuple[Decimal, Decimal]:
+    def _calculate_target_allocation_amounts(
+        self,
+        price: Decimal,
+        ratio_override: Optional[Decimal] = None,
+    ) -> Tuple[Decimal, Decimal]:
         base_available, quote_available = self._get_budget_balances()
-        ratio = self._normalized_target_ratio()
+        ratio_value = ratio_override if ratio_override is not None else self._normalized_target_ratio()
+        ratio = self._normalize_ratio_value(ratio_value)
         if ratio <= 0:
             return Decimal("0"), quote_available
         if ratio >= 1:
@@ -512,12 +956,10 @@ class CLMMLPGuardedController(ControllerBase):
         quote_amt = total_value * (Decimal("1") - ratio)
         return base_amt, quote_amt
 
-    def _should_use_single_sided_rebalance(self) -> bool:
-        if self._pending_rebalance_info is None:
-            return False
+    def _should_open_single_sided(self, plan: RebalancePlan) -> bool:
         if not self.config.auto_swap_enabled:
             return True
-        return self._inventory_swap_failed is True
+        return plan.swap_failed is True
 
     def _create_lp_executor_action(self, use_single_sided: bool) -> Optional[CreateExecutorAction]:
         executor_config = self._create_lp_executor_config(use_single_sided=use_single_sided)
@@ -536,8 +978,9 @@ class CLMMLPGuardedController(ControllerBase):
         if current_price is None or current_price <= 0:
             return None
 
-        if self._pending_rebalance_info and use_single_sided:
-            info = self._pending_rebalance_info
+        ratio_override = None
+        if self._rebalance_plan and use_single_sided:
+            info = self._rebalance_plan.info
             lower_price = Decimal(str(info.get("lower_price", current_price)))
             was_below_range = current_price < lower_price
             if was_below_range:
@@ -548,7 +991,23 @@ class CLMMLPGuardedController(ControllerBase):
                 quote_amt = Decimal(str(info.get("quote_amount", 0))) + Decimal(str(info.get("quote_fee", 0)))
         else:
             if self._budget_pool:
-                base_amt, quote_amt = self._calculate_target_allocation_amounts(current_price)
+                if self.config.inventory_skew_enabled:
+                    lower_width, upper_width = self._get_planned_widths()
+                    lower_price = current_price * (Decimal("1") - lower_width)
+                    upper_price = current_price * (Decimal("1") + upper_width)
+                    ratio_override = required_base_ratio_from_range(
+                        price=current_price,
+                        lower_price=lower_price,
+                        upper_price=upper_price,
+                    )
+                    if ratio_override is not None:
+                        ratio_override = self._normalize_ratio_value(ratio_override)
+                        if ratio_override <= 0 or ratio_override >= 1:
+                            ratio_override = None
+                base_amt, quote_amt = self._calculate_target_allocation_amounts(
+                    current_price,
+                    ratio_override=ratio_override,
+                )
             else:
                 base_amt = self.config.base_amount
                 quote_amt = self.config.quote_amount
@@ -557,6 +1016,22 @@ class CLMMLPGuardedController(ControllerBase):
             return None
 
         lower_price, upper_price = self._calculate_price_bounds(current_price, base_amt, quote_amt)
+        if self.config.inventory_skew_enabled and base_amt > 0 and quote_amt > 0:
+            lower_width, upper_width = self._get_planned_widths()
+            ratio_used = ratio_override if ratio_override is not None else self._normalized_target_ratio()
+            ratio_source = "range" if ratio_override is not None else "target"
+            self.logger().info(
+                "Inventory skew applied: skew=%.4f ratio=%.4f target=%.4f deviation=%.4f "
+                "widths=%.4f/%.4f ratio_used=%.4f(%s)",
+                float(self._inventory_skew),
+                float(self._inventory_ratio_ema or Decimal("0")),
+                float(self._normalized_target_ratio()),
+                float(self._inventory_deviation or Decimal("0")),
+                float(lower_width),
+                float(upper_width),
+                float(ratio_used),
+                ratio_source,
+            )
 
         side = self._get_side_from_amounts(base_amt, quote_amt)
         executor_config = LPPositionExecutorConfig(
@@ -588,9 +1063,9 @@ class CLMMLPGuardedController(ControllerBase):
     ) -> tuple[Decimal, Decimal]:
         total_width = self.config.position_width_pct / Decimal("100")
         if base_amt > 0 and quote_amt > 0:
-            half_width = total_width / Decimal("2")
-            lower_price = current_price * (Decimal("1") - half_width)
-            upper_price = current_price * (Decimal("1") + half_width)
+            lower_width, upper_width = self._get_planned_widths()
+            lower_price = current_price * (Decimal("1") - lower_width)
+            upper_price = current_price * (Decimal("1") + upper_width)
         elif base_amt > 0:
             lower_price = current_price
             upper_price = current_price * (Decimal("1") + total_width)
@@ -675,9 +1150,42 @@ class CLMMLPGuardedController(ControllerBase):
             message = f"{message} ({reason})"
         self.logger().info(message)
 
+    def _advance_rebalance_plan(self, now: float) -> List[ExecutorAction]:
+        actions: List[ExecutorAction] = []
+        plan = self._rebalance_plan
+        if plan is None:
+            return actions
+
+        if plan.stage == RebalanceStage.WAIT_REOPEN:
+            if now < plan.reopen_after_ts:
+                self._set_state(ControllerState.REBALANCE_WAIT_CLOSE, "reopen_delay")
+                return actions
+            plan.stage = RebalanceStage.SWAP_PENDING
+
+        if plan.stage == RebalanceStage.SWAP_PENDING:
+            if self.config.auto_swap_enabled and not plan.swap_attempted and not self._should_open_single_sided(plan):
+                swap_action = self._build_rebalance_swap_action()
+                if swap_action:
+                    self._set_state(ControllerState.INVENTORY_SWAP, "rebalance_inventory")
+                    actions.append(swap_action)
+                    return actions
+            plan.stage = RebalanceStage.READY_TO_OPEN
+
+        if plan.stage == RebalanceStage.READY_TO_OPEN:
+            use_single_sided = self._should_open_single_sided(plan)
+            self._set_state(ControllerState.READY_TO_OPEN, "rebalance_open")
+            lp_action = self._create_lp_executor_action(use_single_sided=use_single_sided)
+            if lp_action:
+                actions.append(lp_action)
+                self._set_state(ControllerState.ACTIVE, "lp_open")
+            else:
+                self._set_state(ControllerState.IDLE, "lp_open_failed")
+            return actions
+
+        return actions
+
     def _clear_rebalance_context(self):
-        self._pending_rebalance_info = None
-        self._reopen_after_ts = 0.0
+        self._rebalance_plan = None
 
     def _reset_inventory_swap_state(self):
         self._inventory_swap_attempted = False
@@ -767,8 +1275,15 @@ class CLMMLPGuardedController(ControllerBase):
             return
         self._settled_swap_executors.add(executor.id)
         if executor.config.level_id == "auto_swap":
-            self._inventory_swap_attempted = True
-            self._inventory_swap_failed = executor.close_type == CloseType.FAILED
+            if self._rebalance_plan and self._rebalance_plan.stage in {
+                RebalanceStage.SWAP_PENDING,
+                RebalanceStage.READY_TO_OPEN,
+            }:
+                self._rebalance_plan.swap_attempted = True
+                self._rebalance_plan.swap_failed = executor.close_type == CloseType.FAILED
+            else:
+                self._inventory_swap_attempted = True
+                self._inventory_swap_failed = executor.close_type == CloseType.FAILED
         if not self._budget_pool:
             return
         reservation_id = self._swap_pool_reservations.pop(executor.config.id, None)

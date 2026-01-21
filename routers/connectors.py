@@ -22,7 +22,7 @@ async def available_connectors():
     return list(AllConnectorSettings.get_connector_settings().keys())
 
 
-@router.get("/{connector_name}/config-map", response_model=Dict[str, dict])
+@router.get("/{connector_name:path}/config-map", response_model=Dict[str, dict])
 async def get_connector_config_map(connector_name: str, accounts_service: AccountsService = Depends(get_accounts_service)):
     """
     Get configuration fields required for a specific connector with type information.
@@ -39,7 +39,7 @@ async def get_connector_config_map(connector_name: str, accounts_service: Accoun
     return accounts_service.get_connector_config_map(connector_name)
 
 
-@router.get("/{connector_name}/trading-rules")
+@router.get("/{connector_name:path}/trading-rules")
 async def get_trading_rules(
     request: Request, 
     connector_name: str,
@@ -79,7 +79,7 @@ async def get_trading_rules(
         raise HTTPException(status_code=500, detail=f"Error retrieving trading rules: {str(e)}")
 
 
-@router.get("/{connector_name}/order-types")
+@router.get("/{connector_name:path}/order-types")
 async def get_supported_order_types(request: Request, connector_name: str):
     """
     Get order types supported by a specific connector.

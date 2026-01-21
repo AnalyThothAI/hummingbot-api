@@ -7,6 +7,8 @@
 
 - Controller 实现：`bots/controllers/generic/clmm_lp.py`
 - Controller 配置：`bots/conf/controllers/clmm_lp.yml`
+- Cost filter helper：`bots/controllers/generic/clmm_lp.py`
+- Inventory skew helper：`bots/controllers/generic/clmm_lp.py`
 - Loader 脚本：`bots/scripts/v2_with_controllers.py`
 - LP Executor：`hummingbot/hummingbot/strategy_v2/executors/lp_position_executor/`
 - Swap Executor：`hummingbot/hummingbot/strategy_v2/executors/gateway_swap_executor/`
@@ -117,6 +119,14 @@ if auto_swap and not swap_attempted:
 open LP; state=ACTIVE
 ```
 
+### 5.4 状态机审阅（简化结论）
+
+- **优先级明确**：`manual_kill_switch` > `swap_executor` > `pending_liquidation` > `stop_loss` > `rebalance` > `entry`。
+- **互斥保障**：`WAIT_SWAP` 期间不触发 LP 开仓/重开，避免并发链上动作。
+- **再平衡闭环**：out-of-range → stop LP → pending_rebalance →（可选 swap）→ open LP。
+- **避免卡死**：cost filter 拒绝时，长时间 out-of-range 会触发强制重平衡。
+- **风险隔离**：stop loss 与 manual stop 不受 cost filter 影响。
+
 ## 6. 数量/资金链路（预算链路）
 
 ### 6.1 预算模式
@@ -152,12 +162,144 @@ open LP; state=ACTIVE
 - out_of_range 时长超过 `rebalance_seconds`；
 - 满足冷却时间 `cooldown_seconds`；
 - 小时内重平衡次数未超过 `max_rebalances_per_hour`。
+- 若开启 cost filter，需通过成本过滤判定。
 
 触发后流程：
 1) Stop LP executor。
 2) 等待 `reopen_delay_sec`。
 3) 若开启 `auto_swap` 且未失败，执行库存调整 swap。
 4) 开新 LP。若 swap 失败则单边开仓（保留原一侧余额）。
+
+### 7.1 策略A：再平衡成本过滤（Cost Filter）
+
+**目标**：避免趋势行情中频繁“全平重开”导致的手续费与滑点吞噬收益。
+
+**实现位置**：逻辑在 `bots/controllers/generic/clmm_lp.py` 内，保持单文件可运行。
+
+**核心输入**（均在 Controller 内部观测，不依赖外部 volume）：
+- **fee_rate**：使用 LP position 的 pending fee 变化估计（`base_fee/quote_fee` 转 quote）。
+- **in_range_time**：固定评估窗口（常量 1 小时）。
+- **cost**：固定成本 + 预计 swap 成本（滑点 + 固定费率缓冲）。
+
+**估算方法（简化版）**：
+1) **fee_rate**（quote/sec）
+   - 仅在 `IN_RANGE` 时更新。
+   - EWMA：`fee_rate = fee_rate*(1-α) + (delta_fee/dt)*α`（α=0.1，取样间隔 10 秒，内部常量）。
+   - 若 EWMA 不可用：使用 `cost_filter_fee_rate_bootstrap_quote_per_hour / 3600`，为 0 时表示 fee_rate=0。
+2) **期望在场时间**：
+   - `in_range_time = 3600` 秒（内部常量，不依赖波动率）。
+3) **成本**：
+   - `fixed_cost = cost_filter_fixed_cost_quote`
+   - `swap_cost = position_value * 0.5 * (swap_slippage_pct + 0.3%)`
+   - 若 `auto_swap_enabled=false`，`swap_cost=0`
+   - `C = fixed_cost + swap_cost`
+4) **决策**：
+   - `expected_fee = fee_rate * in_range_time`
+   - `expected_fee >= C * 2`（内部常量）
+   - `payback = C / max(fee_rate, 1e-9) <= cost_filter_max_payback_sec`
+
+#### 7.1.1 决策流程（确定性步骤）
+
+给定当前价格、position custom_info 和配置项，控制器按如下顺序判断（顺序固定）：
+1) 若 `cost_filter_enabled=false` → **允许**
+2) 若 `current_price<=0` → **拒绝**（invalid_price）
+3) 计算 `fee_rate`：
+   - 优先用 EWMA；
+   - EWMA 不可用时，使用 `cost_filter_fee_rate_bootstrap_quote_per_hour / 3600`
+4) 固定 `in_range_time=3600s`
+5) 计算 `expected_fees = fee_rate * in_range_time`
+6) 计算成本 `C = fixed_cost + swap_cost`
+7) 若 `C<=0` → **允许**（zero_cost）
+8) 若 `expected_fees < C * 2` → **拒绝**（fee_rate_zero / expected_fee_below_threshold）
+9) 计算 `payback = C / max(fee_rate, 1e-9)`
+10) 若 `payback > cost_filter_max_payback_sec` → **拒绝**（payback_exceeded）
+11) 若 out-of-range 持续超过 `max(rebalance_seconds * 10, 600)` → **允许**（force_rebalance）
+12) 否则 → **允许**（approved）
+
+**边界处理（确定性规则）**：
+- **fee_rate 缺失**：使用 `cost_filter_fee_rate_bootstrap_quote_per_hour / 3600`，为 0 时 fee_rate=0。
+- **fee_rate=0**：expected_fees=0，触发 `fee_rate_zero` 拒绝，除非成本为 0。
+- **价格无效**：直接拒绝 rebalance。
+- **成本为 0**：直接放行（不进行收益判断）。
+- **回本时间**：使用 `max(fee_rate, 1e-9)` 防止除零。
+- **强制重平衡**：长时间 out-of-range 会绕过 cost filter，避免“卡死”。
+
+#### 7.1.2 与其他逻辑的交互与优先级
+
+- **Stop loss 优先**：止损触发会先停止 LP，不受 cost filter 影响。
+- **冷却与频率限制优先**：`rebalance_seconds` / `cooldown_seconds` / `max_rebalances_per_hour` 先过滤，再进入 cost filter。
+- **Inventory skew**：**不影响** cost filter（cost filter 使用对称区间宽度）。
+- **auto_swap**：仅在 stop LP 后、重开前执行；且仅影响 `swap_cost` 估算。
+
+**日志**：
+- 控制器在触发 cost filter 判定时输出一条聚合日志（按 `max(cooldown_seconds, 60)` 节流）。
+- 输出包含：fee_rate 来源、in_range_time、widths、expected_fees、cost、payback、decision。
+
+#### 7.1.3 生产可用性说明（模型假设明确）
+
+- 该过滤器是 **确定性决策器**：相同输入必然给出相同结论。
+- 估算仅依赖固定时间窗与历史 fee_rate，**不需要波动率建模**，避免参数陷阱。
+- 为控制风险，建议设置合理 `max_payback_sec`，安全系数固定为 2。
+- 强制重平衡用于避免长期 out-of-range 锁死。
+
+#### 7.1.4 验证与测试建议（可重复）
+
+- **冷启动**：`fee_rate_bootstrap=0` 时，确认 cost filter 在 out-of-range 阶段拒绝；超过强制阈值后允许。
+- **高成本**：把 `cost_filter_fixed_cost_quote` 设置为高值，确认 `expected_fee_below_threshold` 触发。
+- **回本门槛**：调高 `cost_filter_max_payback_sec`，观察同一成本下从拒绝变为允许。
+- **日志完整性**：检查 cost filter 日志字段齐全且节流生效。
+
+
+### 7.2 策略D：库存偏置与再平衡冲突处理（实现版）
+
+**目标**：在不显著增加 churn 的情况下，利用 LP 区间位置缓慢修正库存偏差。
+
+**实现位置**：偏置与比例计算在 `bots/controllers/generic/clmm_lp.py`。
+
+**工作原理**：
+1) 计算当前库存比例（含钱包可用 + 已部署）
+   - `ratio = base_value / (base_value + quote_value)`
+   - 通过 EMA 平滑：`ratio_ema`
+2) 计算偏差 `d = ratio_ema - target_base_value_pct`
+3) 映射成偏置强度 `s`：
+   - `s = clamp(k * d, -inventory_skew_max, +inventory_skew_max)`
+   - `s` 变化需跨过 `inventory_skew_step_min` 才更新（防抖）
+4) 在 **双边开仓** 时生成不对称区间：
+   - `upper_width = half_width * (1 - s)`
+   - `lower_width = half_width * (1 + s)`
+   - 强制 `inventory_skew_min_width_pct` 保护边界
+
+**为什么不 swap 也能调整库存？**
+- CLMM 的仓位资产构成是 **价格相对区间位置的确定性函数**。在范围内，价格越接近 upper，仓位越偏 quote；越接近 lower，仓位越偏 base。
+- 当你通过 skew 让当前价更靠近某一侧，仓位初始化后会偏向目标资产。
+- 随着价格在区间内波动，LP 会在区间内完成“自动换仓”，库存比例随价格路径缓慢向目标靠拢。
+- 只有在价格长期偏离或库存偏差过大时，才需要 swap 进行硬纠偏（由 soft/hard band 控制）。
+
+**CLMM 资产构成（定量直觉）**：
+- 设 `P` 为当前价，`Pl/Pu` 为区间边界，`sp=sqrt(P)`，`sl=sqrt(Pl)`，`su=sqrt(Pu)`。
+- 单位流动性 `L` 的资产需求为：
+  - `amount_base = L * (su - sp) / (sp * su)`
+  - `amount_quote = L * (sp - sl)`
+- 当 `P` 向 `Pu` 逼近时，`amount_base` 下降、`amount_quote` 上升；向 `Pl` 逼近则相反。
+- skew 通过改变 `P` 在区间内的位置，使初始资产构成偏向目标侧，并在区间内波动中逐步修正库存。
+
+**开仓比例对齐（降低 skew 与 swap 的冲突）**：
+- 当启用 skew 且使用固定预算池时，开仓前先根据上式计算 **该区间所需的 base 价值占比**，
+  用这个占比替代 `target_base_value_pct` 来计算 `base/quote` 投入量。
+- 若计算得到的占比不在 `(0, 1)` 或输入无效，则回退到 `target_base_value_pct`。
+- 这样可以减少“开仓资金比例与区间需求不匹配”导致的闲置余额，降低与 swap 的冲突概率。
+
+**库存 swap 冲突处理**：
+- 采用软/硬带宽门槛（soft/hard band）控制 swap：
+  - `|d| < inventory_soft_band_pct`：禁用 swap（仅靠 skew 纠偏）
+  - `|d| >= inventory_hard_band_pct`：允许 swap（硬纠偏）
+  - 介于两者之间：默认不 swap（避免双重纠偏）
+
+**落地细节**：
+- 仅影响 **新开仓/重开仓** 的区间生成，不对当前仓位强行移动。
+- 单边开仓仍按原逻辑（全宽上/下侧）。
+- `target_base_value_pct` 仍用于库存统计与 swap 目标；当启用 skew 且使用固定预算池时，
+  开仓投入比例会以区间需求比例为准。
 
 ## 8. 入场逻辑
 
@@ -191,11 +333,27 @@ open LP; state=ACTIVE
 - `auto_swap_enabled` / `target_base_value_pct`：库存管理开关与目标比例。
 - `swap_min_quote_value`：库存调整的最小价值阈值。
 - `swap_safety_buffer_pct`：swap 输入安全缓冲。
+- `cost_filter_enabled`：是否启用再平衡成本过滤。
+- `cost_filter_fee_rate_bootstrap_quote_per_hour`：fee_rate 冷启动默认值。
+- `cost_filter_fixed_cost_quote`：固定链路成本估计。
+- `cost_filter_max_payback_sec`：最大可接受回本时间。
+- `inventory_skew_enabled`：启用库存偏置。
+- `inventory_skew_k` / `inventory_skew_max`：偏置强度与上限。
+- `inventory_skew_ema_alpha` / `inventory_skew_step_min`：库存比例平滑与防抖阈值。
+- `inventory_skew_min_width_pct`：区间单侧最小宽度，避免过窄出界。
+- `inventory_soft_band_pct` / `inventory_hard_band_pct`：库存偏差 soft/hard 带宽，用于 swap 冲突处理。
 - `stop_loss_pnl_pct` / `stop_loss_pause_sec`：止损阈值与冷却时间。
 - `stop_loss_liquidation_mode`：止损后是否换成 quote。
 - `budget_mode` / `fixed_budget_base` / `fixed_budget_quote`：预算模式与金额。
 - `budget_key`：预算隔离键（默认 `id`）。
 - `native_token_symbol` / `min_native_balance`：gas 预留。
+
+**Cost Filter 内部常量（不可调）**：
+- 定义位置：`bots/controllers/generic/clmm_lp.py`。
+- 评估窗口固定为 1 小时。
+- swap_notional_pct 固定为 0.5，fee_buffer 固定为 0.3%。
+- fee_rate_floor 固定为 1e-9，安全系数固定为 2。
+- 强制重平衡阈值：`max(rebalance_seconds * 10, 600)`。
 
 ## 12. 风险控制与异常处理
 

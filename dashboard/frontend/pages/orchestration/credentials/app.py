@@ -12,21 +12,29 @@ client = get_backend_api_client()
 NUM_COLUMNS = 4
 
 
-def get_all_connectors_config_map():
-    # Get fresh client instance inside cached function
-    connectors = client.connectors.list_connectors()
-    config_map_dict = {}
-    for connector_name in connectors:
-        try:
-            config_map = client.connectors.get_config_map(connector_name=connector_name)
-            config_map_dict[connector_name] = config_map
-        except Exception as e:
-            st.warning(f"Could not get config map for {connector_name}: {e}")
-            config_map_dict[connector_name] = []
-    return config_map_dict
+def list_connectors():
+    try:
+        return client.connectors.list_connectors()
+    except Exception as e:
+        st.warning(f"Failed to load connectors: {e}")
+        return []
 
 
-all_connector_config_map = get_all_connectors_config_map()
+def get_connector_config_map(connector_name: str):
+    if not connector_name or connector_name == "No connectors available":
+        return {}, None
+    try:
+        return client.connectors.get_config_map(connector_name=connector_name), None
+    except Exception as e:
+        return {}, str(e)
+
+
+def normalize_config_fields(config_map):
+    if isinstance(config_map, dict):
+        return list(config_map.keys())
+    if isinstance(config_map, list):
+        return [item for item in config_map if isinstance(item, str)]
+    return []
 
 
 @st.fragment
@@ -146,11 +154,13 @@ def add_credentials_section():
     with c1:
         account_name = st.selectbox("Select Account", options=accounts if accounts else ["No accounts available"])
     with c2:
-        all_connectors = list(all_connector_config_map.keys())
-        binance_perpetual_index = all_connectors.index(
-            "binance_perpetual") if "binance_perpetual" in all_connectors else None
-        connector_name = st.selectbox("Select Connector", options=all_connectors, index=binance_perpetual_index)
-        config_map = all_connector_config_map.get(connector_name, [])
+        all_connectors = list_connectors()
+        connector_options = all_connectors if all_connectors else ["No connectors available"]
+        binance_perpetual_index = connector_options.index(
+            "binance_perpetual") if "binance_perpetual" in connector_options else 0
+        connector_name = st.selectbox("Select Connector", options=connector_options, index=binance_perpetual_index)
+        config_map, config_map_error = get_connector_config_map(connector_name)
+        config_fields = normalize_config_fields(config_map)
 
     st.write(f"Configuration Map for {connector_name}:")
     config_inputs = {}
@@ -178,10 +188,18 @@ def add_credentials_section():
                     st.rerun(scope="fragment")
                 except Exception:
                     st.rerun()
+    elif config_map_error:
+        st.warning(f"Could not get config map for {connector_name}: {config_map_error}")
+    elif not config_fields:
+        if connector_name != "No connectors available":
+            if "/" in connector_name:
+                st.info("Gateway connectors do not require API credentials. Configure wallets on the Gateway page.")
+            else:
+                st.info("No credentials required for this connector.")
     else:
         # Default behavior for other connectors
         cols = st.columns(NUM_COLUMNS)
-        for i, config in enumerate(config_map):
+        for i, config in enumerate(config_fields):
             with cols[i % (NUM_COLUMNS - 1)]:
                 config_inputs[config] = st.text_input(config, type="password", key=f"{connector_name}_{config}")
 

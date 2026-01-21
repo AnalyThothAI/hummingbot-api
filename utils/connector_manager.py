@@ -112,7 +112,11 @@ class ConnectorManager:
         """
         from typing import Literal, get_args, get_origin
 
-        connector_config = HummingbotAPIConfigAdapter(AllConnectorSettings.get_connector_config_keys(connector_name))
+        connector_config_keys = AllConnectorSettings.get_connector_config_keys(connector_name)
+        if connector_config_keys is None:
+            return {}
+
+        connector_config = HummingbotAPIConfigAdapter(connector_config_keys)
         fields_info = {}
 
         for key, field in connector_config.hb_config.model_fields.items():
