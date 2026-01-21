@@ -113,6 +113,8 @@ from .gateway import (
     GatewayBalanceRequest,
     AddPoolRequest,
     AddTokenRequest,
+    GatewayAllowanceRequest,
+    GatewayApproveRequest,
 )
 
 # Backtesting models

@@ -44,7 +44,7 @@ class BotsOrchestrator:
         try:
             # Get the image name (first tag if available, otherwise the image ID)
             image_name = container.image.tags[0] if container.image.tags else str(container.image)
-            pattern = r'.+/hummingbot:'
+            pattern = r'.+/hummingbot(?!-api)[^:]*:'
             return bool(re.match(pattern, image_name))
         except Exception:
             return False

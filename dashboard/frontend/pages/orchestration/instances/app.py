@@ -28,15 +28,39 @@ def stop_bot(bot_name):
         st.error(f"Failed to stop bot {bot_name}: {e}")
 
 
+def force_stop_bot(bot_name):
+    """Force stop a bot container when MQTT shutdown fails."""
+    response = backend_api_request("POST", f"/docker/stop-container/{bot_name}")
+    if response.get("ok"):
+        success = response.get("data", {}).get("success", True)
+        if success:
+            st.success(f"Force-stopped {bot_name} container.")
+            time.sleep(2)
+            return
+    status_code = response.get("status_code")
+    if status_code == 401:
+        st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+    else:
+        st.error(response.get("error", f"Failed to force stop {bot_name}."))
+
+
 def archive_bot(bot_name):
     """Archive a stopped bot."""
-    try:
-        backend_api_client.docker.stop_container(bot_name)
-        backend_api_client.docker.remove_container(bot_name)
+    stop_response = backend_api_request("POST", f"/docker/stop-container/{bot_name}")
+    if stop_response.get("status_code") not in (200, 201):
+        st.warning(f"Stop request failed for {bot_name}; continuing with archive.")
+
+    remove_response = backend_api_request("POST", f"/docker/remove-container/{bot_name}")
+    if remove_response.get("ok"):
         st.success(f"Bot {bot_name} archived successfully")
         time.sleep(1)
-    except Exception as e:
-        st.error(f"Failed to archive bot {bot_name}: {e}")
+        return
+
+    status_code = remove_response.get("status_code")
+    if status_code == 401:
+        st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+    else:
+        st.error(remove_response.get("error", f"Failed to archive bot {bot_name}."))
 
 
 def stop_controllers(bot_name, controllers):
@@ -113,8 +137,13 @@ def render_bot_status_card(instance):
         col1, col2 = st.columns([3, 1])
         with col2:
             if docker_status == "running":
-                if st.button("⏹️ Stop", key=f"stop_{bot_name}", use_container_width=True):
-                    stop_bot(bot_name)
+                action_cols = st.columns(2)
+                with action_cols[0]:
+                    if st.button("⏹️ Stop", key=f"stop_{bot_name}", use_container_width=True):
+                        stop_bot(bot_name)
+                with action_cols[1]:
+                    if st.button("🧯 Force Stop", key=f"force_stop_{bot_name}", use_container_width=True):
+                        force_stop_bot(bot_name)
             elif docker_status != "missing":
                 if st.button("📦 Archive", key=f"archive_{bot_name}", use_container_width=True):
                     archive_bot(bot_name)
@@ -178,8 +207,13 @@ def render_bot_card(bot_name, instance=None):
 
                 with col3:
                     if is_running:
-                        if st.button("⏹️ Stop", key=f"stop_{bot_name}", use_container_width=True):
-                            stop_bot(bot_name)
+                        action_cols = st.columns(2)
+                        with action_cols[0]:
+                            if st.button("⏹️ Stop", key=f"stop_{bot_name}", use_container_width=True):
+                                stop_bot(bot_name)
+                        with action_cols[1]:
+                            if st.button("🧯 Force Stop", key=f"force_stop_{bot_name}", use_container_width=True):
+                                force_stop_bot(bot_name)
                     else:
                         if st.button("📦 Archive", key=f"archive_{bot_name}", use_container_width=True):
                             archive_bot(bot_name)

@@ -98,9 +98,17 @@ class V2ScriptDeployment(BaseModel):
     """Configuration for deploying a bot with a script"""
     instance_name: str = Field(description="Unique name for the bot instance")
     credentials_profile: str = Field(description="Name of the credentials profile to use")
-    image: str = Field(default="hummingbot/hummingbot:latest", description="Docker image for the Hummingbot instance")
+    image: str = Field(default="qinghuanlyke/hummingbot-lp:latest", description="Docker image for the Hummingbot instance")
     script: Optional[str] = Field(default=None, description="Name of the script to run (without .py extension)")
     script_config: Optional[str] = Field(default=None, description="Name of the script configuration file (without .yml extension)")
+    gateway_network_id: Optional[str] = Field(
+        default=None,
+        description="Gateway network ID in 'chain-network' format (e.g., 'ethereum-bsc')",
+    )
+    gateway_wallet_address: Optional[str] = Field(
+        default=None,
+        description="Gateway wallet address override for connector config",
+    )
     headless: bool = Field(default=False, description="Run in headless mode (no UI)")
 
 
@@ -111,5 +119,13 @@ class V2ControllerDeployment(BaseModel):
     controllers_config: List[str] = Field(description="List of controller configuration files to use (without .yml extension)")
     max_global_drawdown_quote: Optional[float] = Field(default=None, description="Maximum allowed global drawdown in quote usually USDT")
     max_controller_drawdown_quote: Optional[float] = Field(default=None, description="Maximum allowed per-controller drawdown in quote usually USDT")
-    image: str = Field(default="hummingbot/hummingbot:latest", description="Docker image for the Hummingbot instance")
+    gateway_network_id: Optional[str] = Field(
+        default=None,
+        description="Gateway network ID in 'chain-network' format (e.g., 'ethereum-bsc')",
+    )
+    gateway_wallet_address: Optional[str] = Field(
+        default=None,
+        description="Gateway wallet address override for connector config",
+    )
+    image: str = Field(default="qinghuanlyke/hummingbot-lp:latest", description="Docker image for the Hummingbot instance")
     headless: bool = Field(default=False, description="Run in headless mode (no UI)")

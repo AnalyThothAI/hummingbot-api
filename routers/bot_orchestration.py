@@ -1,6 +1,7 @@
 import logging
 import os
 import asyncio
+from typing import Optional
 from datetime import datetime
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 
@@ -11,12 +12,81 @@ from models import StartBotAction, StopBotAction, V2ScriptDeployment, V2Controll
 from services.bots_orchestrator import BotsOrchestrator
 from services.docker_service import DockerService
 from services.bot_state_sync import BotStateSyncService
-from deps import get_bots_orchestrator, get_docker_service, get_bot_archiver, get_database_manager, get_bot_state_sync
+from deps import (
+    get_bots_orchestrator,
+    get_docker_service,
+    get_bot_archiver,
+    get_database_manager,
+    get_bot_state_sync,
+    get_accounts_service,
+)
 from utils.file_system import fs_util
 from utils.bot_archiver import BotArchiver
 from database import AsyncDatabaseManager, BotRunRepository
+from services.accounts_service import AccountsService
+from services.gateway_client import GatewayClient
 
 router = APIRouter(tags=["Bot Orchestration"], prefix="/bot-orchestration")
+
+
+async def _resolve_chain_for_wallet(
+    accounts_service: AccountsService,
+    wallet_address: str,
+) -> Optional[str]:
+    wallets = await accounts_service.gateway_client.get_wallets()
+    if not wallets:
+        return None
+    for wallet_group in wallets:
+        chain = wallet_group.get("chain")
+        addresses = wallet_group.get("walletAddresses", []) or []
+        if wallet_address in addresses:
+            return chain
+    return None
+
+
+async def _apply_gateway_defaults(
+    accounts_service: AccountsService,
+    gateway_network_id: Optional[str],
+    gateway_wallet_address: Optional[str],
+) -> None:
+    if not gateway_network_id and not gateway_wallet_address:
+        return
+
+    if not await accounts_service.gateway_client.ping():
+        raise HTTPException(status_code=503, detail="Gateway service is not available")
+
+    chain = None
+    network = None
+    if gateway_network_id:
+        try:
+            chain, network = GatewayClient.parse_network_id(gateway_network_id)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
+        result = await accounts_service.gateway_client.update_config(chain, "defaultNetwork", network)
+        if isinstance(result, dict) and result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Gateway error updating default network: {result.get('error')}",
+            )
+
+    if gateway_wallet_address:
+        if not chain:
+            chain = await _resolve_chain_for_wallet(accounts_service, gateway_wallet_address)
+        if not chain:
+            raise HTTPException(
+                status_code=400,
+                detail="Unable to resolve chain for gateway wallet address. Provide gateway_network_id.",
+            )
+
+        result = await accounts_service.gateway_client.update_config(
+            chain, "defaultWallet", gateway_wallet_address
+        )
+        if isinstance(result, dict) and result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Gateway error updating default wallet: {result.get('error')}",
+            )
 
 
 @router.get("/status")
@@ -747,7 +817,8 @@ async def stop_and_archive_bot(
 async def deploy_v2_script(
     config: V2ScriptDeployment, 
     docker_manager: DockerService = Depends(get_docker_service),
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    db_manager: AsyncDatabaseManager = Depends(get_database_manager),
+    accounts_service: AccountsService = Depends(get_accounts_service),
 ):
     """
     Creates and autostart a v2 script with a configuration if present.
@@ -760,6 +831,13 @@ async def deploy_v2_script(
     Returns:
         Dictionary with creation response and instance details
     """
+    if config.gateway_network_id or config.gateway_wallet_address:
+        await _apply_gateway_defaults(
+            accounts_service,
+            config.gateway_network_id,
+            config.gateway_wallet_address,
+        )
+
     logging.info(f"Creating hummingbot instance with config: {config}")
     response = docker_manager.create_hummingbot_instance(config)
     
@@ -790,7 +868,8 @@ async def deploy_v2_script(
 async def deploy_v2_controllers(
     deployment: V2ControllerDeployment,
     docker_manager: DockerService = Depends(get_docker_service),
-    db_manager: AsyncDatabaseManager = Depends(get_database_manager)
+    db_manager: AsyncDatabaseManager = Depends(get_database_manager),
+    accounts_service: AccountsService = Depends(get_accounts_service),
 ):
     """
     Deploy a V2 strategy with controllers by generating the script config and creating the instance.
@@ -807,6 +886,13 @@ async def deploy_v2_controllers(
         HTTPException: 500 if deployment fails
     """
     try:
+        if deployment.gateway_network_id or deployment.gateway_wallet_address:
+            await _apply_gateway_defaults(
+                accounts_service,
+                deployment.gateway_network_id,
+                deployment.gateway_wallet_address,
+            )
+
         # Generate unique script config filename with timestamp
         timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         script_config_filename = f"{deployment.instance_name}-{timestamp}.yml"
@@ -849,7 +935,9 @@ async def deploy_v2_controllers(
             credentials_profile=deployment.credentials_profile,
             image=deployment.image,
             script="v2_with_controllers.py",
-            script_config=script_config_filename
+            script_config=script_config_filename,
+            gateway_network_id=deployment.gateway_network_id,
+            gateway_wallet_address=deployment.gateway_wallet_address,
         )
         
         # Deploy the instance using the existing method

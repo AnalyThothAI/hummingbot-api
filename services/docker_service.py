@@ -5,7 +5,7 @@ import shutil
 import time
 import threading
 from urllib.parse import urlparse
-from typing import Dict
+from typing import Dict, Optional
 
 # Create module-specific logger
 logger = logging.getLogger(__name__)
@@ -106,32 +106,45 @@ class DockerService:
         logger.warning("No emqx-bridge network found for bot container")
         return False
 
+    def _safe_container_image_label(self, container) -> str:
+        try:
+            tags = container.image.tags
+            if tags:
+                return tags[0]
+            image_id = getattr(container.image, "id", None)
+            if image_id:
+                return image_id[:12]
+        except (NotFound, DockerException):
+            pass
+
+        try:
+            image_id = container.attrs.get("Image")
+            if image_id:
+                return image_id[:12]
+        except Exception:
+            pass
+
+        return "unknown"
+
     def get_active_containers(self, name_filter: str = None):
         try:
             all_containers = self.client.containers.list(filters={"status": "running"})
-            if name_filter:
-                containers_info = [
-                    {
-                        "id": container.id,
-                        "name": container.name,
-                        "status": container.status,
-                        "image": container.image.tags[0] if container.image.tags else container.image.id[:12]
-                    }
-                    for container in all_containers if name_filter.lower() in container.name.lower()
-                ]
-            else:
-                containers_info = [
-                    {
-                        "id": container.id,
-                        "name": container.name,
-                        "status": container.status,
-                        "image": container.image.tags[0] if container.image.tags else container.image.id[:12]
-                    }
-                    for container in all_containers
-                ]
-            return containers_info
         except DockerException as e:
             return str(e)
+
+        containers_info = []
+        for container in all_containers:
+            if name_filter and name_filter.lower() not in container.name.lower():
+                continue
+            containers_info.append(
+                {
+                    "id": container.id,
+                    "name": container.name,
+                    "status": container.status,
+                    "image": self._safe_container_image_label(container),
+                }
+            )
+        return containers_info
 
     def get_available_images(self):
         try:
@@ -157,29 +170,22 @@ class DockerService:
     def get_exited_containers(self, name_filter: str = None):
         try:
             all_containers = self.client.containers.list(filters={"status": "exited"}, all=True)
-            if name_filter:
-                containers_info = [
-                    {
-                        "id": container.id,
-                        "name": container.name,
-                        "status": container.status,
-                        "image": container.image.tags[0] if container.image.tags else container.image.id[:12]
-                    }
-                    for container in all_containers if name_filter.lower() in container.name.lower()
-                ]
-            else:
-                containers_info = [
-                    {
-                        "id": container.id,
-                        "name": container.name,
-                        "status": container.status,
-                        "image": container.image.tags[0] if container.image.tags else container.image.id[:12]
-                    }
-                    for container in all_containers
-                ]
-            return containers_info
         except DockerException as e:
             return str(e)
+
+        containers_info = []
+        for container in all_containers:
+            if name_filter and name_filter.lower() not in container.name.lower():
+                continue
+            containers_info.append(
+                {
+                    "id": container.id,
+                    "name": container.name,
+                    "status": container.status,
+                    "image": self._safe_container_image_label(container),
+                }
+            )
+        return containers_info
 
     def clean_exited_containers(self):
         try:
@@ -254,11 +260,65 @@ class DockerService:
         except DockerException as e:
             return {"success": False, "message": str(e)}
 
+    def _write_gateway_connector_config(
+        self,
+        instance_name: str,
+        network_id: Optional[str],
+        wallet_address: Optional[str],
+        connector_name: str = "uniswap",
+    ) -> None:
+        if not network_id:
+            return
+        if "-" not in network_id:
+            logger.warning(f"Invalid gateway network_id format: {network_id}")
+            return
+        chain, network = network_id.split("-", 1)
+        config_path = f"instances/{instance_name}/conf/connectors/_gateway_{connector_name}.yml"
+        try:
+            existing = fs_util.read_yaml_file(config_path)
+            if not isinstance(existing, dict):
+                existing = {}
+        except FileNotFoundError:
+            existing = {}
+        except Exception as exc:
+            logger.warning(f"Failed reading connector config {config_path}: {exc}")
+            existing = {}
+
+        existing.setdefault("connector", connector_name)
+        existing["chain"] = chain
+        existing["network"] = network
+        if wallet_address:
+            existing["wallet_address"] = wallet_address
+        fs_util.dump_dict_to_yaml(config_path, existing)
+
+    def _write_gateway_connector_configs(
+        self,
+        instance_name: str,
+        network_id: Optional[str],
+        wallet_address: Optional[str],
+        connector_names: list[str],
+    ) -> None:
+        for connector_name in connector_names:
+            if connector_name:
+                self._write_gateway_connector_config(
+                    instance_name=instance_name,
+                    network_id=network_id,
+                    wallet_address=wallet_address,
+                    connector_name=connector_name,
+                )
+
+    @staticmethod
+    def _extract_gateway_connector_name(connector_name: Optional[str]) -> Optional[str]:
+        if not connector_name:
+            return None
+        return connector_name.split("/", 1)[0].strip() if "/" in connector_name else connector_name.strip()
+
     def create_hummingbot_instance(self, config: V2ScriptDeployment):
         bots_path = os.environ.get('BOTS_PATH', self.SOURCE_PATH)  # Default to 'SOURCE_PATH' if BOTS_PATH is not set
         instance_name = config.instance_name
         instance_dir = os.path.join("bots", 'instances', instance_name)
         use_host_network, system_platform, in_container = self._resolve_bot_network_mode()
+        script_config_content = None
         if not os.path.exists(instance_dir):
             os.makedirs(instance_dir)
             os.makedirs(os.path.join(instance_dir, 'data'))
@@ -328,6 +388,42 @@ class DockerService:
         gateway_cfg["gateway_api_host"] = resolved_hosts["gateway_host"]
         client_config["gateway"] = gateway_cfg
         fs_util.dump_dict_to_yaml(conf_file_path, client_config)
+
+        connector_names = []
+        controllers_list = []
+        if isinstance(script_config_content, dict):
+            connector_names.append(self._extract_gateway_connector_name(script_config_content.get("connector")))
+            connector_names.append(self._extract_gateway_connector_name(script_config_content.get("router_connector")))
+            connector_names.append(self._extract_gateway_connector_name(script_config_content.get("price_connector")))
+            controllers_list = script_config_content.get("controllers_config", []) or []
+
+        controller_connectors = []
+        for controller_file in controllers_list:
+            controller_path = f"instances/{instance_name}/conf/controllers/{controller_file}"
+            try:
+                controller_config = fs_util.read_yaml_file(controller_path)
+            except FileNotFoundError:
+                continue
+            except Exception as e:
+                logger.warning(f"Failed reading controller config {controller_path}: {e}")
+                continue
+            if not isinstance(controller_config, dict):
+                continue
+            controller_connectors.append(self._extract_gateway_connector_name(controller_config.get("connector_name")))
+            controller_connectors.append(self._extract_gateway_connector_name(controller_config.get("router_connector")))
+            controller_connectors.append(self._extract_gateway_connector_name(controller_config.get("price_connector")))
+
+        connector_names.extend(controller_connectors)
+        connector_names = [name for name in connector_names if name]
+        if not connector_names:
+            connector_names = ["uniswap"]
+
+        self._write_gateway_connector_configs(
+            instance_name=instance_name,
+            network_id=getattr(config, "gateway_network_id", None),
+            wallet_address=getattr(config, "gateway_wallet_address", None),
+            connector_names=connector_names,
+        )
 
         # Set up Docker volumes
         volumes = {

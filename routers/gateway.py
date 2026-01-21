@@ -7,6 +7,8 @@ from models import (
     GatewayStatus,
     AddPoolRequest,
     AddTokenRequest,
+    GatewayAllowanceRequest,
+    GatewayApproveRequest,
     CreateWalletRequest,
     ShowPrivateKeyRequest,
     SendTransactionRequest,
@@ -86,6 +88,18 @@ def normalize_gateway_response(data: Dict) -> Dict:
 
         return normalized
     return data
+
+
+def extract_chain_id(config: Dict) -> Optional[int]:
+    if not isinstance(config, dict):
+        return None
+    for key in ("chainId", "chainID", "chain_id", "chainid"):
+        if key in config and config[key] is not None:
+            try:
+                return int(config[key])
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 # ============================================
@@ -267,6 +281,121 @@ async def list_chains(accounts_service: AccountsService = Depends(get_accounts_s
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error listing chains: {str(e)}")
+
+
+# ============================================
+# Allowances & Approvals
+# ============================================
+
+@router.post("/allowances")
+async def get_allowances(
+    request: GatewayAllowanceRequest,
+    accounts_service: AccountsService = Depends(get_accounts_service)
+) -> Dict:
+    """
+    Get ERC20 token allowances for a wallet (EVM chains only).
+
+    Provide either network_id (chain-network) or chain + network.
+    """
+    try:
+        if not await accounts_service.gateway_client.ping():
+            raise HTTPException(status_code=503, detail="Gateway service is not available")
+
+        if request.network_id:
+            chain, network = accounts_service.gateway_client.parse_network_id(request.network_id)
+        else:
+            chain = request.chain
+            network = request.network
+
+        if not chain or not network:
+            raise HTTPException(status_code=400, detail="Network is required (network_id or chain+network).")
+
+        spender = request.spender.strip()
+        if not spender:
+            raise HTTPException(status_code=400, detail="Spender is required.")
+
+        tokens = [token.strip() for token in request.tokens if token and token.strip()]
+        if not tokens:
+            raise HTTPException(status_code=400, detail="At least one token is required.")
+
+        result = await accounts_service.gateway_client.get_allowances(
+            chain=chain,
+            network=network,
+            address=request.address,
+            tokens=tokens,
+            spender=spender,
+        )
+
+        if result is None:
+            raise HTTPException(status_code=502, detail="Failed to fetch allowances: Gateway returned no response")
+
+        if "error" in result:
+            status = result.get("status", 400)
+            raise HTTPException(status_code=status, detail=f"Gateway error: {result.get('error')}")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error fetching allowances: {str(e)}")
+
+
+@router.post("/approve")
+async def approve_token(
+    request: GatewayApproveRequest,
+    accounts_service: AccountsService = Depends(get_accounts_service)
+) -> Dict:
+    """
+    Approve ERC20 token spending (EVM chains only).
+
+    Provide either network_id (chain-network) or chain + network.
+    """
+    try:
+        if not await accounts_service.gateway_client.ping():
+            raise HTTPException(status_code=503, detail="Gateway service is not available")
+
+        if request.network_id:
+            chain, network = accounts_service.gateway_client.parse_network_id(request.network_id)
+        else:
+            chain = request.chain
+            network = request.network
+
+        if not chain or not network:
+            raise HTTPException(status_code=400, detail="Network is required (network_id or chain+network).")
+
+        spender = request.spender.strip()
+        if not spender:
+            raise HTTPException(status_code=400, detail="Spender is required.")
+
+        token = request.token.strip()
+        if not token:
+            raise HTTPException(status_code=400, detail="Token is required.")
+
+        amount = request.amount.strip() if request.amount else None
+
+        result = await accounts_service.gateway_client.approve_token(
+            chain=chain,
+            network=network,
+            address=request.address,
+            token=token,
+            spender=spender,
+            amount=amount,
+        )
+
+        if result is None:
+            raise HTTPException(status_code=502, detail="Failed to approve token: Gateway returned no response")
+
+        if "error" in result:
+            status = result.get("status", 400)
+            raise HTTPException(status_code=status, detail=f"Gateway error: {result.get('error')}")
+
+        return result
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error approving token: {str(e)}")
 
 
 # ============================================
@@ -597,6 +726,12 @@ async def add_network_token(
 
         # Use symbol as name if name is not provided
         token_name = token_request.name if token_request.name else token_request.symbol
+        chain_id = None
+        try:
+            network_config = await accounts_service.gateway_client.get_config(network_id)
+            chain_id = extract_chain_id(network_config)
+        except Exception:
+            chain_id = None
 
         result = await accounts_service.gateway_client.add_token(
             chain=chain,
@@ -604,7 +739,8 @@ async def add_network_token(
             address=token_request.address,
             symbol=token_request.symbol,
             name=token_name,
-            decimals=token_request.decimals
+            decimals=token_request.decimals,
+            chain_id=chain_id,
         )
 
         if "error" in result:
@@ -618,7 +754,8 @@ async def add_network_token(
             "token": {
                 "symbol": token_request.symbol,
                 "address": token_request.address,
-                "network_id": network_id
+                "network_id": network_id,
+                "chain_id": chain_id,
             }
         }
 

@@ -89,6 +89,31 @@ class AddTokenRequest(BaseModel):
 
 
 # ============================================
+# Allowance & Approval Models
+# ============================================
+
+class GatewayAllowanceRequest(BaseModel):
+    """Request to query ERC20 token allowances"""
+    network_id: Optional[str] = Field(default=None, description="Network ID (chain-network)")
+    chain: Optional[str] = Field(default=None, description="Blockchain chain (e.g., 'ethereum')")
+    network: Optional[str] = Field(default=None, description="Network name (e.g., 'bsc')")
+    address: str = Field(description="Wallet address")
+    tokens: List[str] = Field(description="Token symbols or addresses")
+    spender: str = Field(description="Connector name or spender address")
+
+
+class GatewayApproveRequest(BaseModel):
+    """Request to approve ERC20 token spending"""
+    network_id: Optional[str] = Field(default=None, description="Network ID (chain-network)")
+    chain: Optional[str] = Field(default=None, description="Blockchain chain (e.g., 'ethereum')")
+    network: Optional[str] = Field(default=None, description="Network name (e.g., 'bsc')")
+    address: str = Field(description="Wallet address")
+    token: str = Field(description="Token symbol or address")
+    spender: str = Field(description="Connector name or spender address")
+    amount: Optional[str] = Field(default=None, description="Approval amount (blank for unlimited)")
+
+
+# ============================================
 # Balance Query Models
 # ============================================
 

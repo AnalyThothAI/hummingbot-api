@@ -1,0 +1,3 @@
+[submodule "hummingbot"]
+	path = hummingbot
+	url = https://github.com/hummingbot/hummingbot.git

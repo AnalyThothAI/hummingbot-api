@@ -210,6 +210,46 @@ class GatewayClient:
             "tokens": tokens if tokens is not None else []
         })
 
+    async def get_allowances(
+        self,
+        chain: str,
+        network: str,
+        address: str,
+        tokens: List[str],
+        spender: str,
+    ) -> Dict:
+        """Get ERC20 allowances for a wallet (EVM chains only)."""
+        if chain != "ethereum":
+            return {"error": "Allowances are only supported for ethereum-based networks.", "status": 400}
+        return await self._request("POST", "chains/ethereum/allowances", json={
+            "network": network,
+            "address": address,
+            "tokens": tokens,
+            "spender": spender,
+        })
+
+    async def approve_token(
+        self,
+        chain: str,
+        network: str,
+        address: str,
+        token: str,
+        spender: str,
+        amount: Optional[str] = None,
+    ) -> Dict:
+        """Approve ERC20 token spending (EVM chains only)."""
+        if chain != "ethereum":
+            return {"error": "Approvals are only supported for ethereum-based networks.", "status": 400}
+        payload = {
+            "network": network,
+            "address": address,
+            "token": token,
+            "spender": spender,
+        }
+        if amount:
+            payload["amount"] = amount
+        return await self._request("POST", "chains/ethereum/approve", json=payload)
+
     async def get_chains(self) -> Dict:
         """Get available chains"""
         return await self._request("GET", "config/chains")
@@ -229,18 +269,30 @@ class GatewayClient:
             "network": network
         })
 
-    async def add_token(self, chain: str, network: str, address: str, symbol: str, name: str, decimals: int) -> Dict:
+    async def add_token(
+        self,
+        chain: str,
+        network: str,
+        address: str,
+        symbol: str,
+        name: str,
+        decimals: int,
+        chain_id: Optional[int] = None,
+    ) -> Dict:
         """Add a custom token to Gateway's token list"""
-        return await self._request("POST", "tokens", json={
+        token_payload = {
             "chain": chain,
             "network": network,
             "token": {
                 "address": address,
                 "symbol": symbol,
                 "name": name,
-                "decimals": decimals
+                "decimals": decimals,
             }
-        })
+        }
+        if chain_id is not None:
+            token_payload["token"]["chainId"] = int(chain_id)
+        return await self._request("POST", "tokens", json=token_payload)
 
     async def delete_token(self, chain: str, network: str, token_address: str) -> Dict:
         """Delete a custom token from Gateway's token list"""

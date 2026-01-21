@@ -130,17 +130,16 @@ async def remove_container(container_name: str, archive_locally: bool = True, s3
         HTTPException: 400 if container is not a Hummingbot container
         HTTPException: 500 if archiving fails
     """
-    # Validate that this is a Hummingbot container
-    if not container_name.startswith("hummingbot-"):
+    # Validate that this instance exists locally before archiving.
+    instance_dir = os.path.join('bots', 'instances', container_name)
+    if not os.path.exists(instance_dir):
         raise HTTPException(
-            status_code=400, 
-            detail=f"This endpoint only removes Hummingbot containers. Container '{container_name}' is not a Hummingbot container."
+            status_code=400,
+            detail=f"Instance directory '{instance_dir}' not found. Cannot archive '{container_name}'."
         )
-    
+
     # Remove the container
     response = docker_service.remove_container(container_name)
-    # Form the instance directory path correctly
-    instance_dir = os.path.join('bots', 'instances', container_name)
     try:
         # Archive the data
         if archive_locally:

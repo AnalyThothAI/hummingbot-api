@@ -40,10 +40,30 @@ def get_scripts():
     return []
 
 
+def get_gateway_networks():
+    """Get Gateway network options for chain-network selection."""
+    response = backend_api_request("GET", "/gateway/networks")
+    if response.get("ok"):
+        networks = response.get("data", {}).get("networks", [])
+        return [item for item in networks if isinstance(item, dict) and item.get("network_id")]
+    st.warning("Failed to fetch Gateway networks.")
+    return []
+
+
+def get_gateway_wallets():
+    """Get Gateway wallets for connector configuration."""
+    response = backend_api_request("GET", "/accounts/gateway/wallets")
+    if response.get("ok"):
+        wallets = response.get("data", [])
+        return wallets if isinstance(wallets, list) else []
+    st.warning("Failed to fetch Gateway wallets.")
+    return []
+
+
 def filter_hummingbot_images(images):
     """Filter images to only show Hummingbot-related ones."""
     hummingbot_images = []
-    pattern = r'.+/hummingbot:'
+    pattern = r'.+/hummingbot(?!-api)[^:]*:'
 
     for image in images:
         try:
@@ -124,9 +144,9 @@ def render_bot_config(auto_name_hint: bool = False):
                 available_images = filter_hummingbot_images(all_images)
 
                 if not available_images:
-                    available_images = ["hummingbot/hummingbot:latest"]
+                    available_images = ["qinghuanlyke/hummingbot-lp:latest"]
 
-                default_image = "hummingbot/hummingbot:latest"
+                default_image = "qinghuanlyke/hummingbot-lp:latest"
                 if default_image not in available_images:
                     available_images.insert(0, default_image)
 
@@ -140,15 +160,67 @@ def render_bot_config(auto_name_hint: bool = False):
                 st.error(f"Failed to fetch available images: {e}")
                 image_name = st.text_input(
                     "Hummingbot Image",
-                    value="hummingbot/hummingbot:latest",
+                    value="qinghuanlyke/hummingbot-lp:latest",
                     key="image_input"
                 )
 
     return bot_name, credentials, image_name
 
 
-def launch_new_bot(bot_name, image_name, credentials, selected_controllers, max_global_drawdown,
-                   max_controller_drawdown):
+def render_gateway_overrides():
+    with st.container(border=True):
+        st.info("🔌 **Gateway Overrides:** Select network and wallet for Gateway connectors")
+
+        networks = get_gateway_networks()
+        network_map = {item["network_id"]: item for item in networks}
+        network_options = ["(select network)"] + sorted(network_map.keys())
+        preferred_network = "ethereum-bsc"
+        if preferred_network not in network_options:
+            network_options.insert(1, preferred_network)
+
+        default_network_index = network_options.index(preferred_network) if preferred_network in network_options else 0
+        selected_network_id = st.selectbox(
+            "Gateway Network (chain-network)",
+            options=network_options,
+            index=default_network_index,
+        )
+
+        selected_chain = None
+        if selected_network_id != "(select network)":
+            selected_chain = network_map.get(selected_network_id, {}).get("chain")
+
+        wallets = get_gateway_wallets()
+        filtered_wallets = [
+            wallet for wallet in wallets if wallet.get("chain") == selected_chain
+        ] if selected_chain else []
+
+        wallet_options = ["(gateway default)"] + [
+            wallet.get("address") for wallet in filtered_wallets if wallet.get("address")
+        ]
+
+        selected_wallet = st.selectbox(
+            "Gateway Wallet",
+            options=wallet_options,
+            index=0,
+        )
+
+        st.caption("Gateway overrides update chain defaults globally (shared Gateway).")
+
+    network_value = None if selected_network_id == "(select network)" else selected_network_id
+    wallet_value = None if selected_wallet == "(gateway default)" else selected_wallet
+    return network_value, wallet_value
+
+
+def launch_new_bot(
+    bot_name,
+    image_name,
+    credentials,
+    selected_controllers,
+    max_global_drawdown,
+    max_controller_drawdown,
+    gateway_network_id,
+    gateway_wallet_address,
+):
     """Launch a new bot with the selected configuration."""
     if not bot_name:
         st.warning("You need to define the bot name.")
@@ -176,18 +248,40 @@ def launch_new_bot(bot_name, image_name, credentials, selected_controllers, max_
             deploy_config["max_global_drawdown_quote"] = max_global_drawdown
         if max_controller_drawdown is not None and max_controller_drawdown > 0:
             deploy_config["max_controller_drawdown_quote"] = max_controller_drawdown
-
-        backend_api_client.bot_orchestration.deploy_v2_controllers(**deploy_config)
-        st.success(f"Successfully deployed bot: {full_bot_name}")
-        time.sleep(3)
-        return True
+        if gateway_network_id:
+            deploy_config["gateway_network_id"] = gateway_network_id
+        if gateway_wallet_address:
+            deploy_config["gateway_wallet_address"] = gateway_wallet_address
+        response = backend_api_request(
+            "POST",
+            "/bot-orchestration/deploy-v2-controllers",
+            json_body=deploy_config,
+        )
+        if response.get("ok"):
+            st.success(f"Successfully deployed bot: {full_bot_name}")
+            time.sleep(3)
+            return True
+        status_code = response.get("status_code")
+        if status_code == 401:
+            st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+        else:
+            st.error(response.get("error", "Failed to deploy controller bot."))
+        return False
 
     except Exception as e:
         st.error(f"Failed to deploy bot: {e}")
         return False
 
 
-def launch_script_bot(bot_name, image_name, credentials, script_name, script_config):
+def launch_script_bot(
+    bot_name,
+    image_name,
+    credentials,
+    script_name,
+    script_config,
+    gateway_network_id,
+    gateway_wallet_address,
+):
     """Launch a new bot with a script and optional config."""
     if not bot_name:
         st.warning("You need to define the bot name.")
@@ -197,6 +291,9 @@ def launch_script_bot(bot_name, image_name, credentials, script_name, script_con
         return False
     if not script_name:
         st.warning("You need to select a script.")
+        return False
+    if not gateway_network_id:
+        st.warning("You need to select a Gateway network.")
         return False
     full_bot_name = bot_name
 
@@ -211,6 +308,8 @@ def launch_script_bot(bot_name, image_name, credentials, script_name, script_con
         "image": image_name,
         "script": script_value,
         "script_config": script_config_value,
+        "gateway_network_id": gateway_network_id,
+        "gateway_wallet_address": gateway_wallet_address,
     }
 
     response = backend_api_request("POST", "/bot-orchestration/deploy-v2-script", json_body=deploy_payload)
@@ -252,7 +351,7 @@ st.subheader("Configure and deploy your automated trading strategy")
 
 deploy_mode = st.radio(
     "Deployment Mode",
-    options=["Script", "Controllers"],
+    options=["Controllers", "Script"],
     horizontal=True,
     help="Scripts deploy a single strategy file. Controllers deploy multiple controller configs.",
 )
@@ -297,7 +396,7 @@ if deploy_mode == "Script":
                 inferred_script = script_file_name.replace(".py", "")
 
         script_options = sorted({script for script in scripts if script})
-        preferred_scripts = ["v2_meteora_clmm_lp_guarded", "v2_meteora_tomato_sol"]
+        preferred_scripts = ["v2_clmm_lp_recenter"]
         for preferred in reversed(preferred_scripts):
             if preferred in script_options:
                 script_options.remove(preferred)
@@ -322,15 +421,19 @@ if deploy_mode == "Script":
 
     ensure_bot_name_from_script(selected_script)
     bot_name, credentials, image_name = render_bot_config(auto_name_hint=True)
+    gateway_network_id, gateway_wallet_address = render_gateway_overrides()
 
     if st.button("🚀 Deploy Script Bot", type="primary", use_container_width=True):
         with st.spinner("🚀 Starting Bot... This process may take a few seconds"):
             if launch_script_bot(bot_name, image_name, credentials, selected_script,
-                                 None if selected_config == "(none)" else selected_config):
+                                 None if selected_config == "(none)" else selected_config,
+                                 gateway_network_id,
+                                 gateway_wallet_address):
                 st.rerun()
 
 else:
     bot_name, credentials, image_name = render_bot_config(auto_name_hint=False)
+    gateway_network_id, gateway_wallet_address = render_gateway_overrides()
 
     # Risk Management Section
     with st.container(border=True):
@@ -463,8 +566,16 @@ else:
                 if st.button("🚀 Deploy Bot", type=deploy_button_style, use_container_width=True):
                     if selected_controllers:
                         with st.spinner('🚀 Starting Bot... This process may take a few seconds'):
-                            if launch_new_bot(bot_name, image_name, credentials, selected_controllers,
-                                              max_global_drawdown, max_controller_drawdown):
+                            if launch_new_bot(
+                                bot_name,
+                                image_name,
+                                credentials,
+                                selected_controllers,
+                                max_global_drawdown,
+                                max_controller_drawdown,
+                                gateway_network_id,
+                                gateway_wallet_address,
+                            ):
                                 st.rerun()
                     else:
                         st.warning("Please select at least one controller to deploy")

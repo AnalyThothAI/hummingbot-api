@@ -1,0 +1,4 @@
+chain: ethereum
+connector: uniswap
+network: bsc
+wallet_address: '0xb9132dEC35793F2Eb93CDc0aF4b0a9d159a5b3EB'
