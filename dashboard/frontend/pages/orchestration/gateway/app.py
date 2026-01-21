@@ -332,23 +332,18 @@ def set_default_choice(state_key: str, default_value: str, options: list[str]):
         st.session_state[state_key] = default_value
 
 
-def preferred_spender_option(connector_name: str, trading_types: list[str]) -> str | None:
-    if not connector_name:
-        return None
-    if trading_types:
-        if "router" in trading_types:
-            return f"{connector_name}/router"
-        return f"{connector_name}/{trading_types[0]}"
-    return connector_name
-
-
-def build_spender_options(connector_name: str, trading_types: list[str]) -> list[str]:
+def build_all_spender_options(connectors_meta: dict) -> list[str]:
     options = []
-    if connector_name:
+    for connector_name, meta in (connectors_meta or {}).items():
+        trading_types = []
+        if isinstance(meta, dict):
+            trading_types = meta.get("trading_types") or []
         if trading_types:
-            options.extend([f"{connector_name}/{value}" for value in trading_types])
+            for value in trading_types:
+                options.append(f"{connector_name}/{value}")
         else:
             options.append(connector_name)
+    options = sorted({opt for opt in options if opt})
     options.append("(custom)")
     return options
 
@@ -364,6 +359,7 @@ def preferred_pool_network(connector_name: str, network_options: list[str]):
 connectors_payload = connectors_response.get("data", {}) if connectors_response.get("ok") else {}
 connectors_rows, connectors_meta = build_connector_rows_and_meta(connectors_payload)
 connectors_list = sorted({str(name) for name in connectors_meta.keys() if name})
+spender_options = build_all_spender_options(connectors_meta)
 
 chains_payload = chains_response.get("data", {}) if chains_response.get("ok") else {}
 chain_options = parse_chain_options(chains_payload)
@@ -714,12 +710,6 @@ with tabs[3]:
     st.markdown("**Check Allowance**")
     with st.form("gateway_check_allowance"):
         allowance_connector = select_connector("Connector", "allowance_connector", connectors_list)
-        allowance_trading_types = connectors_meta.get(allowance_connector, {}).get("trading_types", [])
-        spender_options = build_spender_options(allowance_connector, allowance_trading_types)
-        preferred_spender = preferred_spender_option(allowance_connector, allowance_trading_types)
-        if preferred_spender:
-            set_default_choice("allowance_spender_choice", preferred_spender, spender_options)
-        allowance_spender_choice = st.selectbox("Spender", spender_options, key="allowance_spender_choice")
         allowance_network_options = networks_for_connector(allowance_connector, network_options)
         default_allowance_network = default_network_id_for_connector(
             allowance_connector,
@@ -732,6 +722,9 @@ with tabs[3]:
         chain_hint, _ = split_network_id(allowance_network_id)
         if chain_hint and chain_hint != "ethereum":
             st.info("Allowances apply to EVM networks only (chain = ethereum).")
+
+        allowance_spender_choice = st.selectbox("Spender", spender_options, key="allowance_spender_choice")
+        st.caption("Spender list is global; choose the router that matches your connector/network.")
         allowance_wallet_options = build_wallet_options(wallets_payload, chain_hint or None)
         if allowance_wallet_options:
             default_wallet_label = next(
@@ -806,12 +799,6 @@ with tabs[3]:
     st.caption("Leave amount blank to approve unlimited spending.")
     with st.form("gateway_approve_token"):
         approve_connector = select_connector("Connector", "approve_connector", connectors_list)
-        approve_trading_types = connectors_meta.get(approve_connector, {}).get("trading_types", [])
-        approve_spender_options = build_spender_options(approve_connector, approve_trading_types)
-        preferred_spender = preferred_spender_option(approve_connector, approve_trading_types)
-        if preferred_spender:
-            set_default_choice("approve_spender_choice", preferred_spender, approve_spender_options)
-        approve_spender_choice = st.selectbox("Spender", approve_spender_options, key="approve_spender_choice")
         approve_network_options = networks_for_connector(approve_connector, network_options)
         default_approve_network = default_network_id_for_connector(
             approve_connector,
@@ -824,6 +811,9 @@ with tabs[3]:
         chain_hint, _ = split_network_id(approve_network_id)
         if chain_hint and chain_hint != "ethereum":
             st.info("Approvals apply to EVM networks only (chain = ethereum).")
+
+        approve_spender_choice = st.selectbox("Spender", spender_options, key="approve_spender_choice")
+        st.caption("Spender list is global; choose the router that matches your connector/network.")
         approve_wallet_options = build_wallet_options(wallets_payload, chain_hint or None)
         if approve_wallet_options:
             default_wallet_label = next(

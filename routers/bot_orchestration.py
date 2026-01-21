@@ -1,8 +1,11 @@
+import asyncio
 import logging
 import os
-import asyncio
-from typing import Optional
+import re
+import secrets
 from datetime import datetime
+from typing import Optional
+
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 
 # Create module-specific logger
@@ -27,6 +30,38 @@ from services.accounts_service import AccountsService
 from services.gateway_client import GatewayClient
 
 router = APIRouter(tags=["Bot Orchestration"], prefix="/bot-orchestration")
+
+_INSTANCE_TIMESTAMP_RE = re.compile(r"\d{8}-\d{4}(\d{2})?")
+_INSTANCE_SUFFIX_RE = re.compile(r"-[0-9a-f]{4}$")
+_INSTANCE_INVALID_CHARS_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
+
+
+def _sanitize_instance_name(instance_name: str) -> str:
+    if not instance_name:
+        return "bot"
+    normalized = instance_name.strip().replace(" ", "-")
+    normalized = _INSTANCE_INVALID_CHARS_RE.sub("-", normalized)
+    normalized = re.sub(r"-{2,}", "-", normalized)
+    normalized = normalized.strip("-.")
+    normalized = re.sub(r"^[^a-zA-Z0-9]+", "", normalized)
+    if not normalized:
+        return "bot"
+    return normalized
+
+
+def _build_controller_instance_names(instance_name: str) -> tuple[str, str]:
+    normalized_name = _sanitize_instance_name(instance_name)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    suffix = secrets.token_hex(2)
+    has_timestamp = bool(_INSTANCE_TIMESTAMP_RE.search(normalized_name))
+    has_suffix = bool(_INSTANCE_SUFFIX_RE.search(normalized_name))
+
+    if has_timestamp:
+        unique_instance_name = normalized_name if has_suffix else f"{normalized_name}-{suffix}"
+    else:
+        unique_instance_name = f"{normalized_name}-{timestamp}-{suffix}"
+
+    return unique_instance_name, f"{unique_instance_name}.yml"
 
 
 async def _resolve_chain_for_wallet(
@@ -838,8 +873,18 @@ async def deploy_v2_script(
             config.gateway_wallet_address,
         )
 
+    original_instance_name = config.instance_name
+    normalized_instance_name = _sanitize_instance_name(config.instance_name)
+    config.instance_name = normalized_instance_name
+
     logging.info(f"Creating hummingbot instance with config: {config}")
     response = docker_manager.create_hummingbot_instance(config)
+    if not response.get("success"):
+        error_message = response.get("message", "Failed to create instance.")
+        raise HTTPException(status_code=500, detail=error_message)
+    response["instance_name"] = normalized_instance_name
+    if original_instance_name != normalized_instance_name:
+        response["normalized_from"] = original_instance_name
     
     # Track bot run if deployment was successful
     if response.get("success"):
@@ -893,11 +938,8 @@ async def deploy_v2_controllers(
                 deployment.gateway_wallet_address,
             )
 
-        # Generate unique script config filename with timestamp
-        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        script_config_filename = f"{deployment.instance_name}-{timestamp}.yml"
-        # Use the same name with timestamp for the instance to ensure uniqueness
-        unique_instance_name = f"{deployment.instance_name}-{timestamp}"
+        original_instance_name = deployment.instance_name
+        unique_instance_name, script_config_filename = _build_controller_instance_names(deployment.instance_name)
 
         # Ensure controller config names have .yml extension
         controllers_with_extension = []
@@ -942,11 +984,16 @@ async def deploy_v2_controllers(
         
         # Deploy the instance using the existing method
         response = docker_manager.create_hummingbot_instance(instance_config)
+        if not response.get("success"):
+            error_message = response.get("message", "Failed to create instance.")
+            raise HTTPException(status_code=500, detail=error_message)
         
         if response.get("success"):
             response["script_config_generated"] = script_config_filename
             response["controllers_deployed"] = deployment.controllers_config
             response["unique_instance_name"] = unique_instance_name
+            if original_instance_name != unique_instance_name:
+                response["normalized_from"] = original_instance_name
 
             # Track bot run if deployment was successful
             try:

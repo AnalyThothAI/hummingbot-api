@@ -130,24 +130,25 @@ async def remove_container(container_name: str, archive_locally: bool = True, s3
         HTTPException: 400 if container is not a Hummingbot container
         HTTPException: 500 if archiving fails
     """
-    # Validate that this instance exists locally before archiving.
     instance_dir = os.path.join('bots', 'instances', container_name)
-    if not os.path.exists(instance_dir):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Instance directory '{instance_dir}' not found. Cannot archive '{container_name}'."
-        )
+    archive_skipped = not os.path.exists(instance_dir)
 
-    # Remove the container
     response = docker_service.remove_container(container_name)
-    try:
-        # Archive the data
-        if archive_locally:
-            bot_archiver.archive_locally(container_name, instance_dir)
-        else:
-            bot_archiver.archive_and_upload(container_name, instance_dir, bucket_name=s3_bucket)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+    if not response.get("success") and "not found" in response.get("message", "").lower():
+        response = {"success": True, "message": f"Container {container_name} already removed."}
+
+    if not archive_skipped:
+        try:
+            if archive_locally:
+                bot_archiver.archive_locally(container_name, instance_dir)
+            else:
+                bot_archiver.archive_and_upload(container_name, instance_dir, bucket_name=s3_bucket)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
+    if archive_skipped:
+        response["archive_skipped"] = True
+        response["archive_message"] = f"Instance directory '{instance_dir}' not found. Skipped archive."
 
     return response
 

@@ -2,7 +2,7 @@
 ###   client_config_map config   ###
 ####################################
 
-instance_id: test-3-20260121-1106-20260121-110653
+instance_id: instance-bsc-clmm-20260121-132622-cdf2
 
 # Fetch trading pairs from all exchanges if True, otherwise fetch only from connected exchanges.
 fetch_pairs_from_all_exchanges: false

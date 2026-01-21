@@ -233,8 +233,7 @@ def launch_new_bot(
                    "config by clicking on the checkbox.")
         return False
 
-    start_time_str = time.strftime("%Y%m%d-%H%M")
-    full_bot_name = f"{bot_name}-{start_time_str}"
+    full_bot_name = bot_name
 
     try:
         deploy_config = {
@@ -258,8 +257,12 @@ def launch_new_bot(
             json_body=deploy_config,
         )
         if response.get("ok"):
-            st.success(f"Successfully deployed bot: {full_bot_name}")
-            time.sleep(3)
+            payload = response.get("data", {})
+            deployed_name = payload.get("unique_instance_name") or full_bot_name
+            st.success(f"Successfully deployed bot: {deployed_name}")
+            normalized_from = payload.get("normalized_from")
+            if normalized_from and normalized_from != deployed_name:
+                st.info(f"Instance name normalized from '{normalized_from}' to '{deployed_name}'.")
             return True
         status_code = response.get("status_code")
         if status_code == 401:
@@ -314,8 +317,12 @@ def launch_script_bot(
 
     response = backend_api_request("POST", "/bot-orchestration/deploy-v2-script", json_body=deploy_payload)
     if response.get("ok"):
-        st.success(f"Successfully deployed bot: {full_bot_name}")
-        time.sleep(3)
+        payload = response.get("data", {})
+        deployed_name = payload.get("instance_name") or full_bot_name
+        st.success(f"Successfully deployed bot: {deployed_name}")
+        normalized_from = payload.get("normalized_from")
+        if normalized_from and normalized_from != deployed_name:
+            st.info(f"Instance name normalized from '{normalized_from}' to '{deployed_name}'.")
         return True
 
     status_code = response.get("status_code")
@@ -429,7 +436,7 @@ if deploy_mode == "Script":
                                  None if selected_config == "(none)" else selected_config,
                                  gateway_network_id,
                                  gateway_wallet_address):
-                st.rerun()
+                st.switch_page("frontend/pages/orchestration/instances/app.py")
 
 else:
     bot_name, credentials, image_name = render_bot_config(auto_name_hint=False)
@@ -576,7 +583,7 @@ else:
                                 gateway_network_id,
                                 gateway_wallet_address,
                             ):
-                                st.rerun()
+                                st.switch_page("frontend/pages/orchestration/instances/app.py")
                     else:
                         st.warning("Please select at least one controller to deploy")
 
