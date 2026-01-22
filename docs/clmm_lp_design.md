@@ -14,7 +14,7 @@
 - Swap Executor：`hummingbot/hummingbot/strategy_v2/executors/gateway_swap_executor/`
 - 预算模块：`hummingbot/hummingbot/strategy_v2/budget/`
 
-本文描述当前实现（包含固定预算池与库存管理）与官方设计的一致性与扩展点。
+本文描述当前实现（包含库存管理）与官方设计的一致性与扩展点。
 
 ## 2. 设计原则（与官方文档一致）
 
@@ -30,8 +30,7 @@
 Controller (clmm_lp)
   ├─ LPPositionExecutor (开/关仓、状态上报)
   ├─ GatewaySwapExecutor (库存调整、止损清仓)
-  ├─ BudgetCoordinator (钱包余额锁)
-  └─ FixedBudgetPool (可选：固定预算池)
+  └─ BudgetCoordinator (钱包余额锁)
 ```
 
 ### 3.1 Controller 角色
@@ -131,28 +130,21 @@ open LP; state=ACTIVE
 
 ### 6.1 预算模式
 - **WALLET**：直接使用钱包余额；BudgetCoordinator 负责锁定。
-- **FIXED**：使用 FixedBudgetPool（固定预算池），同时仍使用 BudgetCoordinator 做钱包检查和 gas 预留。
 
 ### 6.2 开仓数量计算
-- 若启用固定预算：
-  - 使用 `target_base_value_pct`（可为 0-1 或 0-100）计算目标 base 价值占比。
-  - `_calculate_target_allocation_amounts` 根据当前价格与可用预算分配 base/quote。
-- 若未启用固定预算：
-  - 直接使用 `base_amount` / `quote_amount`。
+- 直接使用 `base_amount` / `quote_amount`。
+- 若启用 inventory skew，仅影响**价格区间宽度**，不改变开仓数量来源。
+- auto_swap 仅在 `base_amount` 与 `quote_amount` 均为正时启用，并以二者作为**最大使用预算**。
 
 ### 6.3 预算锁与结算
 - 开仓前：
-  - FixedBudgetPool 先 `reserve()` 锁定预算；
-  - BudgetCoordinator 再 `reserve()` 校验钱包可用余额与 gas 预留。
-- 平仓后：
-  - 使用 LP executor 的 `custom_info` 实际数量 `base_amount/quote_amount + fee` 结算回池。
+  - BudgetCoordinator 负责 `reserve()` 校验钱包可用余额与 gas 预留。
+- 平仓后不做内部预算结算，策略以钱包实仓为准。
 
 ### 6.4 交换（swap）预算
-- 交换前：
-  - 在 FixedBudgetPool 预留输入资产（token_in）。
-- 交换后：
-  - **使用实际成交量** `amount_out` 回填预算。
-  - 失败则释放预留。
+- 交换使用钱包余额，不做内部预算池预留。
+- 控制器通过 `WAIT_SWAP` 状态串行化 swap，避免并发消耗。
+- swap 额度以 `base_amount` / `quote_amount` 为上限，避免动用超出计划规模的资产。
 
 ## 7. 再平衡逻辑
 
@@ -283,11 +275,9 @@ open LP; state=ACTIVE
 - 当 `P` 向 `Pu` 逼近时，`amount_base` 下降、`amount_quote` 上升；向 `Pl` 逼近则相反。
 - skew 通过改变 `P` 在区间内的位置，使初始资产构成偏向目标侧，并在区间内波动中逐步修正库存。
 
-**开仓比例对齐（降低 skew 与 swap 的冲突）**：
-- 当启用 skew 且使用固定预算池时，开仓前先根据上式计算 **该区间所需的 base 价值占比**，
-  用这个占比替代 `target_base_value_pct` 来计算 `base/quote` 投入量。
-- 若计算得到的占比不在 `(0, 1)` 或输入无效，则回退到 `target_base_value_pct`。
-- 这样可以减少“开仓资金比例与区间需求不匹配”导致的闲置余额，降低与 swap 的冲突概率。
+**开仓比例对齐**：
+- 当前实现不做区间需求比例校正，开仓数量仍使用 `base_amount` / `quote_amount`。
+- skew 仅改变区间宽度，不直接改变投入数量或比例。
 
 **库存 swap 冲突处理**：
 - 采用软/硬带宽门槛（soft/hard band）控制 swap：
@@ -298,8 +288,7 @@ open LP; state=ACTIVE
 **落地细节**：
 - 仅影响 **新开仓/重开仓** 的区间生成，不对当前仓位强行移动。
 - 单边开仓仍按原逻辑（全宽上/下侧）。
-- `target_base_value_pct` 仍用于库存统计与 swap 目标；当启用 skew 且使用固定预算池时，
-  开仓投入比例会以区间需求比例为准。
+- `target_base_value_pct` 仍用于库存统计与 swap 目标。
 
 ## 8. 入场逻辑
 
@@ -310,13 +299,15 @@ open LP; state=ACTIVE
 
 ## 9. 止损逻辑
 
-- 开仓时记录锚定价值：`anchor = base_amount * price + quote_amount`。
-- 当 `executor.net_pnl_quote <= -anchor * stop_loss_pnl_pct` 触发止损。
+- 止损基于**策略总市值回撤**：
+  - `equity = wallet_base*price + wallet_quote + deployed_base*price + deployed_quote`
+  - `anchor` 在 LP 激活时初始化；重启后若无 anchor，会用当前 equity 重新初始化。
+- 当 `equity <= anchor * (1 - stop_loss_pnl_pct)` 触发止损。
 - 触发后进入 `STOPLOSS_PAUSE`，持续 `stop_loss_pause_sec`。
 - 若 `stop_loss_liquidation_mode == quote`：
   - 触发清仓 swap（base -> quote）。
 
-> 注意：止损基于 executor 的 `net_pnl_quote`，不是全账户 PnL。
+> 注意：止损仅统计 base/quote 的总市值，需使用独立钱包以避免其他资金干扰。
 
 ## 10. 连接器/网关链路
 
@@ -344,7 +335,6 @@ open LP; state=ACTIVE
 - `inventory_soft_band_pct` / `inventory_hard_band_pct`：库存偏差 soft/hard 带宽，用于 swap 冲突处理。
 - `stop_loss_pnl_pct` / `stop_loss_pause_sec`：止损阈值与冷却时间。
 - `stop_loss_liquidation_mode`：止损后是否换成 quote。
-- `budget_mode` / `fixed_budget_base` / `fixed_budget_quote`：预算模式与金额。
 - `budget_key`：预算隔离键（默认 `id`）。
 - `native_token_symbol` / `min_native_balance`：gas 预留。
 
@@ -359,8 +349,6 @@ open LP; state=ACTIVE
 
 - swap 失败：
   - 不阻塞系统；可以单边开仓。
-- LP 失败：
-  - FixedBudgetPool 预留会被保留（日志提示，需人工处理）。
 - 避免并发链上动作：
   - swap executor 运行时禁止 LP 开仓；
   - BudgetCoordinator 内部 `action_lock` 可用于串行化（Executor 自身使用）。
@@ -373,14 +361,12 @@ open LP; state=ACTIVE
 
 ## 14. 已知限制
 
-- FixedBudgetPool 仅内存实现，重启后重置。
-- stop loss 依赖 executor 报告的 PnL；不同 DEX 实现可能存在误差。
+- stop loss 仅统计 base/quote 资产，未包含 gas 等其他代币。
 - 无多层（core/edge）与多池组合编排。
 
 ## 15. 未来计划
 
 - 引入 core/edge 多层 LP 控制器并共享预算。
-- 将 FixedBudgetPool 持久化（重启恢复）。
 - 引入更细粒度的 swap 重试和失败恢复策略。
 - 增加 Controller 状态机与预算的单元测试。
-- Dashboard 增强：展示 Controller 状态与预算池快照。
+- Dashboard 增强：展示 Controller 状态与预算快照。

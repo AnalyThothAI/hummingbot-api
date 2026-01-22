@@ -11,7 +11,7 @@ target_price: 0
 trigger_above: true
 
 base_amount: 0
-quote_amount: 30
+quote_amount: 20
 position_width_pct: 30
 
 rebalance_seconds: 60
@@ -42,9 +42,6 @@ stop_loss_pause_sec: 1800
 stop_loss_liquidation_mode: quote
 reenter_enabled: true
 
-budget_mode: fixed
-fixed_budget_base: 0
-fixed_budget_quote: 50
 budget_key: clmm_lp
 native_token_symbol: BNB
 min_native_balance: 0.0005

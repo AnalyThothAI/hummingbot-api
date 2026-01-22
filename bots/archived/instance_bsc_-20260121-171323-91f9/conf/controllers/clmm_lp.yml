@@ -3,7 +3,7 @@ controller_type: generic
 id: clmm_lp
 
 connector_name: uniswap/clmm
-router_connector: pancakeswap/router
+router_connector: uniswap/router
 trading_pair: 我踏马来了-USDT
 pool_address: "0x6aa382BFf27b6d74d3546AD6419398ad2fe1b236"
 
@@ -11,7 +11,7 @@ target_price: 0
 trigger_above: true
 
 base_amount: 0
-quote_amount: 50
+quote_amount: 30
 position_width_pct: 30
 
 rebalance_seconds: 60
@@ -30,6 +30,11 @@ swap_slippage_pct: 1
 swap_retry_attempts: 0
 swap_retry_delay_sec: 1
 
+cost_filter_enabled: false
+cost_filter_fee_rate_bootstrap_quote_per_hour: 0
+cost_filter_fixed_cost_quote: 0
+cost_filter_max_payback_sec: 3600
+
 stop_loss_pnl_pct: 0.3
 stop_loss_pause_sec: 1800
 
@@ -41,5 +46,5 @@ budget_mode: fixed
 fixed_budget_base: 0
 fixed_budget_quote: 50
 budget_key: clmm_lp
-native_token_symbol: SOL
-min_native_balance: 0.06
+native_token_symbol: BNB
+min_native_balance: 0.0005

@@ -10,7 +10,6 @@ from hummingbot.core.data_type.common import MarketDict, TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy_v2.budget.budget_coordinator import BudgetCoordinatorRegistry
-from hummingbot.strategy_v2.budget.fixed_budget_pool import FixedBudgetPoolRegistry
 from hummingbot.strategy_v2.controllers import ControllerBase, ControllerConfigBase
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.strategy_v2.executors.gateway_swap_executor.data_types import GatewaySwapExecutorConfig
@@ -18,11 +17,6 @@ from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPP
 from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction, ExecutorAction, StopExecutorAction
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
-
-
-class BudgetMode(str, Enum):
-    WALLET = "wallet"
-    FIXED = "fixed"
 
 
 class StopLossLiquidationMode(str, Enum):
@@ -176,46 +170,6 @@ def apply_inventory_skew_to_widths(
     return lower_width, upper_width
 
 
-def required_base_ratio_from_range(
-    *,
-    price: Decimal,
-    lower_price: Decimal,
-    upper_price: Decimal,
-) -> Optional[Decimal]:
-    if price <= 0 or lower_price <= 0 or upper_price <= 0:
-        return None
-    if lower_price >= upper_price:
-        return None
-    if price <= lower_price:
-        return Decimal("1")
-    if price >= upper_price:
-        return Decimal("0")
-
-    sp = price.sqrt()
-    sl = lower_price.sqrt()
-    su = upper_price.sqrt()
-    if sp <= 0 or su <= 0:
-        return None
-
-    amount_base = (su - sp) / (sp * su)
-    amount_quote = sp - sl
-    if amount_base <= 0 and amount_quote <= 0:
-        return None
-    if amount_base <= 0:
-        return Decimal("0")
-
-    base_value = amount_base * price
-    total_value = base_value + amount_quote
-    if total_value <= 0:
-        return None
-    ratio = base_value / total_value
-    if ratio < 0:
-        return Decimal("0")
-    if ratio > 1:
-        return Decimal("1")
-    return ratio
-
-
 class CLMMLPGuardedControllerConfig(ControllerConfigBase):
     controller_type: str = "generic"
     controller_name: str = "clmm_lp"
@@ -275,9 +229,6 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
     reenter_enabled: bool = Field(default=True, json_schema_extra={"is_updatable": True})
 
     budget_key: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
-    budget_mode: BudgetMode = Field(default=BudgetMode.WALLET, json_schema_extra={"is_updatable": True})
-    fixed_budget_base: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
-    fixed_budget_quote: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     native_token_symbol: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
     min_native_balance: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
 
@@ -306,13 +257,8 @@ class CLMMLPGuardedController(ControllerBase):
 
         self._budget_key = self.config.budget_key or self.config.id
         self._budget_coordinator = BudgetCoordinatorRegistry.get(self._budget_key)
-        self._budget_mode = self.config.budget_mode
-        self._budget_pool = None
-        self._pool_reservations: Dict[str, str] = {}
-        self._settled_pool_executors: Set[str] = set()
-        self._swap_pool_reservations: Dict[str, str] = {}
-        self._settled_swap_executors: Set[str] = set()
         self._stop_loss_liquidation_mode = self.config.stop_loss_liquidation_mode
+        self._settled_swap_executors: Set[str] = set()
 
         self._state: ControllerState = ControllerState.IDLE
         self._last_rebalance_ts: float = 0.0
@@ -320,7 +266,6 @@ class CLMMLPGuardedController(ControllerBase):
         self._rebalance_plan: Optional[RebalancePlan] = None
         self._pending_liquidation: bool = False
         self._inventory_swap_attempted: bool = False
-        self._inventory_swap_failed: Optional[bool] = None
         self._stop_loss_until_ts: float = 0.0
         self._last_exit_reason: Optional[str] = None
         self._anchor_value_by_executor: Dict[str, Decimal] = {}
@@ -337,8 +282,6 @@ class CLMMLPGuardedController(ControllerBase):
 
         self._wallet_base: Decimal = Decimal("0")
         self._wallet_quote: Decimal = Decimal("0")
-
-        self._initialize_budget_pool()
 
         self.market_data_provider.initialize_rate_sources([
             ConnectorPair(
@@ -358,20 +301,20 @@ class CLMMLPGuardedController(ControllerBase):
         lp_executor = self._get_active_lp_executor()
         self._update_inventory_metrics(current_price, lp_executor)
         self._update_fee_rate_estimate(current_price, now, lp_executor)
-        budget_snapshot = self._budget_pool.snapshot() if self._budget_pool else None
+        lp_state = (lp_executor.custom_info or {}).get("state") if lp_executor else None
         self.processed_data = {
             "current_price": current_price,
             "wallet_base": self._wallet_base,
             "wallet_quote": self._wallet_quote,
             "controller_state": self._state.value,
-            "budget_pool": budget_snapshot,
+            "lp_state": lp_state,
         }
 
     def determine_executor_actions(self) -> List[ExecutorAction]:
         actions: List[ExecutorAction] = []
         now = self.market_data_provider.time()
 
-        self._reconcile_budget_pool()
+        self._reconcile_swaps()
 
         lp_executor = self._get_active_lp_executor()
         swap_executor = self._get_active_swap_executor()
@@ -416,7 +359,9 @@ class CLMMLPGuardedController(ControllerBase):
         if not lp_executor:
             return False
         self._set_state(ControllerState.ACTIVE)
-        stop_action = self._maybe_stop_for_stop_loss(lp_executor, now)
+        current_price = self._get_current_price()
+        self._ensure_anchor_value(lp_executor, current_price)
+        stop_action = self._maybe_stop_for_stop_loss(lp_executor, now, current_price)
         if stop_action:
             self._set_state(ControllerState.STOPLOSS_PAUSE, "stop_loss_triggered")
             actions.append(stop_action)
@@ -499,7 +444,7 @@ class CLMMLPGuardedController(ControllerBase):
             return None
 
     async def _update_wallet_balances(self):
-        connector = self.market_data_provider.connectors.get(self.config.router_connector)
+        connector = self.market_data_provider.connectors.get(self.config.connector_name)
         if connector is None:
             return
         try:
@@ -663,6 +608,29 @@ class CLMMLPGuardedController(ControllerBase):
         quote_fee = Decimal(str(custom.get("quote_fee", 0)))
         return (base_amount + base_fee) * current_price + (quote_amount + quote_fee)
 
+    def _calculate_total_equity(
+        self,
+        current_price: Optional[Decimal],
+        executor: Optional[ExecutorInfo],
+    ) -> Optional[Decimal]:
+        if current_price is None or current_price <= 0:
+            return None
+        deployed_base, deployed_quote = self._get_deployed_amounts(executor)
+        total_base = self._wallet_base + deployed_base
+        total_quote = self._wallet_quote + deployed_quote
+        equity = total_base * current_price + total_quote
+        return equity if equity > 0 else None
+
+    def _ensure_anchor_value(self, executor: ExecutorInfo, current_price: Optional[Decimal]):
+        anchor_value = self._anchor_value_by_executor.get(executor.id)
+        if anchor_value is not None and anchor_value > 0:
+            return
+        equity = self._calculate_total_equity(current_price, executor)
+        if equity is None:
+            return
+        self._anchor_value_by_executor[executor.id] = equity
+        self.logger().info("Anchor equity initialized: %.6f", float(equity))
+
     def _is_inventory_swap_allowed(self) -> bool:
         if not self.config.inventory_skew_enabled:
             return True
@@ -701,14 +669,22 @@ class CLMMLPGuardedController(ControllerBase):
             return current_price >= self.config.target_price
         return current_price <= self.config.target_price
 
-    def _maybe_stop_for_stop_loss(self, executor: ExecutorInfo, now: float) -> Optional[StopExecutorAction]:
+    def _maybe_stop_for_stop_loss(
+        self,
+        executor: ExecutorInfo,
+        now: float,
+        current_price: Optional[Decimal],
+    ) -> Optional[StopExecutorAction]:
         if self.config.stop_loss_pnl_pct <= 0:
             return None
         anchor_value = self._anchor_value_by_executor.get(executor.id)
         if anchor_value is None or anchor_value <= 0:
             return None
-        trigger_loss = anchor_value * self.config.stop_loss_pnl_pct
-        if executor.net_pnl_quote <= -trigger_loss:
+        equity = self._calculate_total_equity(current_price, executor)
+        if equity is None:
+            return None
+        trigger_level = anchor_value - (anchor_value * self.config.stop_loss_pnl_pct)
+        if equity <= trigger_level:
             self._last_exit_reason = "stop_loss"
             self._stop_loss_until_ts = now + self.config.stop_loss_pause_sec
             if self._stop_loss_liquidation_mode == StopLossLiquidationMode.QUOTE:
@@ -827,7 +803,6 @@ class CLMMLPGuardedController(ControllerBase):
             level_id="liquidate",
             budget_key=self._budget_key,
         )
-        self._record_swap_adjustment(executor_config)
         return CreateExecutorAction(
             controller_id=self.config.id,
             executor_config=executor_config,
@@ -837,9 +812,7 @@ class CLMMLPGuardedController(ControllerBase):
         executor_config = self._calculate_inventory_swap_config()
         if executor_config is None:
             return None
-        self._record_swap_adjustment(executor_config)
         self._inventory_swap_attempted = True
-        self._inventory_swap_failed = None
         return CreateExecutorAction(
             controller_id=self.config.id,
             executor_config=executor_config,
@@ -852,7 +825,6 @@ class CLMMLPGuardedController(ControllerBase):
         executor_config = self._calculate_inventory_swap_config()
         if executor_config is None:
             return None
-        self._record_swap_adjustment(executor_config)
         plan.swap_attempted = True
         plan.swap_failed = None
         return CreateExecutorAction(
@@ -866,8 +838,14 @@ class CLMMLPGuardedController(ControllerBase):
             return None
         if not self._is_inventory_swap_allowed():
             return None
+        planned_base = max(Decimal("0"), self.config.base_amount)
+        planned_quote = max(Decimal("0"), self.config.quote_amount)
+        if planned_base <= 0 or planned_quote <= 0:
+            return None
 
         base_balance, quote_balance = self._get_budget_balances()
+        base_balance = min(base_balance, planned_base)
+        quote_balance = min(quote_balance, planned_quote)
         total_value = base_balance * price + quote_balance
         if total_value <= 0:
             return None
@@ -931,31 +909,6 @@ class CLMMLPGuardedController(ControllerBase):
     def _normalized_target_ratio(self) -> Decimal:
         return self._normalize_ratio_value(self.config.target_base_value_pct)
 
-    def _calculate_target_allocation_amounts(
-        self,
-        price: Decimal,
-        ratio_override: Optional[Decimal] = None,
-    ) -> Tuple[Decimal, Decimal]:
-        base_available, quote_available = self._get_budget_balances()
-        ratio_value = ratio_override if ratio_override is not None else self._normalized_target_ratio()
-        ratio = self._normalize_ratio_value(ratio_value)
-        if ratio <= 0:
-            return Decimal("0"), quote_available
-        if ratio >= 1:
-            return base_available, Decimal("0")
-        base_value_cap = base_available * price
-        quote_value_cap = quote_available
-        if base_value_cap <= 0 or quote_value_cap <= 0:
-            return base_available, quote_available
-        total_value_by_base = base_value_cap / ratio
-        total_value_by_quote = quote_value_cap / (Decimal("1") - ratio)
-        total_value = min(total_value_by_base, total_value_by_quote)
-        if total_value <= 0:
-            return Decimal("0"), Decimal("0")
-        base_amt = (total_value * ratio) / price
-        quote_amt = total_value * (Decimal("1") - ratio)
-        return base_amt, quote_amt
-
     def _should_open_single_sided(self, plan: RebalancePlan) -> bool:
         if not self.config.auto_swap_enabled:
             return True
@@ -965,7 +918,6 @@ class CLMMLPGuardedController(ControllerBase):
         executor_config = self._create_lp_executor_config(use_single_sided=use_single_sided)
         if executor_config is None:
             return None
-        self._anchor_value_by_executor[executor_config.id] = self._anchor_value_from_config(executor_config)
         self._clear_rebalance_context()
         self._reset_inventory_swap_state()
         return CreateExecutorAction(
@@ -978,7 +930,6 @@ class CLMMLPGuardedController(ControllerBase):
         if current_price is None or current_price <= 0:
             return None
 
-        ratio_override = None
         if self._rebalance_plan and use_single_sided:
             info = self._rebalance_plan.info
             lower_price = Decimal(str(info.get("lower_price", current_price)))
@@ -990,27 +941,8 @@ class CLMMLPGuardedController(ControllerBase):
                 base_amt = Decimal("0")
                 quote_amt = Decimal(str(info.get("quote_amount", 0))) + Decimal(str(info.get("quote_fee", 0)))
         else:
-            if self._budget_pool:
-                if self.config.inventory_skew_enabled:
-                    lower_width, upper_width = self._get_planned_widths()
-                    lower_price = current_price * (Decimal("1") - lower_width)
-                    upper_price = current_price * (Decimal("1") + upper_width)
-                    ratio_override = required_base_ratio_from_range(
-                        price=current_price,
-                        lower_price=lower_price,
-                        upper_price=upper_price,
-                    )
-                    if ratio_override is not None:
-                        ratio_override = self._normalize_ratio_value(ratio_override)
-                        if ratio_override <= 0 or ratio_override >= 1:
-                            ratio_override = None
-                base_amt, quote_amt = self._calculate_target_allocation_amounts(
-                    current_price,
-                    ratio_override=ratio_override,
-                )
-            else:
-                base_amt = self.config.base_amount
-                quote_amt = self.config.quote_amount
+            base_amt = self.config.base_amount
+            quote_amt = self.config.quote_amount
 
         if base_amt <= 0 and quote_amt <= 0:
             return None
@@ -1018,8 +950,8 @@ class CLMMLPGuardedController(ControllerBase):
         lower_price, upper_price = self._calculate_price_bounds(current_price, base_amt, quote_amt)
         if self.config.inventory_skew_enabled and base_amt > 0 and quote_amt > 0:
             lower_width, upper_width = self._get_planned_widths()
-            ratio_used = ratio_override if ratio_override is not None else self._normalized_target_ratio()
-            ratio_source = "range" if ratio_override is not None else "target"
+            ratio_used = self._normalized_target_ratio()
+            ratio_source = "target"
             self.logger().info(
                 "Inventory skew applied: skew=%.4f ratio=%.4f target=%.4f deviation=%.4f "
                 "widths=%.4f/%.4f ratio_used=%.4f(%s)",
@@ -1049,7 +981,7 @@ class CLMMLPGuardedController(ControllerBase):
             keep_position=False,
             budget_key=self._budget_key,
         )
-        reservation_id = self._reserve_budget(base_amt, quote_amt, executor_config.id)
+        reservation_id = self._reserve_budget(base_amt, quote_amt)
         if reservation_id is None:
             return None
         executor_config.budget_reservation_id = reservation_id
@@ -1085,26 +1017,20 @@ class CLMMLPGuardedController(ControllerBase):
             return 1
         return 2
 
-    def _anchor_value_from_config(self, config: LPPositionExecutorConfig) -> Decimal:
-        price = self._get_current_price()
-        if price is None:
-            return Decimal("0")
-        return config.base_amount * price + config.quote_amount
-
-    def _reserve_budget(self, base_amt: Decimal, quote_amt: Decimal, config_id: Optional[str]) -> Optional[str]:
+    def _reserve_budget(self, base_amt: Decimal, quote_amt: Decimal) -> Optional[str]:
         connector = self.market_data_provider.connectors.get(self.config.connector_name)
         if connector is None:
+            self.logger().warning(
+                "Budget reserve failed: connector unavailable (base=%.6f quote=%.6f)",
+                float(base_amt),
+                float(quote_amt),
+            )
             return None
         requirements = {}
         if base_amt > 0:
             requirements[self._base_token] = base_amt
         if quote_amt > 0:
             requirements[self._quote_token] = quote_amt
-        pool_reservation_id = None
-        if self._budget_pool:
-            pool_reservation_id = self._budget_pool.reserve(requirements)
-            if pool_reservation_id is None:
-                return None
         reservation_id = self._budget_coordinator.reserve(
             connector_name=self.config.connector_name,
             connector=connector,
@@ -1112,33 +1038,13 @@ class CLMMLPGuardedController(ControllerBase):
             native_token=self.config.native_token_symbol,
             min_native_balance=self.config.min_native_balance,
         )
-        if reservation_id is None and pool_reservation_id:
-            self._budget_pool.release(pool_reservation_id)
-            return None
-        if pool_reservation_id and config_id:
-            self._pool_reservations[config_id] = pool_reservation_id
+        if reservation_id is None:
+            self.logger().warning(
+                "Budget reserve failed: insufficient balance (base=%.6f quote=%.6f)",
+                float(base_amt),
+                float(quote_amt),
+            )
         return reservation_id
-
-    def _reserve_swap_budget(self, config: GatewaySwapExecutorConfig) -> Optional[str]:
-        if not self._budget_pool:
-            return None
-        token_in, amount_in = self._get_swap_input_amount(config)
-        if token_in is None or amount_in <= 0:
-            return None
-        return self._budget_pool.reserve({token_in: amount_in})
-
-    def _get_swap_input_amount(self, config: GatewaySwapExecutorConfig) -> Tuple[Optional[str], Decimal]:
-        if config.amount <= 0:
-            return None, Decimal("0")
-        base_token, quote_token = config.trading_pair.split("-")
-        if config.amount_in_is_quote:
-            return quote_token, config.amount
-        if config.side == TradeType.SELL:
-            return base_token, config.amount
-        price = self._get_current_price()
-        if price is None or price <= 0:
-            return None, Decimal("0")
-        return quote_token, config.amount * price
 
     def _set_state(self, state: ControllerState, reason: Optional[str] = None):
         if state == self._state:
@@ -1189,114 +1095,27 @@ class CLMMLPGuardedController(ControllerBase):
 
     def _reset_inventory_swap_state(self):
         self._inventory_swap_attempted = False
-        self._inventory_swap_failed = None
 
     def _get_budget_balances(self) -> Tuple[Decimal, Decimal]:
-        if self._budget_pool:
-            return (
-                self._budget_pool.available(self._base_token),
-                self._budget_pool.available(self._quote_token),
-            )
         return self._wallet_base, self._wallet_quote
 
-    def _initialize_budget_pool(self):
-        if self._budget_mode != BudgetMode.FIXED:
-            return
-        quote_budget = self.config.fixed_budget_quote
-        if quote_budget <= 0 and self.config.total_amount_quote > 0:
-            quote_budget = self.config.total_amount_quote
-        base_budget = self.config.fixed_budget_base
-        if base_budget <= 0 and quote_budget <= 0:
-            self.logger().warning(
-                "Fixed budget mode enabled but budget amounts are zero; falling back to wallet mode."
-            )
-            self._budget_mode = BudgetMode.WALLET
-            return
-        self._budget_pool = FixedBudgetPoolRegistry.get(
-            key=self._budget_key,
-            base_token=self._base_token,
-            quote_token=self._quote_token,
-            base_budget=base_budget,
-            quote_budget=quote_budget,
-        )
-
-    def _reconcile_budget_pool(self):
+    def _reconcile_swaps(self):
         for executor in self.executors_info:
-            if executor.type == "gateway_swap_executor":
-                self._maybe_settle_swap_adjustment(executor)
-
-        if not self._budget_pool:
-            return
-        for executor in self.executors_info:
-            if executor.type != "lp_position_executor":
+            if executor.type != "gateway_swap_executor":
                 continue
             if executor.controller_id != self.config.id:
                 continue
             if not executor.is_done:
                 continue
-            if executor.id in self._settled_pool_executors:
+            if executor.id in self._settled_swap_executors:
                 continue
-            self._settled_pool_executors.add(executor.id)
-            pool_reservation_id = self._pool_reservations.get(executor.config.id)
-            if not pool_reservation_id:
-                continue
-            if executor.close_type == CloseType.FAILED:
-                self.logger().warning(
-                    "LP executor failed; leaving budget pool reservation locked for manual review."
-                )
-                continue
-            custom = executor.custom_info or {}
-            base_amount = Decimal(str(custom.get("base_amount", 0)))
-            quote_amount = Decimal(str(custom.get("quote_amount", 0)))
-            base_fee = Decimal(str(custom.get("base_fee", 0)))
-            quote_fee = Decimal(str(custom.get("quote_fee", 0)))
-            returned = {
-                self._base_token: base_amount + base_fee,
-                self._quote_token: quote_amount + quote_fee,
-            }
-            self._budget_pool.settle(pool_reservation_id, returned)
-            self._pool_reservations.pop(executor.config.id, None)
-
-    def _record_swap_adjustment(self, config: GatewaySwapExecutorConfig):
-        if not self._budget_pool:
-            return
-        if config.id in self._swap_pool_reservations:
-            return
-        reservation_id = self._reserve_swap_budget(config)
-        if reservation_id:
-            self._swap_pool_reservations[config.id] = reservation_id
-
-    def _maybe_settle_swap_adjustment(self, executor: ExecutorInfo):
-        if executor.controller_id != self.config.id:
-            return
-        if not executor.is_done:
-            return
-        if executor.id in self._settled_swap_executors:
-            return
-        self._settled_swap_executors.add(executor.id)
-        if executor.config.level_id == "auto_swap":
-            if self._rebalance_plan and self._rebalance_plan.stage in {
-                RebalanceStage.SWAP_PENDING,
-                RebalanceStage.READY_TO_OPEN,
-            }:
-                self._rebalance_plan.swap_attempted = True
-                self._rebalance_plan.swap_failed = executor.close_type == CloseType.FAILED
-            else:
-                self._inventory_swap_attempted = True
-                self._inventory_swap_failed = executor.close_type == CloseType.FAILED
-        if not self._budget_pool:
-            return
-        reservation_id = self._swap_pool_reservations.pop(executor.config.id, None)
-        if not reservation_id:
-            return
-        if executor.close_type == CloseType.FAILED:
-            self._budget_pool.release(reservation_id)
-            return
-        custom = executor.custom_info or {}
-        token_out = custom.get("token_out")
-        amount_out = Decimal(str(custom.get("amount_out", 0)))
-        if not token_out or amount_out <= 0:
-            self.logger().warning("Swap completed without amount_out; releasing budget reservation.")
-            self._budget_pool.release(reservation_id)
-            return
-        self._budget_pool.settle(reservation_id, {token_out: amount_out})
+            self._settled_swap_executors.add(executor.id)
+            if executor.config.level_id == "auto_swap":
+                if self._rebalance_plan and self._rebalance_plan.stage in {
+                    RebalanceStage.SWAP_PENDING,
+                    RebalanceStage.READY_TO_OPEN,
+                }:
+                    self._rebalance_plan.swap_attempted = True
+                    self._rebalance_plan.swap_failed = executor.close_type == CloseType.FAILED
+                else:
+                    self._inventory_swap_attempted = True
