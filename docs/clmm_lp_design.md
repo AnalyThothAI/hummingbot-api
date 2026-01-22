@@ -71,17 +71,34 @@ Controller (clmm_lp)
 - **WAIT_SWAP**：swap executor 在运行，暂停其他动作。
 - **STOPLOSS_PAUSE**：止损触发后的冷却期。
 - **MANUAL_STOP**：人工止损（manual_kill_switch）。
+- **LP_FAILURE**：LP executor 失败（RETRIES_EXCEEDED / FAILED），需人工介入。
 
-### 5.2 状态迁移逻辑（要点）
+### 5.2 状态表（入口/出口）
+
+| 状态 | 含义 | 进入条件 | 退出条件 |
+| --- | --- | --- | --- |
+| IDLE | 无头寸/无动作 | entry 条件不满足或预算不足 | entry 条件满足且预算足够 → READY_TO_OPEN / INVENTORY_SWAP |
+| ACTIVE | LP 运行中 | LP executor active | 触发止损 → STOPLOSS_PAUSE；触发再平衡 → REBALANCE_WAIT_CLOSE |
+| REBALANCE_WAIT_CLOSE | 等待重开 | stop LP 成功且在 reopen delay 或等待 swap | reopen delay 到期且无需 swap → READY_TO_OPEN；需要 swap → INVENTORY_SWAP |
+| INVENTORY_SWAP | 发起库存调整 | 触发 swap（入场/重开） | swap executor active → WAIT_SWAP |
+| WAIT_SWAP | swap 执行中 | swap executor active | swap 完成 → 依据计划进入 READY_TO_OPEN / REBALANCE_WAIT_CLOSE / IDLE |
+| READY_TO_OPEN | 准备开仓 | 预算/价格校验通过且无需 swap | 创建 LP → ACTIVE；失败 → IDLE |
+| STOPLOSS_PAUSE | 止损冷却 | stop loss 触发或清仓等待 | 冷却结束且无 pending liquidation → IDLE |
+| MANUAL_STOP | 人工停止 | manual_kill_switch=true | manual_kill_switch=false → 回到 IDLE |
+| LP_FAILURE | LP 执行失败锁 | LP executor RETRIES_EXCEEDED/FAILED | 仅人工干预（当前无自动解锁） |
+
+### 5.3 状态迁移逻辑（要点）
 - MANUAL_STOP 优先级最高，直接 stop LP executor。
 - swap executor 运行时，控制器进入 WAIT_SWAP，避免并发动作。
+- LP executor 进入 RETRIES_EXCEEDED 或 failed 时进入 LP_FAILURE，阻止自动重新入场。
 - LP executor 运行时：
   - 优先评估 stop loss；
   - 再评估 rebalance。
 - stop loss 或 rebalance 触发后，先 stop LP，再进入重开或清仓流程。
 - stop loss 冷却期内禁止重新开仓。
+- stop loss 清仓失败时进入重试（基于 cooldown）直到清仓成功或无 base 余额。
 
-### 5.3 Tick 决策顺序（精简伪代码）
+### 5.4 Tick 决策顺序（精简伪代码）
 
 ```
 if manual_kill_switch:
@@ -90,8 +107,8 @@ if manual_kill_switch:
 if swap_executor active:
   state=WAIT_SWAP; return
 
-if pending_liquidation:
-  create swap; state=WAIT_SWAP; return
+if lp_failure_detected:
+  state=LP_FAILURE; return
 
 if LP executor active:
   if stop_loss_triggered:
@@ -99,6 +116,9 @@ if LP executor active:
   if rebalance_triggered:
     stop LP; state=REBALANCE_WAIT_CLOSE; return
   state=ACTIVE; return
+
+if pending_liquidation:
+  create swap; state=WAIT_SWAP; return
 
 if now < stop_loss_until_ts:
   state=STOPLOSS_PAUSE; return
@@ -118,6 +138,24 @@ if auto_swap and not swap_attempted:
 open LP; state=ACTIVE
 ```
 
+### 5.5 状态机流程图（Mermaid）
+
+```mermaid
+flowchart TD
+  A[IDLE] -->|entry ok| B[READY_TO_OPEN]
+  B -->|need swap| C[INVENTORY_SWAP]
+  C --> D[WAIT_SWAP]
+  D -->|swap done| B
+  B -->|create LP| E[ACTIVE]
+  E -->|stop loss| F[STOPLOSS_PAUSE]
+  E -->|rebalance| G[REBALANCE_WAIT_CLOSE]
+  G -->|delay done| B
+  F -->|cooldown done| A
+  A -->|manual kill| H[MANUAL_STOP]
+  H -->|manual off| A
+  E -->|lp failure| I[LP_FAILURE]
+```
+
 ### 5.4 状态机审阅（简化结论）
 
 - **优先级明确**：`manual_kill_switch` > `swap_executor` > `pending_liquidation` > `stop_loss` > `rebalance` > `entry`。
@@ -130,11 +168,15 @@ open LP; state=ACTIVE
 
 ### 6.1 预算模式
 - **WALLET**：直接使用钱包余额；BudgetCoordinator 负责锁定。
+- **固定名义预算**：`position_value_quote` 为目标名义规模，钱包总市值不足时不换仓/不入场。
 
 ### 6.2 开仓数量计算
-- 直接使用 `base_amount` / `quote_amount`。
+- 使用 `position_value_quote` 与 `target_base_value_pct`，按当前价格计算 `base_amount/quote_amount`。
 - 若启用 inventory skew，仅影响**价格区间宽度**，不改变开仓数量来源。
-- auto_swap 仅在 `base_amount` 与 `quote_amount` 均为正时启用，并以二者作为**最大使用预算**。
+- 当目标比例与当前钱包比例偏离超过 `swap_min_quote_value` 时，必须先 swap 达标再开仓。
+- `auto_swap_enabled=false` 时，若偏离超过阈值将阻塞开仓/重开。
+
+> 建议使用独立钱包，避免其他资产被库存调仓影响。
 
 ### 6.3 预算锁与结算
 - 开仓前：
@@ -142,9 +184,16 @@ open LP; state=ACTIVE
 - 平仓后不做内部预算结算，策略以钱包实仓为准。
 
 ### 6.4 交换（swap）预算
-- 交换使用钱包余额，不做内部预算池预留。
+- 交换使用预算快照（按 `position_value_quote` 缩放钱包余额），不做内部预算池预留。
 - 控制器通过 `WAIT_SWAP` 状态串行化 swap，避免并发消耗。
-- swap 额度以 `base_amount` / `quote_amount` 为上限，避免动用超出计划规模的资产。
+- swap 额度由目标比例差值计算（`|delta_base| * price`），并应用 `swap_safety_buffer_pct`。
+- 钱包总市值不足 `position_value_quote` 时不触发 swap/开仓。
+
+### 6.5 止损基准（预算切片）
+- 止损使用“预算切片的市值变化”，基准为 LP 开仓时刻的预算等值（`anchor_budget`）。
+- 预算切片 = LP 已部署价值 + 钱包中分配给预算的切片（按开仓时钱包比例分配）。
+- 当前预算权益 = `deployed_value + wallet_slice_value`（统一以 quote 计价）。
+- stop loss 触发条件：`budget_equity <= anchor_budget * (1 - stop_loss_pnl_pct)`。
 
 ## 7. 再平衡逻辑
 
@@ -159,8 +208,8 @@ open LP; state=ACTIVE
 触发后流程：
 1) Stop LP executor。
 2) 等待 `reopen_delay_sec`。
-3) 若开启 `auto_swap` 且未失败，执行库存调整 swap。
-4) 开新 LP。若 swap 失败则单边开仓（保留原一侧余额）。
+3) 若目标比例偏离且开启 `auto_swap_enabled`，执行库存调整 swap。
+4) 仅在 swap 完成或无需 swap 时开新 LP（按目标比例开仓）。
 
 ### 7.1 策略A：再平衡成本过滤（Cost Filter）
 
@@ -276,7 +325,7 @@ open LP; state=ACTIVE
 - skew 通过改变 `P` 在区间内的位置，使初始资产构成偏向目标侧，并在区间内波动中逐步修正库存。
 
 **开仓比例对齐**：
-- 当前实现不做区间需求比例校正，开仓数量仍使用 `base_amount` / `quote_amount`。
+- 当前实现不做区间需求比例校正，开仓数量由 `position_value_quote` 与 `target_base_value_pct` 决定。
 - skew 仅改变区间宽度，不直接改变投入数量或比例。
 
 **库存 swap 冲突处理**：
@@ -299,15 +348,15 @@ open LP; state=ACTIVE
 
 ## 9. 止损逻辑
 
-- 止损基于**策略总市值回撤**：
-  - `equity = wallet_base*price + wallet_quote + deployed_base*price + deployed_quote`
-  - `anchor` 在 LP 激活时初始化；重启后若无 anchor，会用当前 equity 重新初始化。
-- 当 `equity <= anchor * (1 - stop_loss_pnl_pct)` 触发止损。
+- 止损基于**预算切片市值回撤**：
+  - `budget_equity = deployed_value + wallet_slice_value`（统一以 quote 计价）
+  - `anchor_budget` 在 LP 激活时初始化：预算值 = 已部署价值 + 钱包中分配给预算的切片（重启后重新初始化）
+- 当 `budget_equity <= anchor_budget * (1 - stop_loss_pnl_pct)` 触发止损。
 - 触发后进入 `STOPLOSS_PAUSE`，持续 `stop_loss_pause_sec`。
 - 若 `stop_loss_liquidation_mode == quote`：
   - 触发清仓 swap（base -> quote）。
 
-> 注意：止损仅统计 base/quote 的总市值，需使用独立钱包以避免其他资金干扰。
+> 注意：止损只评估预算切片，其他钱包资金不会稀释/放大止损。
 
 ## 10. 连接器/网关链路
 
@@ -317,11 +366,12 @@ open LP; state=ACTIVE
 
 ## 11. 关键配置项说明（精选）
 
+- `position_value_quote`：单次 LP 目标名义金额（quote 计价）。
 - `position_width_pct`：价格区间宽度百分比。
 - `hysteresis_pct`：出界后再平衡的偏离阈值。
 - `rebalance_seconds` / `cooldown_seconds`：出界持续时长 / 冷却时间。
 - `reopen_delay_sec`：stop 后延时重开。
-- `auto_swap_enabled` / `target_base_value_pct`：库存管理开关与目标比例。
+- `auto_swap_enabled` / `target_base_value_pct`：库存管理开关与目标比例（0-1，0=纯 quote，1=纯 base）。
 - `swap_min_quote_value`：库存调整的最小价值阈值。
 - `swap_safety_buffer_pct`：swap 输入安全缓冲。
 - `cost_filter_enabled`：是否启用再平衡成本过滤。
@@ -338,6 +388,16 @@ open LP; state=ACTIVE
 - `budget_key`：预算隔离键（默认 `id`）。
 - `native_token_symbol` / `min_native_balance`：gas 预留。
 
+### 11.1 运行时内部状态（对外可观测）
+
+Controller 将关键内部状态输出到 `processed_data`，便于观察与诊断：
+- `controller_state` / `lp_state`：控制器与 LP executor 状态。
+- `stop_loss_anchor`：预算止损锚定值（quote 计价）。
+- `pending_liquidation`：是否等待止损清仓。
+- `rebalance_stage`：再平衡阶段（WAIT_REOPEN / SWAP_PENDING / READY_TO_OPEN）。
+- `inventory_swap_failed`：最近库存 swap 是否失败。
+- `lp_failure_blocked`：LP executor 是否已进入失败锁。
+
 **Cost Filter 内部常量（不可调）**：
 - 定义位置：`bots/controllers/generic/clmm_lp.py`。
 - 评估窗口固定为 1 小时。
@@ -348,7 +408,7 @@ open LP; state=ACTIVE
 ## 12. 风险控制与异常处理
 
 - swap 失败：
-  - 不阻塞系统；可以单边开仓。
+  - 不开仓/不重开，等待冷却后重试。
 - 避免并发链上动作：
   - swap executor 运行时禁止 LP 开仓；
   - BudgetCoordinator 内部 `action_lock` 可用于串行化（Executor 自身使用）。

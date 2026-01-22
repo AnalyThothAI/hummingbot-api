@@ -10,72 +10,6 @@ from frontend.st_utils import backend_api_request, get_backend_api_client, initi
 
 UNLIMITED_ALLOWANCE_THRESHOLD = Decimal("10000000000")
 
-APPROVAL_PANEL_STYLE = """
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
-.approval-shell {
-  border-radius: 18px;
-  padding: 20px 22px;
-  margin: 8px 0 16px 0;
-  border: 1px solid #e2d6c3;
-  background: linear-gradient(135deg, #f7f2e7 0%, #f1f8f5 55%, #edf2f7 100%);
-  box-shadow: 0 16px 40px rgba(30, 41, 59, 0.12);
-}
-.approval-title {
-  font-family: "Fraunces", serif;
-  font-size: 1.5rem;
-  color: #1f2937;
-  margin: 0 0 4px 0;
-}
-.approval-subtitle {
-  font-family: "IBM Plex Sans", sans-serif;
-  color: #475569;
-  font-size: 0.95rem;
-  margin: 0;
-}
-.approval-tag {
-  display: inline-block;
-  margin-top: 10px;
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-family: "IBM Plex Sans", sans-serif;
-  background: #111827;
-  color: #f8fafc;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-.pill {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 10px;
-  border-radius: 999px;
-  font-size: 0.75rem;
-  font-family: "IBM Plex Sans", sans-serif;
-  letter-spacing: 0.03em;
-}
-.pill-ok {
-  background: #065f46;
-  color: #ecfdf5;
-}
-.pill-warn {
-  background: #9a3412;
-  color: #fff7ed;
-}
-.pill-muted {
-  background: #64748b;
-  color: #f8fafc;
-}
-.approval-meta {
-  font-family: "IBM Plex Sans", sans-serif;
-  color: #334155;
-  font-size: 0.85rem;
-}
-</style>
-"""
-
-st.markdown(APPROVAL_PANEL_STYLE, unsafe_allow_html=True)
-
 initialize_st_page(icon="🙌", show_readme=False)
 
 # Initialize backend client
@@ -255,6 +189,101 @@ def build_approval_plan(selected_controllers, controller_config_map):
     return plan
 
 
+def evaluate_controller_config(config_id, config, gateway_network_id):
+    issues = []
+    connector_name = config.get("connector_name")
+    trading_pair = config.get("trading_pair")
+    router_connector = config.get("router_connector")
+
+    if not connector_name:
+        issues.append({
+            "Config": config_id,
+            "Issue": "Missing connector_name",
+            "Field": "connector_name",
+            "Fix": "Set a gateway or exchange connector.",
+        })
+
+    if not trading_pair or "-" not in str(trading_pair):
+        issues.append({
+            "Config": config_id,
+            "Issue": "Invalid trading_pair",
+            "Field": "trading_pair",
+            "Fix": "Use BASE-QUOTE format.",
+        })
+
+    if "pool_address" in config and not config.get("pool_address"):
+        issues.append({
+            "Config": config_id,
+            "Issue": "Missing pool_address",
+            "Field": "pool_address",
+            "Fix": "Provide a pool address or remove the key.",
+        })
+
+    base_amount = parse_decimal_value(config.get("base_amount"))
+    quote_amount = parse_decimal_value(config.get("quote_amount"))
+    if base_amount is None and quote_amount is None:
+        issues.append({
+            "Config": config_id,
+            "Issue": "Budget is zero",
+            "Field": "base_amount / quote_amount",
+            "Fix": "Set at least one amount above 0.",
+        })
+
+    if config.get("auto_swap_enabled") and not router_connector:
+        issues.append({
+            "Config": config_id,
+            "Issue": "auto_swap_enabled without router_connector",
+            "Field": "router_connector",
+            "Fix": "Set router_connector or disable auto_swap_enabled.",
+        })
+
+    if connector_name and is_gateway_connector(connector_name) and not gateway_network_id:
+        issues.append({
+            "Config": config_id,
+            "Issue": "Gateway network not selected",
+            "Field": "gateway_network_id",
+            "Fix": "Select a Gateway network in overrides.",
+        })
+
+    return issues
+
+
+def render_config_health(selected_controllers, controller_configs, gateway_network_id):
+    if not selected_controllers:
+        return
+
+    controller_config_map = build_controller_config_map(controller_configs)
+    issues = []
+    gateway_configs = 0
+
+    for config_id in selected_controllers:
+        config = controller_config_map.get(config_id)
+        if not isinstance(config, dict):
+            issues.append({
+                "Config": config_id,
+                "Issue": "Config not found",
+                "Field": "id",
+                "Fix": "Recreate the controller config.",
+            })
+            continue
+        if is_gateway_connector(config.get("connector_name")):
+            gateway_configs += 1
+        issues.extend(evaluate_controller_config(config_id, config, gateway_network_id))
+
+    with st.container(border=True):
+        st.info("Config health checks for the selected controllers.")
+        metrics = st.columns(3)
+        metrics[0].metric("Selected", len(selected_controllers))
+        metrics[1].metric("Gateway configs", gateway_configs)
+        metrics[2].metric("Issues", len(issues))
+
+        if issues:
+            st.warning("Fix the items below to avoid deployment failures.")
+            st.dataframe(pd.DataFrame(issues), use_container_width=True, hide_index=True)
+        else:
+            st.success("No config issues detected.")
+
+
 def generate_instance_name(script_name: str) -> str:
     base_name = normalize_script_name(script_name) or "bot"
     timestamp = time.strftime("%Y%m%d-%H%M")
@@ -399,17 +428,6 @@ def render_approval_gate(
         st.info("No Gateway approvals required for the selected controllers.")
         return True
 
-    st.markdown(
-        """
-        <div class="approval-shell">
-          <div class="approval-title">Approval Gate</div>
-          <div class="approval-subtitle">Verify token allowances before deployment to avoid failed LP opens.</div>
-          <div class="approval-tag">EVM approvals</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-
     if not gateway_network_id:
         st.warning("Select a Gateway network to check approvals.")
         return False
@@ -425,12 +443,11 @@ def render_approval_gate(
         st.warning("No default wallet found for this chain. Choose a wallet in Gateway overrides.")
         return False
 
-    st.markdown(
-        f"<div class='approval-meta'>Network: <strong>{gateway_network_id}</strong> | "
-        f"Wallet: <strong>{shorten_address(wallet_address)}</strong></div>",
-        unsafe_allow_html=True,
-    )
-    st.caption("Approval target: unlimited. Allowance >= 1e10 is treated as unlimited.")
+    with st.container(border=True):
+        st.markdown("**Approval Gate**")
+        st.caption("Verify token allowances before deployment to avoid failed LP opens.")
+        st.write(f"Network: {gateway_network_id} | Wallet: {shorten_address(wallet_address)}")
+        st.caption("Approval target: unlimited. Allowance >= 1e10 is treated as unlimited.")
 
     spender_tokens = {}
     for item in plan:
@@ -536,7 +553,6 @@ def render_approval_gate(
 
     if missing:
         st.warning("Approvals required before deployment.")
-        st.markdown("<span class='pill pill-warn'>Needs approvals</span>", unsafe_allow_html=True)
         for item in missing:
             cols = st.columns([3, 3, 2, 2])
             cols[0].markdown(f"**{item['controller']}**")
@@ -564,7 +580,7 @@ def render_approval_gate(
                 else:
                     st.error(response.get("error", "Approval failed."))
     else:
-        st.markdown("<span class='pill pill-ok'>Approvals ready</span>", unsafe_allow_html=True)
+        st.success("All approvals are ready.")
 
     return approval_ready
 
@@ -913,6 +929,13 @@ else:
             # Display selected count
             if selected_controllers:
                 st.success(f"✅ {len(selected_controllers)} controller(s) selected for deployment")
+
+            if selected_controllers:
+                render_config_health(
+                    selected_controllers,
+                    all_controllers_config,
+                    gateway_network_id,
+                )
 
             approval_ready = True
             if selected_controllers:

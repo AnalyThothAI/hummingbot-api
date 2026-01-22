@@ -175,3 +175,5 @@ bots/instances/
 # IDE files
 .vscode/
 .idea/
+bots/archived/ 
+bots/instances/

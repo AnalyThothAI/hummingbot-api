@@ -1,3 +1,6 @@
+import re
+from datetime import datetime, timedelta
+
 import streamlit as st
 
 from frontend.st_utils import backend_api_request, initialize_st_page
@@ -6,6 +9,15 @@ initialize_st_page(icon="📜", show_readme=False)
 
 st.title("Logs")
 st.subheader("Gateway and container logs")
+
+FOCUS_FILTERS = {
+    "State changes": ["state change", "transition", "controller state change"],
+    "Rebalance": ["rebalance", "out_of_range", "out-of-range", "reopen", "recenter"],
+    "Swaps": ["swap", "router", "amm"],
+    "LP actions": ["open", "close", "add_liquidity", "remove_liquidity", "liquidity"],
+    "Stop loss": ["stop_loss", "stop loss", "drawdown"],
+    "Errors": ["error", "failed", "exception", "traceback"],
+}
 
 running_response = backend_api_request("GET", "/docker/active-containers")
 exited_response = backend_api_request("GET", "/docker/exited-containers")
@@ -94,13 +106,22 @@ with meta_cols[2]:
 st.divider()
 st.subheader("Log Viewer")
 
-controls_cols = st.columns([1, 1, 2])
+controls_cols = st.columns([1, 1, 1, 2])
 with controls_cols[0]:
     log_lines = st.selectbox("Lines", options=[50, 100, 200, 500], index=1)
 with controls_cols[1]:
-    log_level = st.selectbox("Level", options=["ALL", "error", "warning", "info", "debug"])
+    time_window = st.selectbox("Window", options=["All", "5m", "15m", "1h", "6h", "24h"], index=0)
 with controls_cols[2]:
+    log_level = st.selectbox("Level", options=["ALL", "error", "warning", "info", "debug"])
+with controls_cols[3]:
     log_search = st.text_input("Search logs", placeholder="Filter logs by keyword")
+
+focus_tags = st.multiselect(
+    "Focus",
+    options=list(FOCUS_FILTERS.keys()),
+    placeholder="Optional signal filters",
+)
+st.caption("Time window applies to lines with timestamps; others are kept.")
 
 if st.button("Refresh Logs", use_container_width=True):
     st.rerun()
@@ -128,6 +149,40 @@ if not logs_text:
 
 log_entries = logs_text.strip().split("\n")
 
+def parse_log_timestamp(line: str):
+    match = re.match(
+        r"^(?P<date>\d{4}-\d{2}-\d{2})[ T](?P<time>\d{2}:\d{2}:\d{2})(?:[,.](?P<ms>\d{1,6}))?",
+        line,
+    )
+    if not match:
+        return None
+    ts_raw = f"{match.group('date')} {match.group('time')}"
+    try:
+        ts = datetime.strptime(ts_raw, "%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return None
+    ms = match.group("ms")
+    if ms:
+        ts = ts.replace(microsecond=int(ms.ljust(6, "0")))
+    return ts
+
+if time_window != "All":
+    now = datetime.now()
+    delta_map = {
+        "5m": timedelta(minutes=5),
+        "15m": timedelta(minutes=15),
+        "1h": timedelta(hours=1),
+        "6h": timedelta(hours=6),
+        "24h": timedelta(hours=24),
+    }
+    cutoff = now - delta_map.get(time_window, timedelta())
+    filtered_entries = []
+    for line in log_entries:
+        ts = parse_log_timestamp(line)
+        if ts is None or ts >= cutoff:
+            filtered_entries.append(line)
+    log_entries = filtered_entries
+
 if log_level != "ALL":
     level_lower = log_level.lower()
     if level_lower == "warning":
@@ -141,6 +196,17 @@ if log_level != "ALL":
 if log_search:
     search_lower = log_search.lower()
     log_entries = [line for line in log_entries if search_lower in line.lower()]
+
+if focus_tags:
+    focus_patterns = []
+    for tag in focus_tags:
+        focus_patterns.extend(FOCUS_FILTERS.get(tag, []))
+    focus_patterns = [pattern.lower() for pattern in focus_patterns if pattern]
+    if focus_patterns:
+        log_entries = [
+            line for line in log_entries
+            if any(pattern in line.lower() for pattern in focus_patterns)
+        ]
 
 if not log_entries:
     st.info("No logs match the current filters.")
