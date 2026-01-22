@@ -11,7 +11,7 @@ target_price: 0
 trigger_above: true
 
 position_value_quote: 20
-position_width_pct: 0.5
+position_width_pct: 20
 
 rebalance_seconds: 60
 hysteresis_pct: 0.2
@@ -21,7 +21,7 @@ reopen_delay_sec: 5
 
 auto_swap_enabled: true
 target_base_value_pct: 0.5
-swap_min_quote_value: 0.01
+swap_min_value_pct: 0.05
 swap_safety_buffer_pct: 2
 swap_timeout_sec: 120
 swap_poll_interval_sec: 2
@@ -44,3 +44,4 @@ reenter_enabled: true
 budget_key: clmm_lp
 native_token_symbol: BNB
 min_native_balance: 0.0005
+balance_refresh_interval_sec: 10

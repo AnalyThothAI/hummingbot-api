@@ -212,7 +212,15 @@ if not log_entries:
     st.info("No logs match the current filters.")
     st.stop()
 
-st.code("\n".join(log_entries[-log_lines:]), language="log")
+visible_logs = "\n".join(log_entries[-log_lines:])
+st.code(visible_logs, language="log")
+st.download_button(
+    "Download logs (txt)",
+    data=visible_logs,
+    file_name=f"{selected_container}-logs.txt",
+    mime="text/plain",
+    use_container_width=True,
+)
 
 info_count = sum(1 for line in log_entries if "info" in line.lower())
 warn_count = sum(1 for line in log_entries if "warning" in line.lower() or "warn" in line.lower())

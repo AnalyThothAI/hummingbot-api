@@ -29,7 +29,7 @@
 ```
 Controller (clmm_lp)
   ├─ LPPositionExecutor (开/关仓、状态上报)
-  ├─ GatewaySwapExecutor (库存调整、止损清仓)
+  ├─ GatewaySwapExecutor (库存纠偏/止损清仓)
   └─ BudgetCoordinator (钱包余额锁)
 ```
 
@@ -44,8 +44,8 @@ Controller (clmm_lp)
   `base_amount`、`quote_amount`、`base_fee`、`quote_fee`、`out_of_range_since`。
 
 ### 3.3 GatewaySwapExecutor 角色
-- 执行 swap（库存调整或止损清仓）。
-- 通过 `custom_info` 回传实际 `amount_in/amount_out`，用于预算结算。
+- 执行 swap（用于开仓/再平衡的库存纠偏，以及止损清仓）。
+- 通过 `custom_info` 回传实际 `amount_in/amount_out`，用于观察与余额刷新。
 
 ## 4. 配置规范（必须遵守）
 
@@ -66,9 +66,9 @@ Controller (clmm_lp)
 - **IDLE**：无 LP 仓位，无待执行动作。
 - **ACTIVE**：LP Executor 运行中。
 - **REBALANCE_WAIT_CLOSE**：已发出 stop 等待重开（包含 reopen delay）。
-- **INVENTORY_SWAP**：触发库存调整 swap。
+- **INVENTORY_SWAP**：库存纠偏 swap 已提交，等待执行。
 - **READY_TO_OPEN**：准备开仓（预算/校验完成）。
-- **WAIT_SWAP**：swap executor 在运行，暂停其他动作。
+- **WAIT_SWAP**：swap 在运行（库存纠偏/止损清仓），暂停其他动作。
 - **STOPLOSS_PAUSE**：止损触发后的冷却期。
 - **MANUAL_STOP**：人工止损（manual_kill_switch）。
 - **LP_FAILURE**：LP executor 失败（RETRIES_EXCEEDED / FAILED），需人工介入。
@@ -77,19 +77,19 @@ Controller (clmm_lp)
 
 | 状态 | 含义 | 进入条件 | 退出条件 |
 | --- | --- | --- | --- |
-| IDLE | 无头寸/无动作 | entry 条件不满足或预算不足 | entry 条件满足且预算足够 → READY_TO_OPEN / INVENTORY_SWAP |
+| IDLE | 无头寸/无动作 | entry 条件不满足或预算不足 | entry 条件满足且需库存纠偏 → INVENTORY_SWAP；无需纠偏 → READY_TO_OPEN |
 | ACTIVE | LP 运行中 | LP executor active | 触发止损 → STOPLOSS_PAUSE；触发再平衡 → REBALANCE_WAIT_CLOSE |
-| REBALANCE_WAIT_CLOSE | 等待重开 | stop LP 成功且在 reopen delay 或等待 swap | reopen delay 到期且无需 swap → READY_TO_OPEN；需要 swap → INVENTORY_SWAP |
-| INVENTORY_SWAP | 发起库存调整 | 触发 swap（入场/重开） | swap executor active → WAIT_SWAP |
-| WAIT_SWAP | swap 执行中 | swap executor active | swap 完成 → 依据计划进入 READY_TO_OPEN / REBALANCE_WAIT_CLOSE / IDLE |
-| READY_TO_OPEN | 准备开仓 | 预算/价格校验通过且无需 swap | 创建 LP → ACTIVE；失败 → IDLE |
+| REBALANCE_WAIT_CLOSE | 等待重开 | stop LP 成功且在 reopen delay | reopen delay 到期且需库存纠偏 → INVENTORY_SWAP；无需纠偏 → READY_TO_OPEN |
+| INVENTORY_SWAP | 库存纠偏 swap 已提交 | entry/rebalance 触发纠偏 | swap executor active → WAIT_SWAP；失败 → IDLE |
+| WAIT_SWAP | swap 执行中 | 库存纠偏/止损清仓 swap active | swap 完成 → STOPLOSS_PAUSE（止损）或 IDLE（纠偏） |
+| READY_TO_OPEN | 准备开仓 | 预算/价格校验通过 | 创建 LP → ACTIVE；失败 → IDLE |
 | STOPLOSS_PAUSE | 止损冷却 | stop loss 触发或清仓等待 | 冷却结束且无 pending liquidation → IDLE |
 | MANUAL_STOP | 人工停止 | manual_kill_switch=true | manual_kill_switch=false → 回到 IDLE |
 | LP_FAILURE | LP 执行失败锁 | LP executor RETRIES_EXCEEDED/FAILED | 仅人工干预（当前无自动解锁） |
 
 ### 5.3 状态迁移逻辑（要点）
 - MANUAL_STOP 优先级最高，直接 stop LP executor。
-- swap executor 运行时，控制器进入 WAIT_SWAP，避免并发动作。
+- 库存纠偏/止损清仓 swap 运行时，控制器进入 WAIT_SWAP，避免并发动作。
 - LP executor 进入 RETRIES_EXCEEDED 或 failed 时进入 LP_FAILURE，阻止自动重新入场。
 - LP executor 运行时：
   - 优先评估 stop loss；
@@ -125,16 +125,18 @@ if now < stop_loss_until_ts:
 
 if pending_rebalance:
   if now < reopen_after_ts: state=REBALANCE_WAIT_CLOSE; return
-  if auto_swap and not swap_attempted and not single_sided:
+  if inventory_swap_needed:
     create swap; state=INVENTORY_SWAP; return
-  open LP (single or both); state=ACTIVE; return
+  open LP; state=ACTIVE; return
 
 if not entry_triggered:
   state=IDLE; return
 
-if auto_swap and not swap_attempted:
+if inventory_swap_needed:
   create swap; state=INVENTORY_SWAP; return
 
+resolve entry amounts (基于 position_value_quote 目标比例)
+if not available: state=IDLE; return
 open LP; state=ACTIVE
 ```
 
@@ -143,13 +145,16 @@ open LP; state=ACTIVE
 ```mermaid
 flowchart TD
   A[IDLE] -->|entry ok| B[READY_TO_OPEN]
-  B -->|need swap| C[INVENTORY_SWAP]
-  C --> D[WAIT_SWAP]
-  D -->|swap done| B
+  A -->|need swap| C[INVENTORY_SWAP]
   B -->|create LP| E[ACTIVE]
   E -->|stop loss| F[STOPLOSS_PAUSE]
   E -->|rebalance| G[REBALANCE_WAIT_CLOSE]
   G -->|delay done| B
+  G -->|need swap| C
+  C --> D[WAIT_SWAP]
+  F -->|liquidate| D[WAIT_SWAP]
+  D -->|swap done| F
+  D -->|swap done| A
   F -->|cooldown done| A
   A -->|manual kill| H[MANUAL_STOP]
   H -->|manual off| A
@@ -160,7 +165,7 @@ flowchart TD
 
 - **优先级明确**：`manual_kill_switch` > `swap_executor` > `pending_liquidation` > `stop_loss` > `rebalance` > `entry`。
 - **互斥保障**：`WAIT_SWAP` 期间不触发 LP 开仓/重开，避免并发链上动作。
-- **再平衡闭环**：out-of-range → stop LP → pending_rebalance →（可选 swap）→ open LP。
+- **再平衡闭环**：out-of-range → stop LP → pending_rebalance → open LP。
 - **避免卡死**：cost filter 拒绝时，长时间 out-of-range 会触发强制重平衡。
 - **风险隔离**：stop loss 与 manual stop 不受 cost filter 影响。
 
@@ -173,8 +178,9 @@ flowchart TD
 ### 6.2 开仓数量计算
 - 使用 `position_value_quote` 与 `target_base_value_pct`，按当前价格计算 `base_amount/quote_amount`。
 - 若启用 inventory skew，仅影响**价格区间宽度**，不改变开仓数量来源。
-- 当目标比例与当前钱包比例偏离超过 `swap_min_quote_value` 时，必须先 swap 达标再开仓。
-- `auto_swap_enabled=false` 时，若偏离超过阈值将阻塞开仓/重开。
+- 钱包总市值不足 `position_value_quote` 时不入场。
+- 若库存偏离目标且 `auto_swap_enabled=true` 且 `delta_quote_value >= position_value_quote * swap_min_value_pct`，先做库存纠偏 swap。
+- 若无需纠偏或 `auto_swap_enabled=false`，按目标比例开仓；不足的一侧按钱包实际量。
 
 > 建议使用独立钱包，避免其他资产被库存调仓影响。
 
@@ -184,13 +190,13 @@ flowchart TD
 - 平仓后不做内部预算结算，策略以钱包实仓为准。
 
 ### 6.4 交换（swap）预算
-- 交换使用预算快照（按 `position_value_quote` 缩放钱包余额），不做内部预算池预留。
-- 控制器通过 `WAIT_SWAP` 状态串行化 swap，避免并发消耗。
-- swap 额度由目标比例差值计算（`|delta_base| * price`），并应用 `swap_safety_buffer_pct`。
-- 钱包总市值不足 `position_value_quote` 时不触发 swap/开仓。
+- 库存纠偏 swap 仅在开仓与再平衡流程触发，使用 `router_connector`。
+- 控制器通过 `WAIT_SWAP` 状态串行化库存纠偏与止损清仓，避免并发链上动作。
+- 纠偏 swap 的输入数量按目标差额计算，并应用 `swap_safety_buffer_pct` 与 `swap_min_value_pct` 下限。
+- 清仓 swap 额度使用预算切片中的 base，并应用 `swap_safety_buffer_pct`。
 
 ### 6.5 止损基准（预算切片）
-- 止损使用“预算切片的市值变化”，基准为 LP 开仓时刻的预算等值（`anchor_budget`）。
+- 止损使用“预算切片的市值变化”，基准为 LP 开仓时刻的预算等值（`anchor_budget`），切片上限为 `position_value_quote`。
 - 预算切片 = LP 已部署价值 + 钱包中分配给预算的切片（按开仓时钱包比例分配）。
 - 当前预算权益 = `deployed_value + wallet_slice_value`（统一以 quote 计价）。
 - stop loss 触发条件：`budget_equity <= anchor_budget * (1 - stop_loss_pnl_pct)`。
@@ -208,8 +214,8 @@ flowchart TD
 触发后流程：
 1) Stop LP executor。
 2) 等待 `reopen_delay_sec`。
-3) 若目标比例偏离且开启 `auto_swap_enabled`，执行库存调整 swap。
-4) 仅在 swap 完成或无需 swap 时开新 LP（按目标比例开仓）。
+3) 若库存偏离目标且允许纠偏，执行 swap 并等待余额刷新。
+4) 余额满足目标比例时开新 LP（按目标比例开仓）。
 
 ### 7.1 策略A：再平衡成本过滤（Cost Filter）
 
@@ -231,8 +237,7 @@ flowchart TD
    - `in_range_time = 3600` 秒（内部常量，不依赖波动率）。
 3) **成本**：
    - `fixed_cost = cost_filter_fixed_cost_quote`
-   - `swap_cost = position_value * 0.5 * (swap_slippage_pct + 0.3%)`
-   - 若 `auto_swap_enabled=false`，`swap_cost=0`
+   - `swap_cost`：当 `auto_swap_enabled=true` 时按固定比例估算，否则为 0
    - `C = fixed_cost + swap_cost`
 4) **决策**：
    - `expected_fee = fee_rate * in_range_time`
@@ -270,7 +275,6 @@ flowchart TD
 - **Stop loss 优先**：止损触发会先停止 LP，不受 cost filter 影响。
 - **冷却与频率限制优先**：`rebalance_seconds` / `cooldown_seconds` / `max_rebalances_per_hour` 先过滤，再进入 cost filter。
 - **Inventory skew**：**不影响** cost filter（cost filter 使用对称区间宽度）。
-- **auto_swap**：仅在 stop LP 后、重开前执行；且仅影响 `swap_cost` 估算。
 
 **日志**：
 - 控制器在触发 cost filter 判定时输出一条聚合日志（按 `max(cooldown_seconds, 60)` 节流）。
@@ -310,12 +314,6 @@ flowchart TD
    - `lower_width = half_width * (1 + s)`
    - 强制 `inventory_skew_min_width_pct` 保护边界
 
-**为什么不 swap 也能调整库存？**
-- CLMM 的仓位资产构成是 **价格相对区间位置的确定性函数**。在范围内，价格越接近 upper，仓位越偏 quote；越接近 lower，仓位越偏 base。
-- 当你通过 skew 让当前价更靠近某一侧，仓位初始化后会偏向目标资产。
-- 随着价格在区间内波动，LP 会在区间内完成“自动换仓”，库存比例随价格路径缓慢向目标靠拢。
-- 只有在价格长期偏离或库存偏差过大时，才需要 swap 进行硬纠偏（由 soft/hard band 控制）。
-
 **CLMM 资产构成（定量直觉）**：
 - 设 `P` 为当前价，`Pl/Pu` 为区间边界，`sp=sqrt(P)`，`sl=sqrt(Pl)`，`su=sqrt(Pu)`。
 - 单位流动性 `L` 的资产需求为：
@@ -328,16 +326,10 @@ flowchart TD
 - 当前实现不做区间需求比例校正，开仓数量由 `position_value_quote` 与 `target_base_value_pct` 决定。
 - skew 仅改变区间宽度，不直接改变投入数量或比例。
 
-**库存 swap 冲突处理**：
-- 采用软/硬带宽门槛（soft/hard band）控制 swap：
-  - `|d| < inventory_soft_band_pct`：禁用 swap（仅靠 skew 纠偏）
-  - `|d| >= inventory_hard_band_pct`：允许 swap（硬纠偏）
-  - 介于两者之间：默认不 swap（避免双重纠偏）
-
 **落地细节**：
 - 仅影响 **新开仓/重开仓** 的区间生成，不对当前仓位强行移动。
 - 单边开仓仍按原逻辑（全宽上/下侧）。
-- `target_base_value_pct` 仍用于库存统计与 swap 目标。
+- `target_base_value_pct` 仍用于库存统计与开仓目标比例。
 
 ## 8. 入场逻辑
 
@@ -371,8 +363,9 @@ flowchart TD
 - `hysteresis_pct`：出界后再平衡的偏离阈值。
 - `rebalance_seconds` / `cooldown_seconds`：出界持续时长 / 冷却时间。
 - `reopen_delay_sec`：stop 后延时重开。
-- `auto_swap_enabled` / `target_base_value_pct`：库存管理开关与目标比例（0-1，0=纯 quote，1=纯 base）。
-- `swap_min_quote_value`：库存调整的最小价值阈值。
+- `target_base_value_pct`：目标比例（0-1，0=纯 quote，1=纯 base）。
+- `auto_swap_enabled`：是否启用库存纠偏 swap。
+- `swap_min_value_pct`：库存纠偏最小名义值占比（相对 `position_value_quote`，默认 5%）。
 - `swap_safety_buffer_pct`：swap 输入安全缓冲。
 - `cost_filter_enabled`：是否启用再平衡成本过滤。
 - `cost_filter_fee_rate_bootstrap_quote_per_hour`：fee_rate 冷启动默认值。
@@ -382,7 +375,6 @@ flowchart TD
 - `inventory_skew_k` / `inventory_skew_max`：偏置强度与上限。
 - `inventory_skew_ema_alpha` / `inventory_skew_step_min`：库存比例平滑与防抖阈值。
 - `inventory_skew_min_width_pct`：区间单侧最小宽度，避免过窄出界。
-- `inventory_soft_band_pct` / `inventory_hard_band_pct`：库存偏差 soft/hard 带宽，用于 swap 冲突处理。
 - `stop_loss_pnl_pct` / `stop_loss_pause_sec`：止损阈值与冷却时间。
 - `stop_loss_liquidation_mode`：止损后是否换成 quote。
 - `budget_key`：预算隔离键（默认 `id`）。
@@ -394,21 +386,21 @@ Controller 将关键内部状态输出到 `processed_data`，便于观察与诊�
 - `controller_state` / `lp_state`：控制器与 LP executor 状态。
 - `stop_loss_anchor`：预算止损锚定值（quote 计价）。
 - `pending_liquidation`：是否等待止损清仓。
-- `rebalance_stage`：再平衡阶段（WAIT_REOPEN / SWAP_PENDING / READY_TO_OPEN）。
-- `inventory_swap_failed`：最近库存 swap 是否失败。
+- `rebalance_stage`：再平衡阶段（WAIT_REOPEN / READY_TO_OPEN）。
+- `inventory_swap_failed`：最近一次库存纠偏 swap 是否失败。
 - `lp_failure_blocked`：LP executor 是否已进入失败锁。
 
 **Cost Filter 内部常量（不可调）**：
 - 定义位置：`bots/controllers/generic/clmm_lp.py`。
 - 评估窗口固定为 1 小时。
-- swap_notional_pct 固定为 0.5，fee_buffer 固定为 0.3%。
+- swap_cost 仅在 `auto_swap_enabled=true` 时参与估算。
 - fee_rate_floor 固定为 1e-9，安全系数固定为 2。
 - 强制重平衡阈值：`max(rebalance_seconds * 10, 600)`。
 
 ## 12. 风险控制与异常处理
 
-- swap 失败：
-  - 不开仓/不重开，等待冷却后重试。
+- 止损清仓 swap 失败：
+  - 保持 STOPLOSS_PAUSE，等待冷却后重试清仓。
 - 避免并发链上动作：
   - swap executor 运行时禁止 LP 开仓；
   - BudgetCoordinator 内部 `action_lock` 可用于串行化（Executor 自身使用）。
