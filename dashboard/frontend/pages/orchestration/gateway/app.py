@@ -1,6 +1,3 @@
-from decimal import Decimal
-from typing import Optional
-
 import pandas as pd
 import streamlit as st
 from eth_utils import is_address, is_checksum_address, to_checksum_address
@@ -251,27 +248,6 @@ def normalize_evm_address(address: str):
     return checksum, None
 
 
-def parse_token_list(tokens_raw: str) -> list[str]:
-    if not tokens_raw:
-        return []
-    return [token.strip() for token in tokens_raw.replace("\n", ",").split(",") if token.strip()]
-
-
-def build_wallet_options(wallets_payload: list, chain: Optional[str] = None) -> dict[str, str]:
-    options = {}
-    if isinstance(wallets_payload, list):
-        for wallet in wallets_payload:
-            wallet_chain = wallet.get("chain", "unknown")
-            if chain and wallet_chain != chain:
-                continue
-            address = wallet.get("address", "")
-            is_default = wallet.get("isDefault", False)
-            if address:
-                label = f"{wallet_chain} | {address}{' (default)' if is_default else ''}"
-                options[label] = address
-    return options
-
-
 def format_api_error(response, fallback: str):
     data = response.get("data", {})
     if isinstance(data, dict):
@@ -332,22 +308,6 @@ def set_default_choice(state_key: str, default_value: str, options: list[str]):
         st.session_state[state_key] = default_value
 
 
-def build_all_spender_options(connectors_meta: dict) -> list[str]:
-    options = []
-    for connector_name, meta in (connectors_meta or {}).items():
-        trading_types = []
-        if isinstance(meta, dict):
-            trading_types = meta.get("trading_types") or []
-        if trading_types:
-            for value in trading_types:
-                options.append(f"{connector_name}/{value}")
-        else:
-            options.append(connector_name)
-    options = sorted({opt for opt in options if opt})
-    options.append("(custom)")
-    return options
-
-
 def preferred_pool_network(connector_name: str, network_options: list[str]):
     if connector_name == "uniswap" and "ethereum-bsc" in network_options:
         return "ethereum-bsc"
@@ -359,7 +319,6 @@ def preferred_pool_network(connector_name: str, network_options: list[str]):
 connectors_payload = connectors_response.get("data", {}) if connectors_response.get("ok") else {}
 connectors_rows, connectors_meta = build_connector_rows_and_meta(connectors_payload)
 connectors_list = sorted({str(name) for name in connectors_meta.keys() if name})
-spender_options = build_all_spender_options(connectors_meta)
 
 chains_payload = chains_response.get("data", {}) if chains_response.get("ok") else {}
 chain_options = parse_chain_options(chains_payload)
@@ -414,7 +373,7 @@ if not container_running:
 if not api_online and container_running:
     st.warning("Gateway API is not responding. Check the Gateway logs and network connectivity.")
 
-tabs = st.tabs(["Tokens", "Pools", "Wallets", "Allowances", "Connectors"])
+tabs = st.tabs(["Tokens", "Pools", "Wallets", "Connectors"])
 
 with tabs[0]:
     st.subheader("Tokens")
@@ -704,194 +663,6 @@ with tabs[2]:
             st.info("No wallets to remove.")
 
 with tabs[3]:
-    st.subheader("Allowances")
-    st.caption("EVM connectors require ERC20 approvals for router contracts.")
-
-    st.markdown("**Check Allowance**")
-    with st.form("gateway_check_allowance"):
-        allowance_connector = select_connector("Connector", "allowance_connector", connectors_list)
-        allowance_network_options = networks_for_connector(allowance_connector, network_options)
-        default_allowance_network = default_network_id_for_connector(
-            allowance_connector,
-            allowance_network_options,
-            chain_defaults,
-        )
-        set_default_selection("allowance_network", "allowance_network_ctx", allowance_connector, default_allowance_network)
-        allowance_network_id = select_network("Network", "allowance_network", allowance_network_options)
-
-        chain_hint, _ = split_network_id(allowance_network_id)
-        if chain_hint and chain_hint != "ethereum":
-            st.info("Allowances apply to EVM networks only (chain = ethereum).")
-
-        allowance_spender_choice = st.selectbox("Spender", spender_options, key="allowance_spender_choice")
-        st.caption("Spender list is global; choose the router that matches your connector/network.")
-        allowance_wallet_options = build_wallet_options(wallets_payload, chain_hint or None)
-        if allowance_wallet_options:
-            default_wallet_label = next(
-                (label for label in allowance_wallet_options if "(default)" in label),
-                None,
-            )
-            if default_wallet_label:
-                set_default_choice("allowance_wallet", default_wallet_label, list(allowance_wallet_options.keys()))
-            wallet_label = st.selectbox("Wallet", list(allowance_wallet_options.keys()), key="allowance_wallet")
-            allowance_wallet_address = allowance_wallet_options.get(wallet_label)
-        else:
-            allowance_wallet_address = st.text_input("Wallet Address", key="allowance_wallet_text")
-
-        if allowance_spender_choice == "(custom)":
-            allowance_spender = st.text_input(
-                "Custom Spender",
-                key="allowance_spender_custom",
-                placeholder="pancakeswap/router or 0x...",
-            )
-        else:
-            allowance_spender = allowance_spender_choice
-        tokens_raw = st.text_input("Tokens (comma-separated)", placeholder="USDT, USDC")
-        submit_allowance = st.form_submit_button("Check Allowance")
-
-        if submit_allowance:
-            allowance_spender_clean = allowance_spender.strip()
-            if not allowance_network_id or not allowance_spender_clean or not allowance_wallet_address:
-                st.error("Network, spender, and wallet address are required.")
-            else:
-                checksum_notice = None
-                if allowance_wallet_address.startswith("0x"):
-                    checksum_address, checksum_notice = normalize_evm_address(allowance_wallet_address)
-                    if checksum_address is None:
-                        st.error("Invalid EVM address. Check the wallet format.")
-                        allowance_wallet_address = None
-                    else:
-                        allowance_wallet_address = checksum_address
-
-                tokens = parse_token_list(tokens_raw)
-                if allowance_wallet_address and tokens:
-                    payload = {
-                        "network_id": allowance_network_id,
-                        "address": allowance_wallet_address,
-                        "tokens": tokens,
-                        "spender": allowance_spender_clean,
-                    }
-                    with st.spinner("Fetching allowances..."):
-                        response = backend_api_request("POST", "/gateway/allowances", json_body=payload, timeout=60)
-                    if response.get("ok"):
-                        data = response.get("data", {})
-                        approvals = data.get("approvals", {})
-                        rows = [{"token": token, "allowance": value} for token, value in approvals.items()]
-                        if rows:
-                            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-                        else:
-                            st.info("No allowances returned for the selected tokens.")
-                        if checksum_notice:
-                            st.info(checksum_notice)
-                    else:
-                        status_code = response.get("status_code")
-                        if status_code == 401:
-                            st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
-                        elif status_code is None and "timed out" in str(response.get("error", "")).lower():
-                            st.error("Allowance request timed out. Check Gateway connectivity and try again.")
-                        else:
-                            st.error(format_api_error(response, "Failed to fetch allowances."))
-                elif allowance_wallet_address and not tokens:
-                    st.error("At least one token is required.")
-
-    st.divider()
-    st.markdown("**Approve Token**")
-    st.caption("Leave amount blank to approve unlimited spending.")
-    with st.form("gateway_approve_token"):
-        approve_connector = select_connector("Connector", "approve_connector", connectors_list)
-        approve_network_options = networks_for_connector(approve_connector, network_options)
-        default_approve_network = default_network_id_for_connector(
-            approve_connector,
-            approve_network_options,
-            chain_defaults,
-        )
-        set_default_selection("approve_network", "approve_network_ctx", approve_connector, default_approve_network)
-        approve_network_id = select_network("Network", "approve_network", approve_network_options)
-
-        chain_hint, _ = split_network_id(approve_network_id)
-        if chain_hint and chain_hint != "ethereum":
-            st.info("Approvals apply to EVM networks only (chain = ethereum).")
-
-        approve_spender_choice = st.selectbox("Spender", spender_options, key="approve_spender_choice")
-        st.caption("Spender list is global; choose the router that matches your connector/network.")
-        approve_wallet_options = build_wallet_options(wallets_payload, chain_hint or None)
-        if approve_wallet_options:
-            default_wallet_label = next(
-                (label for label in approve_wallet_options if "(default)" in label),
-                None,
-            )
-            if default_wallet_label:
-                set_default_choice("approve_wallet", default_wallet_label, list(approve_wallet_options.keys()))
-            wallet_label = st.selectbox("Wallet", list(approve_wallet_options.keys()), key="approve_wallet")
-            approve_wallet_address = approve_wallet_options.get(wallet_label)
-        else:
-            approve_wallet_address = st.text_input("Wallet Address", key="approve_wallet_text")
-
-        if approve_spender_choice == "(custom)":
-            approve_spender = st.text_input(
-                "Custom Spender",
-                key="approve_spender_custom",
-                placeholder="pancakeswap/router or 0x...",
-            )
-        else:
-            approve_spender = approve_spender_choice
-        approve_token = st.text_input("Token Symbol or Address", placeholder="USDT")
-        approve_amount_raw = st.text_input("Approve Amount (optional)", placeholder="Leave blank for unlimited")
-        submit_approve = st.form_submit_button("Approve Token")
-
-        if submit_approve:
-            approve_spender_clean = approve_spender.strip()
-            approve_token_clean = approve_token.strip()
-            if not approve_network_id or not approve_spender_clean or not approve_wallet_address or not approve_token_clean:
-                st.error("Network, spender, wallet address, and token are required.")
-            else:
-                checksum_notice = None
-                if approve_wallet_address.startswith("0x"):
-                    checksum_address, checksum_notice = normalize_evm_address(approve_wallet_address)
-                    if checksum_address is None:
-                        st.error("Invalid EVM address. Check the wallet format.")
-                        approve_wallet_address = None
-                    else:
-                        approve_wallet_address = checksum_address
-
-                amount_value = None
-                if approve_amount_raw:
-                    try:
-                        Decimal(approve_amount_raw)
-                        amount_value = approve_amount_raw
-                    except Exception:
-                        st.error("Approve amount must be a numeric value.")
-
-                if approve_wallet_address and (approve_amount_raw == "" or amount_value is not None):
-                    payload = {
-                        "network_id": approve_network_id,
-                        "address": approve_wallet_address,
-                        "token": approve_token_clean,
-                        "spender": approve_spender_clean,
-                    }
-                    if amount_value is not None:
-                        payload["amount"] = amount_value
-                    with st.spinner("Submitting approval..."):
-                        response = backend_api_request("POST", "/gateway/approve", json_body=payload, timeout=60)
-                    if response.get("ok"):
-                        data = response.get("data", {})
-                        tx_hash = data.get("signature") or data.get("txHash")
-                        message = "Approval submitted."
-                        if tx_hash:
-                            message = f"Approval submitted: {tx_hash}"
-                        st.success(message)
-                        if checksum_notice:
-                            st.info(checksum_notice)
-                    else:
-                        status_code = response.get("status_code")
-                        if status_code == 401:
-                            st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
-                        elif status_code is None and "timed out" in str(response.get("error", "")).lower():
-                            st.error("Approve request timed out. Check Gateway connectivity and try again.")
-                        else:
-                            st.error(format_api_error(response, "Failed to approve token."))
-
-with tabs[4]:
     st.subheader("Connectors")
     if connectors_response.get("ok"):
         if connectors_rows:

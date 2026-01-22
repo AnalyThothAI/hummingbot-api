@@ -1,11 +1,80 @@
 import re
 import secrets
 import time
+from decimal import Decimal
 
 import pandas as pd
 import streamlit as st
 
 from frontend.st_utils import backend_api_request, get_backend_api_client, initialize_st_page
+
+UNLIMITED_ALLOWANCE_THRESHOLD = Decimal("10000000000")
+
+APPROVAL_PANEL_STYLE = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+.approval-shell {
+  border-radius: 18px;
+  padding: 20px 22px;
+  margin: 8px 0 16px 0;
+  border: 1px solid #e2d6c3;
+  background: linear-gradient(135deg, #f7f2e7 0%, #f1f8f5 55%, #edf2f7 100%);
+  box-shadow: 0 16px 40px rgba(30, 41, 59, 0.12);
+}
+.approval-title {
+  font-family: "Fraunces", serif;
+  font-size: 1.5rem;
+  color: #1f2937;
+  margin: 0 0 4px 0;
+}
+.approval-subtitle {
+  font-family: "IBM Plex Sans", sans-serif;
+  color: #475569;
+  font-size: 0.95rem;
+  margin: 0;
+}
+.approval-tag {
+  display: inline-block;
+  margin-top: 10px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-family: "IBM Plex Sans", sans-serif;
+  background: #111827;
+  color: #f8fafc;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-family: "IBM Plex Sans", sans-serif;
+  letter-spacing: 0.03em;
+}
+.pill-ok {
+  background: #065f46;
+  color: #ecfdf5;
+}
+.pill-warn {
+  background: #9a3412;
+  color: #fff7ed;
+}
+.pill-muted {
+  background: #64748b;
+  color: #f8fafc;
+}
+.approval-meta {
+  font-family: "IBM Plex Sans", sans-serif;
+  color: #334155;
+  font-size: 0.85rem;
+}
+</style>
+"""
+
+st.markdown(APPROVAL_PANEL_STYLE, unsafe_allow_html=True)
 
 initialize_st_page(icon="🙌", show_readme=False)
 
@@ -81,6 +150,109 @@ def normalize_script_name(script_name: str) -> str:
     base_name = script_name.replace(".py", "")
     base_name = re.sub(r"[^a-zA-Z0-9_-]+", "-", base_name).strip("-")
     return base_name.lower()
+
+
+def split_trading_pair(trading_pair: str):
+    if not trading_pair or "-" not in trading_pair:
+        return None, None
+    base, quote = trading_pair.split("-", 1)
+    base = base.strip()
+    quote = quote.strip()
+    if not base or not quote:
+        return None, None
+    return base, quote
+
+
+def split_network_id(network_id: str):
+    if not network_id:
+        return "", ""
+    if "-" in network_id:
+        chain, network = network_id.split("-", 1)
+        return chain, network
+    return network_id, ""
+
+
+def parse_decimal_value(value):
+    if value is None:
+        return None
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"unlimited", "infinite", "infinity"}:
+            return UNLIMITED_ALLOWANCE_THRESHOLD
+    try:
+        parsed = Decimal(str(value))
+    except Exception:
+        return None
+    return parsed if parsed > 0 else None
+
+
+def is_gateway_connector(connector_name: str) -> bool:
+    return isinstance(connector_name, str) and "/" in connector_name
+
+
+def shorten_address(address: str) -> str:
+    if not address:
+        return "-"
+    address = str(address)
+    if len(address) <= 12:
+        return address
+    return f"{address[:6]}...{address[-4:]}"
+
+
+def resolve_default_wallet(wallets, chain: str):
+    if not wallets or not chain:
+        return None
+    for wallet in wallets:
+        if wallet.get("chain") == chain and wallet.get("isDefault") and wallet.get("address"):
+            return wallet.get("address")
+    return None
+
+
+def build_controller_config_map(controller_configs):
+    config_map = {}
+    if not isinstance(controller_configs, list):
+        return config_map
+    for config in controller_configs:
+        if not isinstance(config, dict):
+            continue
+        config_id = config.get("id") or config.get("config", {}).get("id")
+        if not config_id:
+            continue
+        config_data = config.get("config", config)
+        config_map[config_id] = config_data
+    return config_map
+
+
+def build_approval_plan(selected_controllers, controller_config_map):
+    plan = []
+    for config_id in selected_controllers:
+        config = controller_config_map.get(config_id)
+        if not isinstance(config, dict):
+            continue
+        trading_pair = config.get("trading_pair", "")
+        base_token, quote_token = split_trading_pair(trading_pair)
+        tokens = [token for token in (base_token, quote_token) if token]
+        if not tokens:
+            continue
+        connector_name = config.get("connector_name")
+        router_connector = config.get("router_connector")
+        spenders = []
+        if is_gateway_connector(connector_name):
+            spenders.append(connector_name)
+        if config.get("auto_swap_enabled", False) and is_gateway_connector(router_connector):
+            spenders.append(router_connector)
+        spenders = list(dict.fromkeys([spender for spender in spenders if spender]))
+        if not spenders:
+            continue
+        plan.append({
+            "config_id": config_id,
+            "controller_name": config.get("controller_name", config_id),
+            "trading_pair": trading_pair,
+            "pool_address": config.get("pool_address", ""),
+            "tokens": tokens,
+            "spenders": spenders,
+        })
+    return plan
 
 
 def generate_instance_name(script_name: str) -> str:
@@ -190,6 +362,7 @@ def render_gateway_overrides():
             selected_chain = network_map.get(selected_network_id, {}).get("chain")
 
         wallets = get_gateway_wallets()
+        st.session_state["gateway_wallets"] = wallets
         filtered_wallets = [
             wallet for wallet in wallets if wallet.get("chain") == selected_chain
         ] if selected_chain else []
@@ -209,6 +382,191 @@ def render_gateway_overrides():
     network_value = None if selected_network_id == "(select network)" else selected_network_id
     wallet_value = None if selected_wallet == "(gateway default)" else selected_wallet
     return network_value, wallet_value
+
+
+def render_approval_gate(
+    selected_controllers,
+    controller_configs,
+    gateway_network_id,
+    gateway_wallet_address,
+):
+    if not selected_controllers:
+        return True
+
+    controller_config_map = build_controller_config_map(controller_configs)
+    plan = build_approval_plan(selected_controllers, controller_config_map)
+    if not plan:
+        st.info("No Gateway approvals required for the selected controllers.")
+        return True
+
+    st.markdown(
+        """
+        <div class="approval-shell">
+          <div class="approval-title">Approval Gate</div>
+          <div class="approval-subtitle">Verify token allowances before deployment to avoid failed LP opens.</div>
+          <div class="approval-tag">EVM approvals</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if not gateway_network_id:
+        st.warning("Select a Gateway network to check approvals.")
+        return False
+
+    chain, _ = split_network_id(gateway_network_id)
+    if chain and chain != "ethereum":
+        st.info("Selected network is not EVM. Allowances are not required.")
+        return True
+
+    wallets = st.session_state.get("gateway_wallets") or get_gateway_wallets()
+    wallet_address = gateway_wallet_address or resolve_default_wallet(wallets, chain)
+    if not wallet_address:
+        st.warning("No default wallet found for this chain. Choose a wallet in Gateway overrides.")
+        return False
+
+    st.markdown(
+        f"<div class='approval-meta'>Network: <strong>{gateway_network_id}</strong> | "
+        f"Wallet: <strong>{shorten_address(wallet_address)}</strong></div>",
+        unsafe_allow_html=True,
+    )
+    st.caption("Approval target: unlimited. Allowance >= 1e10 is treated as unlimited.")
+
+    spender_tokens = {}
+    for item in plan:
+        for spender in item["spenders"]:
+            spender_tokens.setdefault(spender, set()).update(item["tokens"])
+
+    if "approval_cache" not in st.session_state:
+        st.session_state["approval_cache"] = {}
+    if "approval_errors" not in st.session_state:
+        st.session_state["approval_errors"] = {}
+
+    signature = (
+        tuple(sorted(selected_controllers)),
+        gateway_network_id,
+        wallet_address,
+    )
+    if st.session_state.get("approval_signature") != signature:
+        st.session_state["approval_signature"] = signature
+        st.session_state["approval_cache"] = {}
+        st.session_state["approval_errors"] = {}
+        st.session_state["approval_checked"] = False
+
+    check_clicked = st.button("🔍 Check approvals", use_container_width=True)
+    should_check = check_clicked or not st.session_state.get("approval_checked", False)
+
+    if should_check:
+        with st.spinner("Fetching allowances..."):
+            for spender, tokens in spender_tokens.items():
+                payload = {
+                    "network_id": gateway_network_id,
+                    "address": wallet_address,
+                    "tokens": sorted(tokens),
+                    "spender": spender,
+                }
+                response = backend_api_request(
+                    "POST",
+                    "/gateway/allowances",
+                    json_body=payload,
+                    timeout=60,
+                )
+                if response.get("ok"):
+                    data = response.get("data", {})
+                    approvals = data.get("approvals", {}) or {}
+                    st.session_state["approval_cache"][spender] = approvals
+                    st.session_state["approval_errors"].pop(spender, None)
+                else:
+                    error_msg = response.get("error", "Failed to fetch allowances.")
+                    st.session_state["approval_errors"][spender] = error_msg
+            st.session_state["approval_checked"] = True
+
+    errors = st.session_state.get("approval_errors", {})
+    for spender, error_msg in errors.items():
+        st.error(f"{spender}: {error_msg}")
+
+    overview_rows = []
+    for item in plan:
+        overview_rows.append({
+            "Controller": item["controller_name"],
+            "Trading Pair": item["trading_pair"],
+            "Pool": shorten_address(item["pool_address"]),
+            "Spenders": ", ".join(item["spenders"]),
+            "Tokens": ", ".join(item["tokens"]),
+        })
+    if overview_rows:
+        st.dataframe(pd.DataFrame(overview_rows), use_container_width=True, hide_index=True)
+
+    allowance_rows = []
+    missing = []
+    approval_ready = True
+
+    for item in plan:
+        for spender in item["spenders"]:
+            approvals = st.session_state.get("approval_cache", {}).get(spender)
+            for token in item["tokens"]:
+                allowance_raw = None if approvals is None else approvals.get(token)
+                allowance_value = parse_decimal_value(allowance_raw)
+                status = "Not checked"
+                meets = False
+                if approvals is not None:
+                    meets = allowance_value is not None and allowance_value >= UNLIMITED_ALLOWANCE_THRESHOLD
+                    status = "Approved" if meets else "Needs approval"
+
+                allowance_rows.append({
+                    "Controller": item["controller_name"],
+                    "Spender": spender,
+                    "Token": token,
+                    "Required": "Unlimited",
+                    "Allowance": "-" if allowance_raw is None else str(allowance_raw),
+                    "Status": status,
+                })
+
+                if status != "Approved":
+                    approval_ready = False
+                    missing.append({
+                        "controller": item["controller_name"],
+                        "spender": spender,
+                        "token": token,
+                        "allowance": allowance_raw,
+                    })
+
+    if allowance_rows:
+        st.dataframe(pd.DataFrame(allowance_rows), use_container_width=True, hide_index=True)
+
+    if missing:
+        st.warning("Approvals required before deployment.")
+        st.markdown("<span class='pill pill-warn'>Needs approvals</span>", unsafe_allow_html=True)
+        for item in missing:
+            cols = st.columns([3, 3, 2, 2])
+            cols[0].markdown(f"**{item['controller']}**")
+            cols[1].markdown(f"{item['token']} -> {item['spender']}")
+            cols[2].markdown("Need: unlimited")
+            approve_key = f"approve_{item['controller']}_{item['spender']}_{item['token']}"
+            approve_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", approve_key)
+            if cols[3].button("Approve", key=approve_key, use_container_width=True):
+                approve_payload = {
+                    "network_id": gateway_network_id,
+                    "address": wallet_address,
+                    "token": item["token"],
+                    "spender": item["spender"],
+                }
+                response = backend_api_request(
+                    "POST",
+                    "/gateway/approve",
+                    json_body=approve_payload,
+                    timeout=60,
+                )
+                if response.get("ok"):
+                    st.success(f"Approval submitted for {item['token']} on {item['spender']}.")
+                    st.session_state["approval_cache"].pop(item["spender"], None)
+                    st.session_state["approval_checked"] = False
+                else:
+                    st.error(response.get("error", "Approval failed."))
+    else:
+        st.markdown("<span class='pill pill-ok'>Approvals ready</span>", unsafe_allow_html=True)
+
+    return approval_ready
 
 
 def launch_new_bot(
@@ -556,6 +914,15 @@ else:
             if selected_controllers:
                 st.success(f"✅ {len(selected_controllers)} controller(s) selected for deployment")
 
+            approval_ready = True
+            if selected_controllers:
+                approval_ready = render_approval_gate(
+                    selected_controllers,
+                    all_controllers_config,
+                    gateway_network_id,
+                    gateway_wallet_address,
+                )
+
             # Display action buttons
             st.divider()
             col1, col2 = st.columns(2)
@@ -569,8 +936,14 @@ else:
                         st.warning("Please select at least one controller to delete")
 
             with col2:
-                deploy_button_style = "primary" if selected_controllers else "secondary"
-                if st.button("🚀 Deploy Bot", type=deploy_button_style, use_container_width=True):
+                deploy_disabled = not selected_controllers or not approval_ready
+                deploy_button_style = "primary" if not deploy_disabled else "secondary"
+                if st.button(
+                    "🚀 Deploy Bot",
+                    type=deploy_button_style,
+                    use_container_width=True,
+                    disabled=deploy_disabled,
+                ):
                     if selected_controllers:
                         with st.spinner('🚀 Starting Bot... This process may take a few seconds'):
                             if launch_new_bot(
@@ -586,6 +959,8 @@ else:
                                 st.switch_page("frontend/pages/orchestration/instances/app.py")
                     else:
                         st.warning("Please select at least one controller to deploy")
+                if selected_controllers and not approval_ready:
+                    st.warning("Resolve approvals above before deploying.")
 
         else:
             st.warning("⚠️ No controller configurations available. Please create some configurations first.")
