@@ -5,6 +5,7 @@ id: clmm_lp
 connector_name: uniswap/clmm
 router_connector: uniswap/router
 trading_pair: 我踏马来了-USDT
+pool_trading_pair: USDT-我踏马来了
 pool_address: "0x6aa382BFf27b6d74d3546AD6419398ad2fe1b236"
 
 target_price: 0

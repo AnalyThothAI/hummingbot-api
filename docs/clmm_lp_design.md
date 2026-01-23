@@ -5,10 +5,9 @@
 
 ## 1. 范围与参考
 
-- Controller 实现：`bots/controllers/generic/clmm_lp.py`
+- Controller 入口：`bots/controllers/generic/clmm_lp.py`
+- Controller 内部组件（types/adapters/cost filter）：`bots/controllers/generic/clmm_lp_components.py`
 - Controller 配置：`bots/conf/controllers/clmm_lp.yml`
-- Cost filter helper：`bots/controllers/generic/clmm_lp.py`
-- Inventory skew helper：`bots/controllers/generic/clmm_lp.py`
 - Loader 脚本：`bots/scripts/v2_with_controllers.py`
 - LP Executor：`hummingbot/hummingbot/strategy_v2/executors/lp_position_executor/`
 - Swap Executor：`hummingbot/hummingbot/strategy_v2/executors/gateway_swap_executor/`
@@ -28,6 +27,9 @@
 
 ```
 Controller (clmm_lp)
+  ├─ TokenOrderMapper / PriceMapper（`trading_pair` ↔ `pool_trading_pair`）
+  ├─ Portfolio & Budget（wallet/anchor/budget reserve/fee EWMA）
+  ├─ Flow Engine（StopLoss / Rebalance / Entry）→ ExecutorActions
   ├─ LPPositionExecutor (开/关仓、状态上报)
   ├─ GatewaySwapExecutor (库存纠偏/止损清仓)
   └─ BudgetCoordinator (钱包余额锁)
@@ -42,6 +44,8 @@ Controller (clmm_lp)
 - 维护 LP 头寸生命周期状态机（OPENING/IN_RANGE/OUT_OF_RANGE/CLOSING/...）。
 - 通过 `custom_info` 上报状态和数量：`state`、`current_price`、`lower_price`、`upper_price`、
   `base_amount`、`quote_amount`、`base_fee`、`quote_fee`、`out_of_range_since`。
+  - 注意：当 `pool_trading_pair` 与 `trading_pair` 方向相反时，Executor 上报的 base/quote 语义以 `pool_trading_pair` 为准；
+    Controller 读取后会映射回 `trading_pair` 语义，再用于预算/止损/再平衡等计算。
 
 ### 3.3 GatewaySwapExecutor 角色
 - 执行 swap（用于开仓/再平衡的库存纠偏，以及止损清仓）。
@@ -58,9 +62,26 @@ Controller (clmm_lp)
 - `id: clmm_lp`
 - `controller_name: clmm_lp`
 
+### 4.1 `trading_pair` vs `pool_trading_pair`
+
+在部分链上 CLMM 场景里，**router 的报价/下单 pair 顺序**与 **pool/LP 的 token 顺序**可能相反：
+
+- `trading_pair`：作为控制器的**参考计价 pair**（预算、价格、wallet_base/quote 语义、router 报价与 swap 下单均以此为准）。
+  - `position_value_quote` 以 `trading_pair` 的 quote 计价。
+- `pool_trading_pair`（可选）：作为 **pool 的 token0-token1 顺序（按地址排序）**。
+  - 必须等于 `trading_pair` 或其反转（`BASE-QUOTE` ↔ `QUOTE-BASE`）。
+  - 用于 LPPositionExecutor 的 `trading_pair/base_token/quote_token`，以及开仓时的金额与价格区间映射（base/quote 金额 swap + 价格区间倒数映射）。
+
+示例（router 按 `TOKEN-USDT` 计价，但 pool token 顺序为 `USDT-TOKEN`）：
+```yaml
+trading_pair: TOKEN-USDT
+pool_trading_pair: USDT-TOKEN
+```
+
 ## 5. Controller 状态机（显式）
 
 > 控制器状态机是高层决策状态，不等同于 LP Executor 的内部状态。
+> 实现说明：`ControllerState` 为 view-only（由 `Snapshot(事实) + Context(内部状态) + Intent/Decision` 派生），不作为逻辑分支的控制变量。
 
 ### 5.1 状态列表
 - **IDLE**：无 LP 仓位，无待执行动作。
@@ -104,13 +125,13 @@ Controller (clmm_lp)
 if manual_kill_switch:
   stop LP; state=MANUAL_STOP; return
 
-if swap_executor active:
-  state=WAIT_SWAP; return
-
 if lp_failure_detected:
   state=LP_FAILURE; return
 
-if LP executor active:
+if swap_executor active:
+  state=WAIT_SWAP; return
+
+if LP executor(s) active:
   if stop_loss_triggered:
     stop LP; state=STOPLOSS_PAUSE; return
   if rebalance_triggered:
@@ -163,7 +184,7 @@ flowchart TD
 
 ### 5.4 状态机审阅（简化结论）
 
-- **优先级明确**：`manual_kill_switch` > `swap_executor` > `pending_liquidation` > `stop_loss` > `rebalance` > `entry`。
+- **优先级明确**：`manual_kill_switch` > `lp_failure` > `swap_executor` > `stop_loss` > `rebalance` > `pending_liquidation` > `entry`。
 - **互斥保障**：`WAIT_SWAP` 期间不触发 LP 开仓/重开，避免并发链上动作。
 - **再平衡闭环**：out-of-range → stop LP → pending_rebalance → open LP。
 - **避免卡死**：cost filter 拒绝时，长时间 out-of-range 会触发强制重平衡。
@@ -177,7 +198,6 @@ flowchart TD
 
 ### 6.2 开仓数量计算
 - 使用 `position_value_quote` 与 `target_base_value_pct`，按当前价格计算 `base_amount/quote_amount`。
-- 若启用 inventory skew，仅影响**价格区间宽度**，不改变开仓数量来源。
 - 钱包总市值不足 `position_value_quote` 时不入场。
 - 若库存偏离目标且 `auto_swap_enabled=true` 且 `delta_quote_value >= position_value_quote * swap_min_value_pct`，先做库存纠偏 swap。
 - 若无需纠偏或 `auto_swap_enabled=false`，按目标比例开仓；不足的一侧按钱包实际量。
@@ -221,7 +241,7 @@ flowchart TD
 
 **目标**：避免趋势行情中频繁“全平重开”导致的手续费与滑点吞噬收益。
 
-**实现位置**：逻辑在 `bots/controllers/generic/clmm_lp.py` 内，保持单文件可运行。
+**实现位置**：`evaluate_cost_filter()` 与内部常量在 `bots/controllers/generic/clmm_lp_components.py`；Controller 在 `bots/controllers/generic/clmm_lp.py` 调用。
 
 **核心输入**（均在 Controller 内部观测，不依赖外部 volume）：
 - **fee_rate**：使用 LP position 的 pending fee 变化估计（`base_fee/quote_fee` 转 quote）。
@@ -274,7 +294,6 @@ flowchart TD
 
 - **Stop loss 优先**：止损触发会先停止 LP，不受 cost filter 影响。
 - **冷却与频率限制优先**：`rebalance_seconds` / `cooldown_seconds` / `max_rebalances_per_hour` 先过滤，再进入 cost filter。
-- **Inventory skew**：**不影响** cost filter（cost filter 使用对称区间宽度）。
 
 **日志**：
 - 控制器在触发 cost filter 判定时输出一条聚合日志（按 `max(cooldown_seconds, 60)` 节流）。
@@ -294,42 +313,6 @@ flowchart TD
 - **回本门槛**：调高 `cost_filter_max_payback_sec`，观察同一成本下从拒绝变为允许。
 - **日志完整性**：检查 cost filter 日志字段齐全且节流生效。
 
-
-### 7.2 策略D：库存偏置与再平衡冲突处理（实现版）
-
-**目标**：在不显著增加 churn 的情况下，利用 LP 区间位置缓慢修正库存偏差。
-
-**实现位置**：偏置与比例计算在 `bots/controllers/generic/clmm_lp.py`。
-
-**工作原理**：
-1) 计算当前库存比例（含钱包可用 + 已部署）
-   - `ratio = base_value / (base_value + quote_value)`
-   - 通过 EMA 平滑：`ratio_ema`
-2) 计算偏差 `d = ratio_ema - target_base_value_pct`
-3) 映射成偏置强度 `s`：
-   - `s = clamp(k * d, -inventory_skew_max, +inventory_skew_max)`
-   - `s` 变化需跨过 `inventory_skew_step_min` 才更新（防抖）
-4) 在 **双边开仓** 时生成不对称区间：
-   - `upper_width = half_width * (1 - s)`
-   - `lower_width = half_width * (1 + s)`
-   - 强制 `inventory_skew_min_width_pct` 保护边界
-
-**CLMM 资产构成（定量直觉）**：
-- 设 `P` 为当前价，`Pl/Pu` 为区间边界，`sp=sqrt(P)`，`sl=sqrt(Pl)`，`su=sqrt(Pu)`。
-- 单位流动性 `L` 的资产需求为：
-  - `amount_base = L * (su - sp) / (sp * su)`
-  - `amount_quote = L * (sp - sl)`
-- 当 `P` 向 `Pu` 逼近时，`amount_base` 下降、`amount_quote` 上升；向 `Pl` 逼近则相反。
-- skew 通过改变 `P` 在区间内的位置，使初始资产构成偏向目标侧，并在区间内波动中逐步修正库存。
-
-**开仓比例对齐**：
-- 当前实现不做区间需求比例校正，开仓数量由 `position_value_quote` 与 `target_base_value_pct` 决定。
-- skew 仅改变区间宽度，不直接改变投入数量或比例。
-
-**落地细节**：
-- 仅影响 **新开仓/重开仓** 的区间生成，不对当前仓位强行移动。
-- 单边开仓仍按原逻辑（全宽上/下侧）。
-- `target_base_value_pct` 仍用于库存统计与开仓目标比例。
 
 ## 8. 入场逻辑
 
@@ -371,10 +354,6 @@ flowchart TD
 - `cost_filter_fee_rate_bootstrap_quote_per_hour`：fee_rate 冷启动默认值。
 - `cost_filter_fixed_cost_quote`：固定链路成本估计。
 - `cost_filter_max_payback_sec`：最大可接受回本时间。
-- `inventory_skew_enabled`：启用库存偏置。
-- `inventory_skew_k` / `inventory_skew_max`：偏置强度与上限。
-- `inventory_skew_ema_alpha` / `inventory_skew_step_min`：库存比例平滑与防抖阈值。
-- `inventory_skew_min_width_pct`：区间单侧最小宽度，避免过窄出界。
 - `stop_loss_pnl_pct` / `stop_loss_pause_sec`：止损阈值与冷却时间。
 - `stop_loss_liquidation_mode`：止损后是否换成 quote。
 - `budget_key`：预算隔离键（默认 `id`）。
@@ -391,7 +370,7 @@ Controller 将关键内部状态输出到 `processed_data`，便于观察与诊�
 - `lp_failure_blocked`：LP executor 是否已进入失败锁。
 
 **Cost Filter 内部常量（不可调）**：
-- 定义位置：`bots/controllers/generic/clmm_lp.py`。
+- 定义位置：`bots/controllers/generic/clmm_lp_components.py`。
 - 评估窗口固定为 1 小时。
 - swap_cost 仅在 `auto_swap_enabled=true` 时参与估算。
 - fee_rate_floor 固定为 1e-9，安全系数固定为 2。
@@ -407,7 +386,7 @@ Controller 将关键内部状态输出到 `processed_data`，便于观察与诊�
 
 ## 13. 不变式（Invariant）
 
-- 同一 Controller 只允许一个 LP executor 处于 ACTIVE。
+- Controller 不假设只有一个 LP executor；允许多个 active，并按 `executor_id` 维护独立上下文。
 - swap executor 运行时 Controller 不触发其他执行动作。
 - 开仓必须通过预算 reservation。
 
