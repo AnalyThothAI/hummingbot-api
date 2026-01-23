@@ -1,403 +1,172 @@
-# CLMM LP 控制器设计说明
+# CLMM LP Controller 设计（`clmm_lp`）
 
-本文参考 `hummingbot/docs/design/lp_controller_executor_design.md` 的设计范式，详细说明本仓库的 CLMM LP 控制器
-（`clmm_lp`）实现：职责边界、状态机、资金/数量链路、核心决策逻辑、失败处理与未来演进。
+本文描述当前 `bots/controllers/generic/clmm_lp.py` 版本的设计与边界，按 Hummingbot v2 Controller 实践组织：`update_processed_data()` 负责观测与视图，`determine_executor_actions()` 负责决策与状态推进。
 
-## 1. 范围与参考
+## 1. 目标与原则（先定“改什么，不改什么”）
 
-- Controller 入口：`bots/controllers/generic/clmm_lp.py`
-- Controller 内部组件（types/adapters/cost filter）：`bots/controllers/generic/clmm_lp_components.py`
-- Controller 配置：`bots/conf/controllers/clmm_lp.yml`
-- Loader 脚本：`bots/scripts/v2_with_controllers.py`
+**不改的部分（保持策略能力与框架契约）**
+- 仍然是 **单一 Controller orchestrator**（不拆多个 controller 并行跑，避免互相打架）。
+- Controller 只输出 `CreateExecutorAction` / `StopExecutorAction`，不直接下单/改余额。
+- 执行仍由 Executors 完成：`LPPositionExecutor`（开/关仓）与 `GatewaySwapExecutor`（swap）。
+- 支持 **同一 controller 多个 active executors**，按 `executor_id` 维护独立上下文。
+
+**要改的部分（可读、可维护、契约清晰）**
+- 把 token 顺序/反转问题集中到 `TokenOrderMapper`（适配层）。
+- 把成本过滤独立成模块：`bots/controllers/generic/clmm_lp_cost_filter.py`。
+- Controller 主流程固定为：`snapshot -> reconcile -> decide -> apply_patch -> actions`。
+- 日志只保留关键异常/告警，不做大量节流/Debug 采样逻辑（避免性能与维护负担）。
+
+## 2. 文件入口
+
+- Controller：`bots/controllers/generic/clmm_lp.py`
+- Types / Adapters / Context：`bots/controllers/generic/clmm_lp_components.py`
+- Cost Filter：`bots/controllers/generic/clmm_lp_cost_filter.py`
+- 配置示例：`bots/conf/controllers/clmm_lp.yml`
+- 官方参考（对比用）：`hummingbot/controllers/generic/lp_manager.py`
 - LP Executor：`hummingbot/hummingbot/strategy_v2/executors/lp_position_executor/`
 - Swap Executor：`hummingbot/hummingbot/strategy_v2/executors/gateway_swap_executor/`
-- 预算模块：`hummingbot/hummingbot/strategy_v2/budget/`
 
-本文描述当前实现（包含库存管理）与官方设计的一致性与扩展点。
+## 3. 价格与 token 顺序（Uniswap V3 / CLMM 必须搞清楚）
 
-## 2. 设计原则（与官方文档一致）
+### 3.1 BASE/QUOTE 是“策略定义”，不是池子定义
+- `trading_pair`：策略侧 BASE-QUOTE（钱包余额语义、预算计算、router 报价/下单均按这个方向）。
+- Uniswap V3 池子链上固定的是 `token0/token1`（地址排序），这会导致“池子 token 顺序”和策略直觉顺序可能相反。
 
-- **职责分离**：Controller 只做决策、Executor 只做执行。
-- **显式状态机**：控制器维护单一状态机，Executor 自有状态机。
-- **单一时间源**：使用 `market_data_provider.time()` 作为时钟。
-- **安全优先**：预算保护、链上动作串行化、错误可恢复。
-- **可组合**：控制器输出 `ExecutorAction`，不直接操作连接器。
-
-## 3. 架构概览
-
-```
-Controller (clmm_lp)
-  ├─ TokenOrderMapper / PriceMapper（`trading_pair` ↔ `pool_trading_pair`）
-  ├─ Portfolio & Budget（wallet/anchor/budget reserve/fee EWMA）
-  ├─ Flow Engine（StopLoss / Rebalance / Entry）→ ExecutorActions
-  ├─ LPPositionExecutor (开/关仓、状态上报)
-  ├─ GatewaySwapExecutor (库存纠偏/止损清仓)
-  └─ BudgetCoordinator (钱包余额锁)
-```
-
-### 3.1 Controller 角色
-- 读取市场价格、executor 状态与预算快照。
-- 决定：何时开仓、何时平仓、何时补仓/换仓、何时止损。
-- 只输出 `CreateExecutorAction` / `StopExecutorAction`。
-
-### 3.2 LPPositionExecutor 角色
-- 维护 LP 头寸生命周期状态机（OPENING/IN_RANGE/OUT_OF_RANGE/CLOSING/...）。
-- 通过 `custom_info` 上报状态和数量：`state`、`current_price`、`lower_price`、`upper_price`、
-  `base_amount`、`quote_amount`、`base_fee`、`quote_fee`、`out_of_range_since`。
-  - 注意：当 `pool_trading_pair` 与 `trading_pair` 方向相反时，Executor 上报的 base/quote 语义以 `pool_trading_pair` 为准；
-    Controller 读取后会映射回 `trading_pair` 语义，再用于预算/止损/再平衡等计算。
-
-### 3.3 GatewaySwapExecutor 角色
-- 执行 swap（用于开仓/再平衡的库存纠偏，以及止损清仓）。
-- 通过 `custom_info` 回传实际 `amount_in/amount_out`，用于观察与余额刷新。
-
-## 4. 配置规范（必须遵守）
-
-- `controller_name` 必须与模块文件名一致：`clmm_lp`。
-- `controller_type` 必须对应目录：`generic`。
-- `id` 为 Controller 实例唯一标识，**推荐与配置文件名一致**。
-
-推荐示例：
-- 配置文件名：`clmm_lp.yml`
-- `id: clmm_lp`
-- `controller_name: clmm_lp`
-
-### 4.1 `trading_pair` vs `pool_trading_pair`
-
-在部分链上 CLMM 场景里，**router 的报价/下单 pair 顺序**与 **pool/LP 的 token 顺序**可能相反：
-
-- `trading_pair`：作为控制器的**参考计价 pair**（预算、价格、wallet_base/quote 语义、router 报价与 swap 下单均以此为准）。
-  - `position_value_quote` 以 `trading_pair` 的 quote 计价。
-- `pool_trading_pair`（可选）：作为 **pool 的 token0-token1 顺序（按地址排序）**。
-  - 必须等于 `trading_pair` 或其反转（`BASE-QUOTE` ↔ `QUOTE-BASE`）。
-  - 用于 LPPositionExecutor 的 `trading_pair/base_token/quote_token`，以及开仓时的金额与价格区间映射（base/quote 金额 swap + 价格区间倒数映射）。
-
-示例（router 按 `TOKEN-USDT` 计价，但 pool token 顺序为 `USDT-TOKEN`）：
+### 3.2 `pool_trading_pair` 的作用
+当池子的 token0-token1 顺序与策略侧 `trading_pair` 方向相反时，通过配置：
 ```yaml
-trading_pair: TOKEN-USDT
-pool_trading_pair: USDT-TOKEN
+trading_pair: MEMES-USDT
+pool_trading_pair: USDT-MEMES
 ```
+Controller 通过 `TokenOrderMapper` 统一做三件事：
+- **开仓参数映射**：策略侧的 base/quote 金额与价格区间，映射到 LP executor 所需的 pool token 顺序。
+- **executor 上报映射**：把 executor.custom_info 里按 pool 语义上报的 base/quote/price/bounds 映射回策略语义。
+- **避免“swap 与加池子方向反了”**：swap 永远用 `trading_pair`；LP 永远用 `pool_trading_pair` + pool token 顺序。
+
+### 3.3 当前实现的价格来源（对齐官方）
+`current_price` 统一来自 `MarketDataProvider.get_rate(trading_pair)`（RateOracle / gateway `/price`），与官方 `lp_manager` 与 `LPPositionExecutor._get_current_price()` 一致：
+- 不再在 controller 内部通过 `get_pool_info_by_address(pool_address)` 拉“指定 pool 的快照价”。
+- 这样可以避免 “router 价 vs pool 价” 双源不一致导致的状态错觉（特别是 out-of-range 判定）。
+
+> 结论：`pool_address` 仍然必须配置（用于 LP 开/关仓），但不再用于 controller 自己抓价格。
+
+## 4. 三层结构（单文件入口 + 内部模块化）
+
+### 4.1 适配层：TokenOrderMapper
+位置：`bots/controllers/generic/clmm_lp_components.py`。
+- `strategy_amounts_to_lp()` / `strategy_bounds_to_lp()`：开仓时把金额与区间映射到 pool 顺序。
+- `lp_amounts_to_strategy()` / `lp_bounds_to_strategy()`：解析 executor 上报时映射回策略顺序。
+
+### 4.2 Portfolio & Budget（观测层）
+Controller 维护的钱包与派生数据：
+- `wallet_base/wallet_quote`：来自 connector balances（按策略 `trading_pair` 的 token）。
+- `BudgetAnchor`：用于 stoploss 的“预算切片锚定值”（按 quote 计价），按 `executor_id` 存在 `ControllerContext.lp[executor_id].anchor`。
+- `FeeEstimatorContext`：用于 cost filter 的 fee_rate EWMA（按 `position_address` 绑定）。
+
+### 4.3 Flow（决策层）
+三个 flow（都在 `clmm_lp.py` 内，以 `Decision/Intent` 表达）：
+- Entry：入场前必要时做 inventory swap，然后开 LP。
+- Rebalance：出界 -> stop ->（延时）-> 必要时 inventory swap -> reopen。
+- StopLoss：触发后 stop 全部 LP，进入冷却；可选执行 liquidation swap（base->quote）。
+
+## 5. Controller 边界（完全对齐 v2 实践）
+
+### 5.1 `update_processed_data()`：观测与视图
+- 允许做 IO：刷新 balances。
+- 允许做“观测驱动”的 ctx 更新：reconcile 已完成 swap、更新 anchors、更新 fee EWMA。
+- 构建 `Snapshot` 并缓存到 `_latest_snapshot`，同时输出基础 `processed_data`（价格/余额/active executors 列表）。
+
+### 5.2 `determine_executor_actions()`：决策与状态推进
+- 读取 `_latest_snapshot`（或当次构建），然后：
+  1) reconcile（done swaps、rebalance plans、out-of-range since）
+  2) `decision = _decide(snapshot)`
+  3) `_apply_patch(decision.patch)`（只在这里推进策略状态）
+  4) 返回 `decision.actions`
+- 同时输出完整 `processed_data`：`controller_state`、`intent_*`、rebalance/stoploss 关键字段。
+
+## 6. 决策优先级（规则树）
+
+从高到低：
+1) `manual_kill_switch`（停止所有 LP）
+2) `lp_failure_detected`（进入 failure block，需要人工）
+3) 任意 swap executor active（全局串行，直接 WAIT）
+4) stoploss（触发则 stop 全部 LP，并进入冷却/可选 liquidation）
+5) rebalance stop（符合条件则对对应 LP 发 stop，并创建 plan）
+6) 有 active LP 且无 rebalance plan（保持 ACTIVE/WAIT）
+7) pending liquidation（提交 liquidation swap）
+8) stoploss cooldown（等待）
+9) rebalance reopen（延时到期后执行 swap/open）
+10) entry（触发则 swap/open，否则 idle）
+
+## 7. 为什么我们的 Rebalance 比官方 `lp_manager` 更复杂？
+
+官方 `hummingbot/controllers/generic/lp_manager.py` 的 rebalance 逻辑极简，原因是它的目标也极简：
+- 只支持 **单一 active executor**（`active_executor()` 取第一个）。
+- rebalance 只做：`OUT_OF_RANGE + elapsed >= rebalance_seconds -> StopExecutorAction`；下一 tick 没 executor 就直接 `CreateExecutorAction`。
+- 不做 inventory swap、不做预算锁、不做 stoploss、不做 cost filter、不处理 “action 只是建议、可能不被执行” 的情况。
+
+而 `clmm_lp` 的 rebalance 复杂，主要来自四类“必须处理的真实约束”：
+1) **多 executor**：每个 LP 都可能独立 out-of-range，需要按 `executor_id` 保存独立 plan（`RebalanceContext.plans`）。
+2) **动作互斥**：rebalance reopen 前可能需要 inventory swap，swap 期间必须全局暂停 LP 开/关仓。
+3) **频率/冷却/成本**：`hysteresis_pct`、`cooldown_seconds`、`max_rebalances_per_hour` 与 `cost_filter_*` 都会影响“是否 stop、何时 stop”。
+4) **Controller/Strategy 契约**：Controller 输出的是 actions proposal，不应假设一定执行；因此需要：
+   - STOP 阶段幂等重复输出 `StopExecutorAction`，直到观测到 LP 已关闭；
+   - OPEN 阶段有超时回退（避免永远卡住）。
+
+> 结论：复杂性主要是“能力范围扩大 + 契约更严格”带来的，目标是让行为在实盘环境更稳定可控，而不是为了拆函数而拆函数。
+
+## 8. Rebalance 触发条件与阶段
+
+### 8.1 触发条件（全部满足）
+- 当前价落在 `[lower, upper]` 外（按策略语义）
+- 偏离度 `deviation_pct >= hysteresis_pct`
+- `now - out_of_range_since >= rebalance_seconds`
+- `now - last_rebalance_ts >= cooldown_seconds`
+- `_can_rebalance_now()` 通过（`max_rebalances_per_hour`）
+- 若启用 cost filter：`CostFilter.allow_rebalance(...)` 通过；否则可能被 `should_force_rebalance()` 强制放行
+
+### 8.2 Plan 阶段（`RebalanceStage`）
+- `STOP_REQUESTED`：对该 `executor_id` 幂等发 stop，直到观测到 LP 不再 active。
+- `WAIT_REOPEN`：等待 `reopen_delay_sec`，到期后进入 reopen（必要时 inventory swap）。
+- `OPEN_REQUESTED`：已发 open action，等待新 executor 出现；超时则回退到 `WAIT_REOPEN`。
+
+## 9. Cost Filter（独立模块）
+
+位置：`bots/controllers/generic/clmm_lp_cost_filter.py`，职责是：
+- 从 `LPView` 的 pending fees（转换成 quote）更新 `FeeEstimatorContext.fee_rate_ewma`。
+- 依据固定窗口 `IN_RANGE_TIME_SEC` 与成本估算（fixed + swap 摩擦）判断是否允许 rebalance。
+- 提供 `should_force_rebalance()`：长时间 out-of-range 允许绕过过滤，避免永远不 rebalance。
+
+## 10. StopLoss 与 liquidation
+
+- StopLoss 基于每个 LP 的 `BudgetAnchor`（quote 计价）：
+  - equity = deployed_value（含 fees） + wallet_slice_value
+  - 低于阈值则触发：stop 全部 LP，进入 `stop_loss_pause_sec` 冷却。
+- 若 `stop_loss_liquidation_mode: quote`：
+  - 触发 liquidation swap（base -> quote）。
+  - `liquidation_target_base` 会在每次 liquidation swap 完成后递减，直到归零（或 wallet_base 为 0）。
 
-## 5. Controller 状态机（显式）
-
-> 控制器状态机是高层决策状态，不等同于 LP Executor 的内部状态。
-> 实现说明：`ControllerState` 为 view-only（由 `Snapshot(事实) + Context(内部状态) + Intent/Decision` 派生），不作为逻辑分支的控制变量。
-
-### 5.1 状态列表
-- **IDLE**：无 LP 仓位，无待执行动作。
-- **ACTIVE**：LP Executor 运行中。
-- **REBALANCE_WAIT_CLOSE**：已发出 stop 等待重开（包含 reopen delay）。
-- **INVENTORY_SWAP**：库存纠偏 swap 已提交，等待执行。
-- **READY_TO_OPEN**：准备开仓（预算/校验完成）。
-- **WAIT_SWAP**：swap 在运行（库存纠偏/止损清仓），暂停其他动作。
-- **STOPLOSS_PAUSE**：止损触发后的冷却期。
-- **MANUAL_STOP**：人工止损（manual_kill_switch）。
-- **LP_FAILURE**：LP executor 失败（RETRIES_EXCEEDED / FAILED），需人工介入。
-
-### 5.2 状态表（入口/出口）
-
-| 状态 | 含义 | 进入条件 | 退出条件 |
-| --- | --- | --- | --- |
-| IDLE | 无头寸/无动作 | entry 条件不满足或预算不足 | entry 条件满足且需库存纠偏 → INVENTORY_SWAP；无需纠偏 → READY_TO_OPEN |
-| ACTIVE | LP 运行中 | LP executor active | 触发止损 → STOPLOSS_PAUSE；触发再平衡 → REBALANCE_WAIT_CLOSE |
-| REBALANCE_WAIT_CLOSE | 等待重开 | stop LP 成功且在 reopen delay | reopen delay 到期且需库存纠偏 → INVENTORY_SWAP；无需纠偏 → READY_TO_OPEN |
-| INVENTORY_SWAP | 库存纠偏 swap 已提交 | entry/rebalance 触发纠偏 | swap executor active → WAIT_SWAP；失败 → IDLE |
-| WAIT_SWAP | swap 执行中 | 库存纠偏/止损清仓 swap active | swap 完成 → STOPLOSS_PAUSE（止损）或 IDLE（纠偏） |
-| READY_TO_OPEN | 准备开仓 | 预算/价格校验通过 | 创建 LP → ACTIVE；失败 → IDLE |
-| STOPLOSS_PAUSE | 止损冷却 | stop loss 触发或清仓等待 | 冷却结束且无 pending liquidation → IDLE |
-| MANUAL_STOP | 人工停止 | manual_kill_switch=true | manual_kill_switch=false → 回到 IDLE |
-| LP_FAILURE | LP 执行失败锁 | LP executor RETRIES_EXCEEDED/FAILED | 仅人工干预（当前无自动解锁） |
-
-### 5.3 状态迁移逻辑（要点）
-- MANUAL_STOP 优先级最高，直接 stop LP executor。
-- 库存纠偏/止损清仓 swap 运行时，控制器进入 WAIT_SWAP，避免并发动作。
-- LP executor 进入 RETRIES_EXCEEDED 或 failed 时进入 LP_FAILURE，阻止自动重新入场。
-- LP executor 运行时：
-  - 优先评估 stop loss；
-  - 再评估 rebalance。
-- stop loss 或 rebalance 触发后，先 stop LP，再进入重开或清仓流程。
-- stop loss 冷却期内禁止重新开仓。
-- stop loss 清仓失败时进入重试（基于 cooldown）直到清仓成功或无 base 余额。
-
-### 5.4 Tick 决策顺序（精简伪代码）
-
-```
-if manual_kill_switch:
-  stop LP; state=MANUAL_STOP; return
-
-if lp_failure_detected:
-  state=LP_FAILURE; return
-
-if swap_executor active:
-  state=WAIT_SWAP; return
-
-if LP executor(s) active:
-  if stop_loss_triggered:
-    stop LP; state=STOPLOSS_PAUSE; return
-  if rebalance_triggered:
-    stop LP; state=REBALANCE_WAIT_CLOSE; return
-  state=ACTIVE; return
-
-if pending_liquidation:
-  create swap; state=WAIT_SWAP; return
-
-if now < stop_loss_until_ts:
-  state=STOPLOSS_PAUSE; return
-
-if pending_rebalance:
-  if now < reopen_after_ts: state=REBALANCE_WAIT_CLOSE; return
-  if inventory_swap_needed:
-    create swap; state=INVENTORY_SWAP; return
-  open LP; state=ACTIVE; return
-
-if not entry_triggered:
-  state=IDLE; return
-
-if inventory_swap_needed:
-  create swap; state=INVENTORY_SWAP; return
-
-resolve entry amounts (基于 position_value_quote 目标比例)
-if not available: state=IDLE; return
-open LP; state=ACTIVE
-```
-
-### 5.5 状态机流程图（Mermaid）
-
-```mermaid
-flowchart TD
-  A[IDLE] -->|entry ok| B[READY_TO_OPEN]
-  A -->|need swap| C[INVENTORY_SWAP]
-  B -->|create LP| E[ACTIVE]
-  E -->|stop loss| F[STOPLOSS_PAUSE]
-  E -->|rebalance| G[REBALANCE_WAIT_CLOSE]
-  G -->|delay done| B
-  G -->|need swap| C
-  C --> D[WAIT_SWAP]
-  F -->|liquidate| D[WAIT_SWAP]
-  D -->|swap done| F
-  D -->|swap done| A
-  F -->|cooldown done| A
-  A -->|manual kill| H[MANUAL_STOP]
-  H -->|manual off| A
-  E -->|lp failure| I[LP_FAILURE]
-```
-
-### 5.4 状态机审阅（简化结论）
-
-- **优先级明确**：`manual_kill_switch` > `lp_failure` > `swap_executor` > `stop_loss` > `rebalance` > `pending_liquidation` > `entry`。
-- **互斥保障**：`WAIT_SWAP` 期间不触发 LP 开仓/重开，避免并发链上动作。
-- **再平衡闭环**：out-of-range → stop LP → pending_rebalance → open LP。
-- **避免卡死**：cost filter 拒绝时，长时间 out-of-range 会触发强制重平衡。
-- **风险隔离**：stop loss 与 manual stop 不受 cost filter 影响。
-
-## 6. 数量/资金链路（预算链路）
-
-### 6.1 预算模式
-- **WALLET**：直接使用钱包余额；BudgetCoordinator 负责锁定。
-- **固定名义预算**：`position_value_quote` 为目标名义规模，钱包总市值不足时不换仓/不入场。
-
-### 6.2 开仓数量计算
-- 使用 `position_value_quote` 与 `target_base_value_pct`，按当前价格计算 `base_amount/quote_amount`。
-- 钱包总市值不足 `position_value_quote` 时不入场。
-- 若库存偏离目标且 `auto_swap_enabled=true` 且 `delta_quote_value >= position_value_quote * swap_min_value_pct`，先做库存纠偏 swap。
-- 若无需纠偏或 `auto_swap_enabled=false`，按目标比例开仓；不足的一侧按钱包实际量。
-
-> 建议使用独立钱包，避免其他资产被库存调仓影响。
-
-### 6.3 预算锁与结算
-- 开仓前：
-  - BudgetCoordinator 负责 `reserve()` 校验钱包可用余额与 gas 预留。
-- 平仓后不做内部预算结算，策略以钱包实仓为准。
-
-### 6.4 交换（swap）预算
-- 库存纠偏 swap 仅在开仓与再平衡流程触发，使用 `router_connector`。
-- 控制器通过 `WAIT_SWAP` 状态串行化库存纠偏与止损清仓，避免并发链上动作。
-- 纠偏 swap 的输入数量按目标差额计算，并应用 `swap_safety_buffer_pct` 与 `swap_min_value_pct` 下限。
-- 清仓 swap 额度使用预算切片中的 base，并应用 `swap_safety_buffer_pct`。
-
-### 6.5 止损基准（预算切片）
-- 止损使用“预算切片的市值变化”，基准为 LP 开仓时刻的预算等值（`anchor_budget`），切片上限为 `position_value_quote`。
-- 预算切片 = LP 已部署价值 + 钱包中分配给预算的切片（按开仓时钱包比例分配）。
-- 当前预算权益 = `deployed_value + wallet_slice_value`（统一以 quote 计价）。
-- stop loss 触发条件：`budget_equity <= anchor_budget * (1 - stop_loss_pnl_pct)`。
-
-## 7. 再平衡逻辑
-
-触发条件全部满足：
-- LP executor 状态为 `OUT_OF_RANGE`；
-- 偏离范围超过 `hysteresis_pct`；
-- out_of_range 时长超过 `rebalance_seconds`；
-- 满足冷却时间 `cooldown_seconds`；
-- 小时内重平衡次数未超过 `max_rebalances_per_hour`。
-- 若开启 cost filter，需通过成本过滤判定。
-
-触发后流程：
-1) Stop LP executor。
-2) 等待 `reopen_delay_sec`。
-3) 若库存偏离目标且允许纠偏，执行 swap 并等待余额刷新。
-4) 余额满足目标比例时开新 LP（按目标比例开仓）。
-
-### 7.1 策略A：再平衡成本过滤（Cost Filter）
-
-**目标**：避免趋势行情中频繁“全平重开”导致的手续费与滑点吞噬收益。
-
-**实现位置**：`evaluate_cost_filter()` 与内部常量在 `bots/controllers/generic/clmm_lp_components.py`；Controller 在 `bots/controllers/generic/clmm_lp.py` 调用。
-
-**核心输入**（均在 Controller 内部观测，不依赖外部 volume）：
-- **fee_rate**：使用 LP position 的 pending fee 变化估计（`base_fee/quote_fee` 转 quote）。
-- **in_range_time**：固定评估窗口（常量 1 小时）。
-- **cost**：固定成本 + 预计 swap 成本（滑点 + 固定费率缓冲）。
-
-**估算方法（简化版）**：
-1) **fee_rate**（quote/sec）
-   - 仅在 `IN_RANGE` 时更新。
-   - EWMA：`fee_rate = fee_rate*(1-α) + (delta_fee/dt)*α`（α=0.1，取样间隔 10 秒，内部常量）。
-   - 若 EWMA 不可用：使用 `cost_filter_fee_rate_bootstrap_quote_per_hour / 3600`，为 0 时表示 fee_rate=0。
-2) **期望在场时间**：
-   - `in_range_time = 3600` 秒（内部常量，不依赖波动率）。
-3) **成本**：
-   - `fixed_cost = cost_filter_fixed_cost_quote`
-   - `swap_cost`：当 `auto_swap_enabled=true` 时按固定比例估算，否则为 0
-   - `C = fixed_cost + swap_cost`
-4) **决策**：
-   - `expected_fee = fee_rate * in_range_time`
-   - `expected_fee >= C * 2`（内部常量）
-   - `payback = C / max(fee_rate, 1e-9) <= cost_filter_max_payback_sec`
-
-#### 7.1.1 决策流程（确定性步骤）
-
-给定当前价格、position custom_info 和配置项，控制器按如下顺序判断（顺序固定）：
-1) 若 `cost_filter_enabled=false` → **允许**
-2) 若 `current_price<=0` → **拒绝**（invalid_price）
-3) 计算 `fee_rate`：
-   - 优先用 EWMA；
-   - EWMA 不可用时，使用 `cost_filter_fee_rate_bootstrap_quote_per_hour / 3600`
-4) 固定 `in_range_time=3600s`
-5) 计算 `expected_fees = fee_rate * in_range_time`
-6) 计算成本 `C = fixed_cost + swap_cost`
-7) 若 `C<=0` → **允许**（zero_cost）
-8) 若 `expected_fees < C * 2` → **拒绝**（fee_rate_zero / expected_fee_below_threshold）
-9) 计算 `payback = C / max(fee_rate, 1e-9)`
-10) 若 `payback > cost_filter_max_payback_sec` → **拒绝**（payback_exceeded）
-11) 若 out-of-range 持续超过 `max(rebalance_seconds * 10, 600)` → **允许**（force_rebalance）
-12) 否则 → **允许**（approved）
-
-**边界处理（确定性规则）**：
-- **fee_rate 缺失**：使用 `cost_filter_fee_rate_bootstrap_quote_per_hour / 3600`，为 0 时 fee_rate=0。
-- **fee_rate=0**：expected_fees=0，触发 `fee_rate_zero` 拒绝，除非成本为 0。
-- **价格无效**：直接拒绝 rebalance。
-- **成本为 0**：直接放行（不进行收益判断）。
-- **回本时间**：使用 `max(fee_rate, 1e-9)` 防止除零。
-- **强制重平衡**：长时间 out-of-range 会绕过 cost filter，避免“卡死”。
-
-#### 7.1.2 与其他逻辑的交互与优先级
-
-- **Stop loss 优先**：止损触发会先停止 LP，不受 cost filter 影响。
-- **冷却与频率限制优先**：`rebalance_seconds` / `cooldown_seconds` / `max_rebalances_per_hour` 先过滤，再进入 cost filter。
-
-**日志**：
-- 控制器在触发 cost filter 判定时输出一条聚合日志（按 `max(cooldown_seconds, 60)` 节流）。
-- 输出包含：fee_rate 来源、in_range_time、widths、expected_fees、cost、payback、decision。
-
-#### 7.1.3 生产可用性说明（模型假设明确）
-
-- 该过滤器是 **确定性决策器**：相同输入必然给出相同结论。
-- 估算仅依赖固定时间窗与历史 fee_rate，**不需要波动率建模**，避免参数陷阱。
-- 为控制风险，建议设置合理 `max_payback_sec`，安全系数固定为 2。
-- 强制重平衡用于避免长期 out-of-range 锁死。
-
-#### 7.1.4 验证与测试建议（可重复）
-
-- **冷启动**：`fee_rate_bootstrap=0` 时，确认 cost filter 在 out-of-range 阶段拒绝；超过强制阈值后允许。
-- **高成本**：把 `cost_filter_fixed_cost_quote` 设置为高值，确认 `expected_fee_below_threshold` 触发。
-- **回本门槛**：调高 `cost_filter_max_payback_sec`，观察同一成本下从拒绝变为允许。
-- **日志完整性**：检查 cost filter 日志字段齐全且节流生效。
-
-
-## 8. 入场逻辑
-
-- `target_price <= 0` 时不限制价格。
-- `trigger_above == true`：价格 >= target_price 才入场。
-- `trigger_above == false`：价格 <= target_price 才入场。
-- stop loss 后 `reenter_enabled` 为 false 时禁止再入场。
-
-## 9. 止损逻辑
-
-- 止损基于**预算切片市值回撤**：
-  - `budget_equity = deployed_value + wallet_slice_value`（统一以 quote 计价）
-  - `anchor_budget` 在 LP 激活时初始化：预算值 = 已部署价值 + 钱包中分配给预算的切片（重启后重新初始化）
-- 当 `budget_equity <= anchor_budget * (1 - stop_loss_pnl_pct)` 触发止损。
-- 触发后进入 `STOPLOSS_PAUSE`，持续 `stop_loss_pause_sec`。
-- 若 `stop_loss_liquidation_mode == quote`：
-  - 触发清仓 swap（base -> quote）。
-
-> 注意：止损只评估预算切片，其他钱包资金不会稀释/放大止损。
-
-## 10. 连接器/网关链路
-
-- LP 执行通过 `connector_name`（如 `uniswap/clmm`）。
-- Swap 通过 `router_connector`（如 `pancakeswap/router`）。
-- Controller 的 `update_markets` 必须注册两者。
-
-## 11. 关键配置项说明（精选）
-
-- `position_value_quote`：单次 LP 目标名义金额（quote 计价）。
-- `position_width_pct`：价格区间宽度百分比。
-- `hysteresis_pct`：出界后再平衡的偏离阈值。
-- `rebalance_seconds` / `cooldown_seconds`：出界持续时长 / 冷却时间。
-- `reopen_delay_sec`：stop 后延时重开。
-- `target_base_value_pct`：目标比例（0-1，0=纯 quote，1=纯 base）。
-- `auto_swap_enabled`：是否启用库存纠偏 swap。
-- `swap_min_value_pct`：库存纠偏最小名义值占比（相对 `position_value_quote`，默认 5%）。
-- `swap_safety_buffer_pct`：swap 输入安全缓冲。
-- `cost_filter_enabled`：是否启用再平衡成本过滤。
-- `cost_filter_fee_rate_bootstrap_quote_per_hour`：fee_rate 冷启动默认值。
-- `cost_filter_fixed_cost_quote`：固定链路成本估计。
-- `cost_filter_max_payback_sec`：最大可接受回本时间。
-- `stop_loss_pnl_pct` / `stop_loss_pause_sec`：止损阈值与冷却时间。
-- `stop_loss_liquidation_mode`：止损后是否换成 quote。
-- `budget_key`：预算隔离键（默认 `id`）。
-- `native_token_symbol` / `min_native_balance`：gas 预留。
-
-### 11.1 运行时内部状态（对外可观测）
-
-Controller 将关键内部状态输出到 `processed_data`，便于观察与诊断：
-- `controller_state` / `lp_state`：控制器与 LP executor 状态。
-- `stop_loss_anchor`：预算止损锚定值（quote 计价）。
-- `pending_liquidation`：是否等待止损清仓。
-- `rebalance_pending` / `rebalance_plans`：再平衡计划数量与明细（按 `executor_id` 跟踪 stage/reopen_after_ts/open_executor_id）。
-- `inventory_swap_failed`：最近一次库存纠偏 swap 是否失败。
-- `lp_failure_blocked`：LP executor 是否已进入失败锁。
-
-**Cost Filter 内部常量（不可调）**：
-- 定义位置：`bots/controllers/generic/clmm_lp_components.py`。
-- 评估窗口固定为 1 小时。
-- swap_cost 仅在 `auto_swap_enabled=true` 时参与估算。
-- fee_rate_floor 固定为 1e-9，安全系数固定为 2。
-- 强制重平衡阈值：`max(rebalance_seconds * 10, 600)`。
-
-## 12. 风险控制与异常处理
-
-- 止损清仓 swap 失败：
-  - 保持 STOPLOSS_PAUSE，等待冷却后重试清仓。
-- 避免并发链上动作：
-  - swap executor 运行时禁止 LP 开仓；
-  - BudgetCoordinator 内部 `action_lock` 可用于串行化（Executor 自身使用）。
-
-## 13. 不变式（Invariant）
-
-- Controller 不假设只有一个 LP executor；允许多个 active，并按 `executor_id` 维护独立上下文。
-- swap executor 运行时 Controller 不触发其他执行动作。
-- 开仓必须通过预算 reservation。
-
-## 14. 已知限制
-
-- stop loss 仅统计 base/quote 资产，未包含 gas 等其他代币。
-- 无多层（core/edge）与多池组合编排。
-
-## 15. 未来计划
-
-- 引入 core/edge 多层 LP 控制器并共享预算。
-- 引入更细粒度的 swap 重试和失败恢复策略。
-- 增加 Controller 状态机与预算的单元测试。
-- Dashboard 增强：展示 Controller 状态与预算快照。
+## 11. `processed_data`（对外观测字段）
+
+关键字段（以当前实现为准）：
+- 价格/余额：`current_price`、`wallet_base`、`wallet_quote`
+- view state：`controller_state`、`state_reason`
+- intent：`intent_flow`、`intent_stage`、`intent_reason`
+- stoploss：`pending_liquidation`、`stop_loss_active`、`stop_loss_until_ts`
+- rebalance：`rebalance_pending`、`rebalance_plans`
+- failure：`lp_failure_blocked`
+- executors：`active_lp`、`active_swaps`
+
+## 12. 配置要点（防止方向配错）
+
+最常见误配是 “池子 token 顺序与策略顺序相反”：
+- swap 按 `trading_pair`（策略 BASE-QUOTE）理解；
+- LP 按 `pool_trading_pair`（池子 token0-token1）理解；
+- 两者必须由 `pool_trading_pair` 明确桥接，不能靠猜。
+
+示例：`bots/conf/controllers/clmm_lp.yml`（已给出）。
+
+## 13. 验收（最小可验证标准）
+
+- 编译检查：`python -m py_compile bots/controllers/generic/clmm_lp.py bots/controllers/generic/clmm_lp_components.py bots/controllers/generic/clmm_lp_cost_filter.py`
+- 运行观察：启动 bot 后 `processed_data` 中不再出现 `router_price` 字段；rebalance/stoploss/entry 的 intent 与 actions 能对应到实际 executors 状态变化。

@@ -198,7 +198,6 @@ class SwapView:
 class Snapshot:
     now: float
     current_price: Optional[Decimal]
-    router_price: Optional[Decimal]
     wallet_base: Decimal
     wallet_quote: Decimal
     lp: Dict[str, LPView]
@@ -269,14 +268,12 @@ class RebalanceContext:
     plans: Dict[str, RebalancePlan] = field(default_factory=dict)
     last_rebalance_ts: float = 0.0
     timestamps: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
-    out_of_range_since: Dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
 class SwapContext:
     settled_executor_ids: Set[str] = field(default_factory=set)
     last_inventory_swap_ts: float = 0.0
-    inventory_swap_failed: Optional[bool] = None
     awaiting_balance_refresh: bool = False
 
 
@@ -320,7 +317,6 @@ class DecisionPatch:
 
     set_swap_awaiting_balance_refresh: Optional[bool] = None
     set_swap_last_inventory_swap_ts: Optional[float] = None
-    set_swap_inventory_swap_failed: Optional[bool] = None
 
     set_lp_open_amounts: Dict[str, Tuple[Decimal, Decimal]] = field(default_factory=dict)
 

@@ -73,11 +73,7 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
     target_base_value_pct: Decimal = Field(default=Decimal("0.5"), json_schema_extra={"is_updatable": True})
     swap_min_value_pct: Decimal = Field(default=Decimal("0.05"), json_schema_extra={"is_updatable": True})
     swap_safety_buffer_pct: Decimal = Field(default=Decimal("2"), json_schema_extra={"is_updatable": True})
-    swap_timeout_sec: int = Field(default=120, json_schema_extra={"is_updatable": True})
-    swap_poll_interval_sec: Decimal = Field(default=Decimal("2"), json_schema_extra={"is_updatable": True})
     swap_slippage_pct: Decimal = Field(default=Decimal("1"), json_schema_extra={"is_updatable": True})
-    swap_retry_attempts: int = Field(default=0, json_schema_extra={"is_updatable": True})
-    swap_retry_delay_sec: Decimal = Field(default=Decimal("1"), json_schema_extra={"is_updatable": True})
 
     cost_filter_enabled: bool = Field(default=False, json_schema_extra={"is_updatable": True})
     cost_filter_fee_rate_bootstrap_quote_per_hour: Decimal = Field(
@@ -209,7 +205,6 @@ class CLMMLPGuardedController(ControllerBase):
         self._latest_snapshot = snapshot
         self.processed_data.update({
             "current_price": snapshot.current_price,
-            "router_price": snapshot.router_price,
             "wallet_base": snapshot.wallet_base,
             "wallet_quote": snapshot.wallet_quote,
             "active_lp": [
@@ -238,7 +233,6 @@ class CLMMLPGuardedController(ControllerBase):
 
         self._reconcile_done_swaps(snapshot.now)
         self._reconcile_rebalance_plans(snapshot)
-        self._reconcile_out_of_range_since(snapshot)
 
         decision = self._decide(snapshot)
         self._apply_patch(decision.patch)
@@ -247,7 +241,6 @@ class CLMMLPGuardedController(ControllerBase):
 
         self.processed_data.update({
             "current_price": snapshot.current_price,
-            "router_price": snapshot.router_price,
             "wallet_base": snapshot.wallet_base,
             "wallet_quote": snapshot.wallet_quote,
             "controller_state": derived_state.value,
@@ -256,7 +249,6 @@ class CLMMLPGuardedController(ControllerBase):
             "intent_stage": decision.intent.stage.value,
             "intent_reason": decision.intent.reason,
             "pending_liquidation": self._ctx.stoploss.pending_liquidation,
-            "inventory_swap_failed": self._ctx.swap.inventory_swap_failed,
             "stop_loss_active": snapshot.now < self._ctx.stoploss.until_ts,
             "stop_loss_until_ts": self._ctx.stoploss.until_ts if self._ctx.stoploss.until_ts > 0 else None,
             "rebalance_pending": len(self._ctx.rebalance.plans),
@@ -291,8 +283,7 @@ class CLMMLPGuardedController(ControllerBase):
         return decision.actions
 
     def _build_snapshot(self, now: float) -> Snapshot:
-        router_price = self._get_router_price()
-        current_price = router_price
+        current_price = self._get_current_price()
 
         lp: Dict[str, LPView] = {}
         swaps: Dict[str, SwapView] = {}
@@ -313,7 +304,6 @@ class CLMMLPGuardedController(ControllerBase):
         return Snapshot(
             now=now,
             current_price=current_price,
-            router_price=router_price,
             wallet_base=self._wallet_base,
             wallet_quote=self._wallet_quote,
             lp=lp,
@@ -359,7 +349,7 @@ class CLMMLPGuardedController(ControllerBase):
             out_of_range_since=to_optional_float(custom.get("out_of_range_since")),
         )
 
-    def _get_router_price(self) -> Optional[Decimal]:
+    def _get_current_price(self) -> Optional[Decimal]:
         price = self.market_data_provider.get_rate(self.config.trading_pair)
         if price is None:
             return None
@@ -468,7 +458,6 @@ class CLMMLPGuardedController(ControllerBase):
                 open_id = plan.open_executor_id
                 if open_id and (snapshot.lp.get(open_id) and snapshot.lp[open_id].is_active):
                     self._ctx.rebalance.plans.pop(executor_id, None)
-                    self._ctx.rebalance.out_of_range_since.pop(executor_id, None)
                     continue
                 if plan.requested_at_ts > 0 and (now - plan.requested_at_ts) > 30.0:
                     self.logger().warning(
@@ -491,7 +480,6 @@ class CLMMLPGuardedController(ControllerBase):
                         reopen_after_ts=plan.reopen_after_ts,
                         requested_at_ts=plan.requested_at_ts,
                     )
-                    self._ctx.rebalance.out_of_range_since.pop(executor_id, None)
             elif plan.stage == RebalanceStage.WAIT_REOPEN:
                 old_lp = snapshot.lp.get(executor_id)
                 if old_lp is not None and old_lp.is_active:
@@ -500,31 +488,6 @@ class CLMMLPGuardedController(ControllerBase):
                         reopen_after_ts=plan.reopen_after_ts,
                         requested_at_ts=plan.requested_at_ts if plan.requested_at_ts > 0 else now,
                     )
-
-    def _reconcile_out_of_range_since(self, snapshot: Snapshot):
-        active_ids = {v.executor_id for v in snapshot.active_lp}
-        for executor_id in list(self._ctx.rebalance.out_of_range_since.keys()):
-            if executor_id not in active_ids:
-                self._ctx.rebalance.out_of_range_since.pop(executor_id, None)
-
-        now = snapshot.now
-        for lp_view in snapshot.active_lp:
-            lower_price = lp_view.lower_price
-            upper_price = lp_view.upper_price
-            if lower_price is None or upper_price is None or lower_price <= 0 or upper_price <= 0:
-                continue
-            effective_price = snapshot.current_price if snapshot.current_price is not None else lp_view.current_price
-            if effective_price is None or effective_price <= 0:
-                continue
-
-            if lower_price <= effective_price <= upper_price:
-                self._ctx.rebalance.out_of_range_since.pop(lp_view.executor_id, None)
-                continue
-
-            if lp_view.out_of_range_since is not None:
-                self._ctx.rebalance.out_of_range_since[lp_view.executor_id] = lp_view.out_of_range_since
-            else:
-                self._ctx.rebalance.out_of_range_since.setdefault(lp_view.executor_id, now)
 
     def _decide(self, snapshot: Snapshot) -> Decision:
         now = snapshot.now
@@ -742,7 +705,7 @@ class CLMMLPGuardedController(ControllerBase):
             if deviation_pct < self.config.hysteresis_pct:
                 continue
 
-            out_of_range_since = self._ctx.rebalance.out_of_range_since.get(lp_view.executor_id)
+            out_of_range_since = lp_view.out_of_range_since
             if out_of_range_since is None:
                 continue
             if (now - out_of_range_since) < self.config.rebalance_seconds:
@@ -994,7 +957,7 @@ class CLMMLPGuardedController(ControllerBase):
         if swap_action is None:
             return Decision(intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="swap_required"))
 
-        patch = DecisionPatch(set_swap_last_inventory_swap_ts=now, set_swap_inventory_swap_failed=None)
+        patch = DecisionPatch(set_swap_last_inventory_swap_ts=now)
         reason = "entry_inventory" if flow == IntentFlow.ENTRY else "rebalance_inventory"
         return Decision(
             intent=Intent(flow=flow, stage=IntentStage.SUBMIT_SWAP, reason=reason),
@@ -1041,10 +1004,6 @@ class CLMMLPGuardedController(ControllerBase):
             amount_in_is_quote=amount_in_is_quote,
             slippage_pct=self.config.swap_slippage_pct,
             pool_address=self.config.pool_address or None,
-            timeout_sec=self.config.swap_timeout_sec,
-            poll_interval_sec=self.config.swap_poll_interval_sec,
-            max_retries=self.config.swap_retry_attempts,
-            retry_delay_sec=self.config.swap_retry_delay_sec,
             level_id="inventory",
             budget_key=self._budget_key,
         )
@@ -1068,10 +1027,6 @@ class CLMMLPGuardedController(ControllerBase):
             amount_in_is_quote=False,
             slippage_pct=self.config.swap_slippage_pct,
             pool_address=self.config.pool_address or None,
-            timeout_sec=self.config.swap_timeout_sec,
-            poll_interval_sec=self.config.swap_poll_interval_sec,
-            max_retries=self.config.swap_retry_attempts,
-            retry_delay_sec=self.config.swap_retry_delay_sec,
             level_id="liquidate",
             budget_key=self._budget_key,
         )
@@ -1279,8 +1234,6 @@ class CLMMLPGuardedController(ControllerBase):
 
         if patch.set_swap_last_inventory_swap_ts is not None:
             self._ctx.swap.last_inventory_swap_ts = patch.set_swap_last_inventory_swap_ts
-        if patch.set_swap_inventory_swap_failed is not None or patch.set_swap_last_inventory_swap_ts is not None:
-            self._ctx.swap.inventory_swap_failed = patch.set_swap_inventory_swap_failed
         if patch.set_swap_awaiting_balance_refresh is not None:
             self._ctx.swap.awaiting_balance_refresh = patch.set_swap_awaiting_balance_refresh
 
@@ -1322,7 +1275,4 @@ class CLMMLPGuardedController(ControllerBase):
                     self._ctx.stoploss.pending_liquidation = True
             elif level_id == "inventory":
                 if executor.close_type == CloseType.COMPLETED:
-                    self._ctx.swap.inventory_swap_failed = False
                     self._ctx.swap.awaiting_balance_refresh = True
-                else:
-                    self._ctx.swap.inventory_swap_failed = True

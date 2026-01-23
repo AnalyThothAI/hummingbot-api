@@ -27,11 +27,7 @@ auto_swap_enabled: true
 target_base_value_pct: 0.5
 swap_min_value_pct: 0.05
 swap_safety_buffer_pct: 2
-swap_timeout_sec: 120
-swap_poll_interval_sec: 2
 swap_slippage_pct: 1
-swap_retry_attempts: 3
-swap_retry_delay_sec: 1
 
 cost_filter_enabled: false
 cost_filter_fee_rate_bootstrap_quote_per_hour: 0
