@@ -45,7 +45,10 @@ services:
 
   gateway:
     container_name: gateway
-    image: hummingbot/gateway:latest
+    #image: hummingbot/gateway:latest
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
     restart: unless-stopped
     ports:
       - "15888:15888"

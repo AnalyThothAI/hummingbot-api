@@ -284,9 +284,6 @@ class CLMMLPGuardedController(ControllerBase):
         derived_state, reason = self._derive_view_state(snapshot, decision.intent)
 
         self.processed_data.update({
-            "current_price": snapshot.current_price,
-            "wallet_base": snapshot.wallet_base,
-            "wallet_quote": snapshot.wallet_quote,
             "controller_state": derived_state.value,
             "state_reason": reason,
             "intent_flow": decision.intent.flow.value,
@@ -306,22 +303,6 @@ class CLMMLPGuardedController(ControllerBase):
                 for executor_id, plan in self._ctx.rebalance.plans.items()
             ],
             "lp_failure_blocked": self._ctx.failure.blocked,
-            "active_lp": [
-                {
-                    "id": v.executor_id,
-                    "state": v.state,
-                    "position": v.position_address,
-                    "base": str(v.base_amount),
-                    "quote": str(v.quote_amount),
-                    "lower": str(v.lower_price) if v.lower_price is not None else None,
-                    "upper": str(v.upper_price) if v.upper_price is not None else None,
-                }
-                for v in snapshot.active_lp
-            ],
-            "active_swaps": [
-                {"id": v.executor_id, "level_id": v.level_id, "close_type": v.close_type.value if v.close_type else None}
-                for v in snapshot.active_swaps
-            ],
         })
 
         return decision.actions
@@ -954,7 +935,11 @@ class CLMMLPGuardedController(ControllerBase):
 
         executor_id = sorted(eligible_ids, key=lambda i: ctx.rebalance.plans[i].reopen_after_ts)[0]
 
-        delta, reason = self._compute_inventory_delta(current_price, snapshot.wallet_base, snapshot.wallet_quote)
+        delta, reason, open_amounts = self._compute_inventory_delta(
+            current_price,
+            snapshot.wallet_base,
+            snapshot.wallet_quote,
+        )
         if delta is None:
             return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason=reason or "insufficient_balance"))
         delta_base, delta_quote_value = delta
@@ -970,7 +955,10 @@ class CLMMLPGuardedController(ControllerBase):
         if swap_plan is not None:
             return swap_plan
 
-        action = self._build_open_lp_action(current_price, snapshot.wallet_base, snapshot.wallet_quote)
+        if open_amounts is None:
+            return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="insufficient_balance"))
+        base_amt, quote_amt = open_amounts
+        action = self._build_open_lp_action(current_price, base_amt, quote_amt)
         if action is None:
             return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="budget_unavailable"))
 
@@ -992,7 +980,11 @@ class CLMMLPGuardedController(ControllerBase):
     def _decide_entry(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
 
-        delta, reason = self._compute_inventory_delta(snapshot.current_price, snapshot.wallet_base, snapshot.wallet_quote)
+        delta, reason, open_amounts = self._compute_inventory_delta(
+            snapshot.current_price,
+            snapshot.wallet_base,
+            snapshot.wallet_quote,
+        )
         if delta is None:
             return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason=reason or "insufficient_balance"))
         delta_base, delta_quote_value = delta
@@ -1008,7 +1000,10 @@ class CLMMLPGuardedController(ControllerBase):
         if swap_plan is not None:
             return swap_plan
 
-        action = self._build_open_lp_action(snapshot.current_price, snapshot.wallet_base, snapshot.wallet_quote)
+        if open_amounts is None:
+            return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="insufficient_balance"))
+        base_amt, quote_amt = open_amounts
+        action = self._build_open_lp_action(snapshot.current_price, base_amt, quote_amt)
         if action is None:
             return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="budget_unavailable"))
 
@@ -1047,37 +1042,42 @@ class CLMMLPGuardedController(ControllerBase):
         current_price: Optional[Decimal],
         wallet_base: Decimal,
         wallet_quote: Decimal,
-    ) -> Tuple[Optional[Tuple[Decimal, Decimal]], Optional[str]]:
+    ) -> Tuple[Optional[Tuple[Decimal, Decimal]], Optional[str], Optional[Tuple[Decimal, Decimal]]]:
         if current_price is None or current_price <= 0:
-            return None, "price_unavailable"
+            return None, "price_unavailable", None
         budget = self._build_position_budget(current_price)
         if budget is None:
-            return None, "budget_unavailable"
+            return None, "budget_unavailable", None
         total_value = wallet_base * current_price + wallet_quote
         if total_value < budget.total_value_quote:
-            return None, "insufficient_balance"
+            return None, "insufficient_balance", None
+
+        base_amount = min(wallet_base, budget.target_base)
+        quote_amount = min(wallet_quote, budget.target_quote)
+        if base_amount <= 0 and quote_amount <= 0:
+            return None, "insufficient_balance", None
 
         target_base = budget.target_base
         target_quote = budget.target_quote
         base_deficit = max(Decimal("0"), target_base - wallet_base)
         quote_deficit = max(Decimal("0"), target_quote - wallet_quote)
         if base_deficit > 0 and quote_deficit > 0:
-            return None, "insufficient_balance"
+            return None, "insufficient_balance", None
 
         delta_base = Decimal("0")
         if base_deficit > 0:
             quote_surplus = max(Decimal("0"), wallet_quote - target_quote)
             if quote_surplus <= 0:
-                return None, "insufficient_balance"
+                return None, "insufficient_balance", None
             delta_base = min(base_deficit, quote_surplus / current_price)
         elif quote_deficit > 0:
             base_surplus = max(Decimal("0"), wallet_base - target_base)
             if base_surplus <= 0:
-                return None, "insufficient_balance"
+                return None, "insufficient_balance", None
             delta_base = -min(base_surplus, quote_deficit / current_price)
 
         delta_quote_value = abs(delta_base * current_price)
-        return (delta_base, delta_quote_value), None
+        return (delta_base, delta_quote_value), None, (base_amount, quote_amount)
 
     def _maybe_plan_inventory_swap(
         self,
@@ -1125,6 +1125,7 @@ class CLMMLPGuardedController(ControllerBase):
             return None
 
         if delta_base > 0:
+            delta_quote_value = abs(delta_base * current_price)
             amount = self._apply_swap_buffer(delta_quote_value)
             if amount <= 0:
                 return None
@@ -1188,37 +1189,13 @@ class CLMMLPGuardedController(ControllerBase):
     def _build_open_lp_action(
         self,
         current_price: Optional[Decimal],
-        wallet_base: Decimal,
-        wallet_quote: Decimal,
+        base_amt: Decimal,
+        quote_amt: Decimal,
     ) -> Optional[CreateExecutorAction]:
-        _, amounts, _ = self._resolve_open_amounts(current_price, wallet_base, wallet_quote)
-        if amounts is None:
-            return None
-        base_amt, quote_amt = amounts
         executor_config = self._create_lp_executor_config(base_amt, quote_amt, current_price)
         if executor_config is None:
             return None
         return CreateExecutorAction(controller_id=self.config.id, executor_config=executor_config)
-
-    def _resolve_open_amounts(
-        self,
-        current_price: Optional[Decimal],
-        wallet_base: Decimal,
-        wallet_quote: Decimal,
-    ) -> Tuple[Optional[PositionBudget], Optional[Tuple[Decimal, Decimal]], Optional[str]]:
-        if current_price is None or current_price <= 0:
-            return None, None, "price_unavailable"
-        budget = self._build_position_budget(current_price)
-        if budget is None:
-            return None, None, "budget_unavailable"
-        total_value = wallet_base * current_price + wallet_quote
-        if total_value < budget.total_value_quote:
-            return None, None, "insufficient_balance"
-        base_amount = min(wallet_base, budget.target_base)
-        quote_amount = min(wallet_quote, budget.target_quote)
-        if base_amount <= 0 and quote_amount <= 0:
-            return None, None, "insufficient_balance"
-        return budget, (base_amount, quote_amount), None
 
     def _create_lp_executor_config(
         self,
