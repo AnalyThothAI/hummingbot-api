@@ -456,7 +456,11 @@ class CLMMLPGuardedController(ControllerBase):
         for executor_id, plan in list(self._ctx.rebalance.plans.items()):
             if plan.stage == RebalanceStage.OPEN_REQUESTED:
                 open_id = plan.open_executor_id
-                if open_id and (snapshot.lp.get(open_id) and snapshot.lp[open_id].is_active):
+                open_lp = snapshot.lp.get(open_id) if open_id else None
+                if open_lp and (
+                    open_lp.position_address
+                    or open_lp.state in {LPPositionStates.IN_RANGE.value, LPPositionStates.OUT_OF_RANGE.value}
+                ):
                     self._ctx.rebalance.plans.pop(executor_id, None)
                     continue
                 if plan.requested_at_ts > 0 and (now - plan.requested_at_ts) > 30.0:
@@ -616,14 +620,8 @@ class CLMMLPGuardedController(ControllerBase):
     def _compute_liquidation_target_base(self, snapshot: Snapshot, stopped: List[LPView]) -> Optional[Decimal]:
         total: Decimal = Decimal("0")
         for lp_view in stopped:
-            ctx = self._ctx.lp.get(lp_view.executor_id)
-            if ctx is None or ctx.open_base is None:
-                continue
-            total += max(Decimal("0"), ctx.open_base)
-        if total > 0:
-            return total
-        budget = self._build_position_budget(snapshot.current_price)
-        return budget.target_base if budget is not None else None
+            total += max(Decimal("0"), lp_view.base_amount + lp_view.base_fee)
+        return total
 
     def _decide_liquidation(self, snapshot: Snapshot) -> Decision:
         now = snapshot.now
@@ -804,14 +802,13 @@ class CLMMLPGuardedController(ControllerBase):
         if swap_plan is not None:
             return swap_plan
 
-        action, open_amounts = self._build_open_lp_action(current_price, snapshot.wallet_base, snapshot.wallet_quote)
+        action = self._build_open_lp_action(current_price, snapshot.wallet_base, snapshot.wallet_quote)
         if action is None:
             return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="budget_unavailable"))
 
         prev_plan = self._ctx.rebalance.plans.get(executor_id)
         reopen_after_ts = prev_plan.reopen_after_ts if prev_plan is not None else snapshot.now
         patch = DecisionPatch()
-        patch.set_lp_open_amounts[action.executor_config.id] = open_amounts
         patch.add_rebalance_plans[executor_id] = RebalancePlan(
             stage=RebalanceStage.OPEN_REQUESTED,
             reopen_after_ts=reopen_after_ts,
@@ -860,16 +857,13 @@ class CLMMLPGuardedController(ControllerBase):
         if swap_plan is not None:
             return swap_plan
 
-        action, open_amounts = self._build_open_lp_action(snapshot.current_price, snapshot.wallet_base, snapshot.wallet_quote)
+        action = self._build_open_lp_action(snapshot.current_price, snapshot.wallet_base, snapshot.wallet_quote)
         if action is None:
             return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="budget_unavailable"))
 
-        patch = DecisionPatch()
-        patch.set_lp_open_amounts[action.executor_config.id] = open_amounts
         return Decision(
             intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.SUBMIT_LP, reason="entry_open"),
             actions=[action],
-            patch=patch,
         )
 
     def _is_entry_triggered(self, current_price: Optional[Decimal]) -> bool:
@@ -1046,15 +1040,15 @@ class CLMMLPGuardedController(ControllerBase):
         current_price: Optional[Decimal],
         wallet_base: Decimal,
         wallet_quote: Decimal,
-    ) -> Tuple[Optional[CreateExecutorAction], Optional[Tuple[Decimal, Decimal]]]:
+    ) -> Optional[CreateExecutorAction]:
         _, amounts, _ = self._resolve_open_amounts(current_price, wallet_base, wallet_quote)
         if amounts is None:
-            return None, None
+            return None
         base_amt, quote_amt = amounts
         executor_config = self._create_lp_executor_config(base_amt, quote_amt, current_price)
         if executor_config is None:
-            return None, None
-        return CreateExecutorAction(controller_id=self.config.id, executor_config=executor_config), (base_amt, quote_amt)
+            return None
+        return CreateExecutorAction(controller_id=self.config.id, executor_config=executor_config)
 
     def _resolve_open_amounts(
         self,
@@ -1236,11 +1230,6 @@ class CLMMLPGuardedController(ControllerBase):
             self._ctx.swap.last_inventory_swap_ts = patch.set_swap_last_inventory_swap_ts
         if patch.set_swap_awaiting_balance_refresh is not None:
             self._ctx.swap.awaiting_balance_refresh = patch.set_swap_awaiting_balance_refresh
-
-        for executor_id, (base_amt, quote_amt) in patch.set_lp_open_amounts.items():
-            ctx = self._ctx.lp.setdefault(executor_id, LpContext())
-            ctx.open_base = base_amt
-            ctx.open_quote = quote_amt
 
     def _reconcile_done_swaps(self, now: float):
         for executor in self.executors_info:

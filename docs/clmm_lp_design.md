@@ -144,6 +144,7 @@ Controller 维护的钱包与派生数据：
   - 低于阈值则触发：stop 全部 LP，进入 `stop_loss_pause_sec` 冷却。
 - 若 `stop_loss_liquidation_mode: quote`：
   - 触发 liquidation swap（base -> quote）。
+  - `liquidation_target_base` 取触发时 LPView 的 `base_amount + base_fee` 累加值，避免依赖开仓缓存。
   - `liquidation_target_base` 会在每次 liquidation swap 完成后递减，直到归零（或 wallet_base 为 0）。
 
 ## 11. `processed_data`（对外观测字段）

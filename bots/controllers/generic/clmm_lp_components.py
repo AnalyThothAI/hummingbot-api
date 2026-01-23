@@ -244,8 +244,6 @@ class FeeEstimatorContext:
 @dataclass
 class LpContext:
     anchor: Optional[BudgetAnchor] = None
-    open_base: Optional[Decimal] = None
-    open_quote: Optional[Decimal] = None
     fee: FeeEstimatorContext = field(default_factory=FeeEstimatorContext)
 
 
@@ -318,7 +316,6 @@ class DecisionPatch:
     set_swap_awaiting_balance_refresh: Optional[bool] = None
     set_swap_last_inventory_swap_ts: Optional[float] = None
 
-    set_lp_open_amounts: Dict[str, Tuple[Decimal, Decimal]] = field(default_factory=dict)
 
 
 @dataclass
