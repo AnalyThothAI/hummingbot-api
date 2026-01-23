@@ -39,33 +39,6 @@ class IntentStage(str, Enum):
     STOP_LP = "STOP_LP"
 
 
-def to_decimal(value: object, default: Decimal = Decimal("0")) -> Decimal:
-    if value is None:
-        return default
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return default
-
-
-def to_optional_decimal(value: object) -> Optional[Decimal]:
-    if value is None:
-        return None
-    try:
-        return Decimal(str(value))
-    except Exception:
-        return None
-
-
-def to_optional_float(value: object) -> Optional[float]:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
 @dataclass(frozen=True)
 class TokenOrderMapper:
     trading_pair: str
@@ -213,6 +186,23 @@ class Snapshot:
 
 
 @dataclass(frozen=True)
+class Regions:
+    manual_stop: bool
+    failure_blocked: bool
+    has_active_swaps: bool
+    active_swap_label: Optional[str]
+    has_active_lp: bool
+    price_ok: bool
+    awaiting_balance_refresh: bool
+    stoploss_cooldown_active: bool
+    stoploss_pending_liquidation: bool
+    rebalance_pending: bool
+    rebalance_open_in_progress: bool
+    entry_triggered: bool
+    reenter_blocked: bool
+
+
+@dataclass(frozen=True)
 class PositionBudget:
     total_value_quote: Decimal
     target_base: Decimal
@@ -298,25 +288,76 @@ class ControllerContext:
     stoploss: StopLossContext = field(default_factory=StopLossContext)
     failure: FailureContext = field(default_factory=FailureContext)
 
+    def apply(self, patch: "DecisionPatch") -> None:
+        if patch.failure.set_reason is not None:
+            self.failure.blocked = True
+            self.failure.reason = patch.failure.set_reason
+
+        if patch.rebalance.clear_all:
+            self.rebalance.plans.clear()
+        if patch.rebalance.add_plans:
+            self.rebalance.plans.update(patch.rebalance.add_plans)
+        for executor_id in patch.rebalance.clear_plans:
+            self.rebalance.plans.pop(executor_id, None)
+        if patch.rebalance.record_rebalance_ts is not None:
+            ts = patch.rebalance.record_rebalance_ts
+            self.rebalance.last_rebalance_ts = ts
+            self.rebalance.timestamps.append(ts)
+
+        if patch.stoploss.until_ts is not None:
+            self.stoploss.until_ts = patch.stoploss.until_ts
+        if patch.stoploss.last_exit_reason is not None:
+            self.stoploss.last_exit_reason = patch.stoploss.last_exit_reason
+        if patch.stoploss.pending_liquidation is not None:
+            self.stoploss.pending_liquidation = patch.stoploss.pending_liquidation
+        if patch.stoploss.liquidation_target_base is not None:
+            self.stoploss.liquidation_target_base = patch.stoploss.liquidation_target_base
+        if patch.stoploss.last_liquidation_attempt_ts is not None:
+            self.stoploss.last_liquidation_attempt_ts = patch.stoploss.last_liquidation_attempt_ts
+
+        if patch.stoploss.pending_liquidation is False:
+            self.stoploss.liquidation_target_base = None
+
+        if patch.swap.last_inventory_swap_ts is not None:
+            self.swap.last_inventory_swap_ts = patch.swap.last_inventory_swap_ts
+        if patch.swap.awaiting_balance_refresh is not None:
+            self.swap.awaiting_balance_refresh = patch.swap.awaiting_balance_refresh
+
+
+@dataclass
+class FailurePatch:
+    set_reason: Optional[str] = None
+
+
+@dataclass
+class RebalancePatch:
+    clear_all: bool = False
+    add_plans: Dict[str, RebalancePlan] = field(default_factory=dict)
+    clear_plans: Set[str] = field(default_factory=set)
+    record_rebalance_ts: Optional[float] = None
+
+
+@dataclass
+class StopLossPatch:
+    until_ts: Optional[float] = None
+    last_exit_reason: Optional[str] = None
+    pending_liquidation: Optional[bool] = None
+    liquidation_target_base: Optional[Decimal] = None
+    last_liquidation_attempt_ts: Optional[float] = None
+
+
+@dataclass
+class SwapPatch:
+    awaiting_balance_refresh: Optional[bool] = None
+    last_inventory_swap_ts: Optional[float] = None
+
 
 @dataclass
 class DecisionPatch:
-    set_failure_reason: Optional[str] = None
-    clear_rebalance_all: bool = False
-    add_rebalance_plans: Dict[str, RebalancePlan] = field(default_factory=dict)
-    clear_rebalance_plans: Set[str] = field(default_factory=set)
-    record_rebalance_ts: Optional[float] = None
-
-    set_stoploss_until_ts: Optional[float] = None
-    set_stoploss_last_exit_reason: Optional[str] = None
-    set_stoploss_pending_liquidation: Optional[bool] = None
-    set_stoploss_liquidation_target_base: Optional[Decimal] = None
-    set_stoploss_last_liquidation_attempt_ts: Optional[float] = None
-
-    set_swap_awaiting_balance_refresh: Optional[bool] = None
-    set_swap_last_inventory_swap_ts: Optional[float] = None
-
-
+    failure: FailurePatch = field(default_factory=FailurePatch)
+    rebalance: RebalancePatch = field(default_factory=RebalancePatch)
+    stoploss: StopLossPatch = field(default_factory=StopLossPatch)
+    swap: SwapPatch = field(default_factory=SwapPatch)
 
 @dataclass
 class Decision:

@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Optional
 
-from .clmm_lp_components import FeeEstimatorContext
+from .components import FeeEstimatorContext
 
 
 class CostFilter:
@@ -109,4 +109,3 @@ class CostFilter:
             cls.FORCE_REBALANCE_MIN_SEC,
         )
         return (now - out_of_range_since) >= threshold
-

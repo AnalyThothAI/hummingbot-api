@@ -12,15 +12,15 @@
 
 **要改的部分（可读、可维护、契约清晰）**
 - 把 token 顺序/反转问题集中到 `TokenOrderMapper`（适配层）。
-- 把成本过滤独立成模块：`bots/controllers/generic/clmm_lp_cost_filter.py`。
+- 把成本过滤独立成模块：`bots/controllers/generic/clmm_lp_domain/cost_filter.py`。
 - Controller 主流程固定为：`snapshot -> reconcile -> decide -> apply_patch -> actions`。
 - 日志只保留关键异常/告警，不做大量节流/Debug 采样逻辑（避免性能与维护负担）。
 
 ## 2. 文件入口
 
 - Controller：`bots/controllers/generic/clmm_lp.py`
-- Types / Adapters / Context：`bots/controllers/generic/clmm_lp_components.py`
-- Cost Filter：`bots/controllers/generic/clmm_lp_cost_filter.py`
+- Types / Adapters / Context：`bots/controllers/generic/clmm_lp_domain/components.py`
+- Cost Filter：`bots/controllers/generic/clmm_lp_domain/cost_filter.py`
 - 配置示例：`bots/conf/controllers/clmm_lp.yml`
 - 官方参考（对比用）：`hummingbot/controllers/generic/lp_manager.py`
 - LP Executor：`hummingbot/hummingbot/strategy_v2/executors/lp_position_executor/`
@@ -53,7 +53,7 @@ Controller 通过 `TokenOrderMapper` 统一做三件事：
 ## 4. 三层结构（单文件入口 + 内部模块化）
 
 ### 4.1 适配层：TokenOrderMapper
-位置：`bots/controllers/generic/clmm_lp_components.py`。
+位置：`bots/controllers/generic/clmm_lp_domain/components.py`。
 - `strategy_amounts_to_lp()` / `strategy_bounds_to_lp()`：开仓时把金额与区间映射到 pool 顺序。
 - `lp_amounts_to_strategy()` / `lp_bounds_to_strategy()`：解析 executor 上报时映射回策略顺序。
 
@@ -132,7 +132,7 @@ Controller 维护的钱包与派生数据：
 
 ## 9. Cost Filter（独立模块）
 
-位置：`bots/controllers/generic/clmm_lp_cost_filter.py`，职责是：
+位置：`bots/controllers/generic/clmm_lp_domain/cost_filter.py`，职责是：
 - 从 `LPView` 的 pending fees（转换成 quote）更新 `FeeEstimatorContext.fee_rate_ewma`。
 - 依据固定窗口 `IN_RANGE_TIME_SEC` 与成本估算（fixed + swap 摩擦）判断是否允许 rebalance。
 - 提供 `should_force_rebalance()`：长时间 out-of-range 允许绕过过滤，避免永远不 rebalance。
@@ -169,5 +169,5 @@ Controller 维护的钱包与派生数据：
 
 ## 13. 验收（最小可验证标准）
 
-- 编译检查：`python -m py_compile bots/controllers/generic/clmm_lp.py bots/controllers/generic/clmm_lp_components.py bots/controllers/generic/clmm_lp_cost_filter.py`
+- 编译检查：`python -m py_compile bots/controllers/generic/clmm_lp.py bots/controllers/generic/clmm_lp_domain/components.py bots/controllers/generic/clmm_lp_domain/cost_filter.py`
 - 运行观察：启动 bot 后 `processed_data` 中不再出现 `router_price` 字段；rebalance/stoploss/entry 的 intent 与 actions 能对应到实际 executors 状态变化。
