@@ -128,6 +128,38 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
             raise ValueError("swap_min_value_pct must be between 0 and 1")
         return value
 
+    @field_validator("swap_slippage_pct", mode="before")
+    @classmethod
+    def validate_swap_slippage_pct(cls, v):
+        value = Decimal(str(v))
+        if value < 0 or value > 100:
+            raise ValueError("swap_slippage_pct must be between 0 and 100")
+        return value
+
+    @field_validator("swap_safety_buffer_pct", mode="before")
+    @classmethod
+    def validate_swap_safety_buffer_pct(cls, v):
+        value = Decimal(str(v))
+        if value < 0 or value > 100:
+            raise ValueError("swap_safety_buffer_pct must be between 0 and 100")
+        return value
+
+    @field_validator("hysteresis_pct", mode="before")
+    @classmethod
+    def validate_hysteresis_pct(cls, v):
+        value = Decimal(str(v))
+        if value < 0 or value > 100:
+            raise ValueError("hysteresis_pct must be between 0 and 100")
+        return value
+
+    @field_validator("stop_loss_pnl_pct", mode="before")
+    @classmethod
+    def validate_stop_loss_pnl_pct(cls, v):
+        value = Decimal(str(v))
+        if value < 0 or value > 1:
+            raise ValueError("stop_loss_pnl_pct must be between 0 and 1")
+        return value
+
     @field_validator("pool_trading_pair", mode="before")
     @classmethod
     def normalize_pool_trading_pair(cls, v):
@@ -186,9 +218,11 @@ class CLMMLPGuardedController(ControllerBase):
             self._rule_stoploss_trigger,
             self._rule_rebalance_stop,
             self._rule_lp_active_gate,
+            self._rule_wait_balance_refresh,
             self._rule_stoploss_liquidation,
             self._rule_stoploss_cooldown,
             self._rule_rebalance_reopen_or_wait,
+            self._rule_reenter_blocked,
             self._rule_entry,
         ]
 
@@ -207,14 +241,9 @@ class CLMMLPGuardedController(ControllerBase):
     async def update_processed_data(self):
         now = self.market_data_provider.time()
 
-        self._reconcile_done_swaps(now)
-
         await self._update_wallet_balances(now)
 
         snapshot = self._build_snapshot(now)
-
-        self._ensure_anchors(snapshot)
-        self._update_fee_rate_estimates(snapshot)
         self._latest_snapshot = snapshot
         self.processed_data.update({
             "current_price": snapshot.current_price,
@@ -246,6 +275,8 @@ class CLMMLPGuardedController(ControllerBase):
 
         self._reconcile_done_swaps(snapshot.now)
         self._reconcile_rebalance_plans(snapshot)
+        self._ensure_anchors(snapshot)
+        self._update_fee_rate_estimates(snapshot)
 
         decision = self._decide(snapshot)
         self._ctx.apply(decision.patch)
@@ -518,14 +549,12 @@ class CLMMLPGuardedController(ControllerBase):
 
     def _compute_regions(self, snapshot: Snapshot) -> Regions:
         label = snapshot.active_swaps[0].level_id if snapshot.active_swaps else None
-        price_ok = snapshot.current_price is not None and snapshot.current_price > 0
         return Regions(
             manual_stop=bool(self.config.manual_kill_switch),
             failure_blocked=bool(self._ctx.failure.blocked),
             has_active_swaps=bool(snapshot.active_swaps),
             active_swap_label=label,
             has_active_lp=bool(snapshot.active_lp),
-            price_ok=price_ok,
             awaiting_balance_refresh=bool(self._ctx.swap.awaiting_balance_refresh),
             stoploss_cooldown_active=snapshot.now < self._ctx.stoploss.until_ts,
             stoploss_pending_liquidation=bool(self._ctx.stoploss.pending_liquidation),
@@ -556,13 +585,13 @@ class CLMMLPGuardedController(ControllerBase):
     def _rule_failure_blocked(
         self,
         _: Snapshot,
-        __: ControllerContext,
+        ctx: ControllerContext,
         regions: Regions,
     ) -> Optional[Decision]:
         if not regions.failure_blocked:
             return None
         return Decision(
-            intent=Intent(flow=IntentFlow.FAILURE, stage=IntentStage.WAIT, reason=self._ctx.failure.reason or "lp_failure"),
+            intent=Intent(flow=IntentFlow.FAILURE, stage=IntentStage.WAIT, reason=ctx.failure.reason or "lp_failure"),
         )
 
     def _rule_detect_lp_failure(
@@ -612,18 +641,18 @@ class CLMMLPGuardedController(ControllerBase):
     def _rule_stoploss_trigger(
         self,
         snapshot: Snapshot,
-        _: ControllerContext,
+        ctx: ControllerContext,
         __: Regions,
     ) -> Optional[Decision]:
-        return self._decide_stoploss(snapshot)
+        return self._decide_stoploss(snapshot, ctx)
 
     def _rule_rebalance_stop(
         self,
         snapshot: Snapshot,
-        _: ControllerContext,
+        ctx: ControllerContext,
         __: Regions,
     ) -> Optional[Decision]:
-        return self._decide_rebalance_stops(snapshot)
+        return self._decide_rebalance_stops(snapshot, ctx)
 
     def _rule_lp_active_gate(
         self,
@@ -635,15 +664,31 @@ class CLMMLPGuardedController(ControllerBase):
             return Decision(intent=Intent(flow=IntentFlow.NONE, stage=IntentStage.WAIT, reason="lp_active"))
         return None
 
+    def _rule_wait_balance_refresh(
+        self,
+        _: Snapshot,
+        __: ControllerContext,
+        regions: Regions,
+    ) -> Optional[Decision]:
+        if not regions.awaiting_balance_refresh:
+            return None
+        if regions.rebalance_pending:
+            flow = IntentFlow.REBALANCE
+        elif regions.stoploss_pending_liquidation:
+            flow = IntentFlow.STOPLOSS
+        else:
+            flow = IntentFlow.ENTRY
+        return Decision(intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="wait_balance_refresh"))
+
     def _rule_stoploss_liquidation(
         self,
         snapshot: Snapshot,
-        _: ControllerContext,
+        ctx: ControllerContext,
         regions: Regions,
     ) -> Optional[Decision]:
         if not regions.stoploss_pending_liquidation:
             return None
-        return self._decide_liquidation(snapshot)
+        return self._decide_liquidation(snapshot, ctx)
 
     def _rule_stoploss_cooldown(
         self,
@@ -658,23 +703,37 @@ class CLMMLPGuardedController(ControllerBase):
     def _rule_rebalance_reopen_or_wait(
         self,
         snapshot: Snapshot,
-        _: ControllerContext,
+        ctx: ControllerContext,
         regions: Regions,
     ) -> Optional[Decision]:
         if not regions.rebalance_pending:
             return None
-        rebalance_open = self._decide_rebalance_reopen(snapshot)
+        if regions.rebalance_open_in_progress:
+            return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="open_in_progress"))
+        rebalance_open = self._decide_rebalance_reopen(snapshot, ctx)
         if rebalance_open is not None:
             return rebalance_open
         return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="rebalance_wait"))
 
+    def _rule_reenter_blocked(
+        self,
+        _: Snapshot,
+        __: ControllerContext,
+        regions: Regions,
+    ) -> Optional[Decision]:
+        if not regions.reenter_blocked:
+            return None
+        return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="reenter_disabled"))
+
     def _rule_entry(
         self,
         snapshot: Snapshot,
-        _: ControllerContext,
-        __: Regions,
+        ctx: ControllerContext,
+        regions: Regions,
     ) -> Optional[Decision]:
-        return self._decide_entry(snapshot)
+        if not regions.entry_triggered:
+            return Decision(intent=Intent(flow=IntentFlow.NONE, stage=IntentStage.NONE, reason="idle"))
+        return self._decide_entry(snapshot, ctx)
 
     def _detect_lp_failure(self) -> Optional[Tuple[str, str]]:
         for executor in self.executors_info:
@@ -689,7 +748,7 @@ class CLMMLPGuardedController(ControllerBase):
                 return executor.id, "executor_failed"
         return None
 
-    def _decide_stoploss(self, snapshot: Snapshot) -> Optional[Decision]:
+    def _decide_stoploss(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[Decision]:
         if self.config.stop_loss_pnl_pct <= 0:
             return None
         current_price = snapshot.current_price
@@ -698,7 +757,7 @@ class CLMMLPGuardedController(ControllerBase):
 
         triggered = False
         for lp_view in snapshot.active_lp:
-            lp_ctx = self._ctx.lp.get(lp_view.executor_id)
+            lp_ctx = ctx.lp.get(lp_view.executor_id)
             anchor = lp_ctx.anchor if lp_ctx is not None else None
             if anchor is None or anchor.value_quote <= 0:
                 continue
@@ -734,10 +793,10 @@ class CLMMLPGuardedController(ControllerBase):
             total += max(Decimal("0"), lp_view.base_amount + lp_view.base_fee)
         return total
 
-    def _decide_liquidation(self, snapshot: Snapshot) -> Decision:
+    def _decide_liquidation(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
-        if self._ctx.stoploss.last_liquidation_attempt_ts > 0 and self.config.cooldown_seconds > 0:
-            if (now - self._ctx.stoploss.last_liquidation_attempt_ts) < self.config.cooldown_seconds:
+        if ctx.stoploss.last_liquidation_attempt_ts > 0 and self.config.cooldown_seconds > 0:
+            if (now - ctx.stoploss.last_liquidation_attempt_ts) < self.config.cooldown_seconds:
                 return Decision(intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="liquidation_cooldown"))
 
         current_price = snapshot.current_price
@@ -745,7 +804,7 @@ class CLMMLPGuardedController(ControllerBase):
             return Decision(intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="price_unavailable"))
 
         base_to_liquidate = snapshot.wallet_base
-        target = self._ctx.stoploss.liquidation_target_base
+        target = ctx.stoploss.liquidation_target_base
         if target is not None:
             base_to_liquidate = min(base_to_liquidate, max(Decimal("0"), target))
 
@@ -777,14 +836,14 @@ class CLMMLPGuardedController(ControllerBase):
             patch=patch,
         )
 
-    def _decide_rebalance_stops(self, snapshot: Snapshot) -> Optional[Decision]:
+    def _decide_rebalance_stops(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[Decision]:
         current_price = snapshot.current_price
         now = snapshot.now
         stop_actions: List[ExecutorAction] = []
         patch = DecisionPatch()
 
         # Idempotent stop: once STOP_REQUESTED, keep emitting StopExecutorAction until the LP closes.
-        for executor_id, plan in self._ctx.rebalance.plans.items():
+        for executor_id, plan in ctx.rebalance.plans.items():
             if plan.stage != RebalanceStage.STOP_REQUESTED:
                 continue
             lp_view = snapshot.lp.get(executor_id)
@@ -796,7 +855,7 @@ class CLMMLPGuardedController(ControllerBase):
 
         # Fresh out-of-range detection: request a rebalance stop and create a STOP_REQUESTED plan.
         for lp_view in snapshot.active_lp:
-            if lp_view.executor_id in self._ctx.rebalance.plans:
+            if lp_view.executor_id in ctx.rebalance.plans:
                 continue
             if lp_view.in_transition:
                 continue
@@ -822,12 +881,12 @@ class CLMMLPGuardedController(ControllerBase):
                 continue
             if (now - out_of_range_since) < self.config.rebalance_seconds:
                 continue
-            if (now - self._ctx.rebalance.last_rebalance_ts) < self.config.cooldown_seconds:
+            if (now - ctx.rebalance.last_rebalance_ts) < self.config.cooldown_seconds:
                 continue
-            if not self._can_rebalance_now(now):
+            if not self._can_rebalance_now(now, ctx):
                 continue
 
-            fee_rate_ewma = self._ctx.lp.get(lp_view.executor_id, LpContext()).fee.fee_rate_ewma
+            fee_rate_ewma = ctx.lp.get(lp_view.executor_id, LpContext()).fee.fee_rate_ewma
             allow_rebalance = CostFilter.allow_rebalance(
                 enabled=self.config.cost_filter_enabled,
                 position_value=self._estimate_position_value(lp_view, effective_price),
@@ -870,27 +929,21 @@ class CLMMLPGuardedController(ControllerBase):
             return (price - upper) / upper * Decimal("100")
         return Decimal("0")
 
-    def _can_rebalance_now(self, now: float) -> bool:
+    def _can_rebalance_now(self, now: float, ctx: ControllerContext) -> bool:
         if self.config.max_rebalances_per_hour <= 0:
             return True
-        while self._ctx.rebalance.timestamps and (now - self._ctx.rebalance.timestamps[0] > 3600):
-            self._ctx.rebalance.timestamps.popleft()
-        return len(self._ctx.rebalance.timestamps) < self.config.max_rebalances_per_hour
+        while ctx.rebalance.timestamps and (now - ctx.rebalance.timestamps[0] > 3600):
+            ctx.rebalance.timestamps.popleft()
+        return len(ctx.rebalance.timestamps) < self.config.max_rebalances_per_hour
 
-    def _decide_rebalance_reopen(self, snapshot: Snapshot) -> Optional[Decision]:
-        if self._ctx.swap.awaiting_balance_refresh:
-            return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="wait_balance_refresh"))
-
+    def _decide_rebalance_reopen(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[Decision]:
         current_price = snapshot.current_price
         if current_price is None or current_price <= 0:
             return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="price_unavailable"))
 
-        if any(plan.stage == RebalanceStage.OPEN_REQUESTED for plan in self._ctx.rebalance.plans.values()):
-            return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="open_in_progress"))
-
         eligible_ids = [
             executor_id
-            for executor_id, plan in self._ctx.rebalance.plans.items()
+            for executor_id, plan in ctx.rebalance.plans.items()
             if plan.stage == RebalanceStage.WAIT_REOPEN
             and plan.open_executor_id is None
             and snapshot.now >= plan.reopen_after_ts
@@ -899,7 +952,7 @@ class CLMMLPGuardedController(ControllerBase):
         if not eligible_ids:
             return None
 
-        executor_id = sorted(eligible_ids, key=lambda i: self._ctx.rebalance.plans[i].reopen_after_ts)[0]
+        executor_id = sorted(eligible_ids, key=lambda i: ctx.rebalance.plans[i].reopen_after_ts)[0]
 
         delta, reason = self._compute_inventory_delta(current_price, snapshot.wallet_base, snapshot.wallet_quote)
         if delta is None:
@@ -908,6 +961,7 @@ class CLMMLPGuardedController(ControllerBase):
 
         swap_plan = self._maybe_plan_inventory_swap(
             now=snapshot.now,
+            ctx=ctx,
             current_price=current_price,
             delta_base=delta_base,
             delta_quote_value=delta_quote_value,
@@ -920,7 +974,7 @@ class CLMMLPGuardedController(ControllerBase):
         if action is None:
             return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="budget_unavailable"))
 
-        prev_plan = self._ctx.rebalance.plans.get(executor_id)
+        prev_plan = ctx.rebalance.plans.get(executor_id)
         reopen_after_ts = prev_plan.reopen_after_ts if prev_plan is not None else snapshot.now
         patch = DecisionPatch()
         patch.rebalance.add_plans[executor_id] = RebalancePlan(
@@ -935,26 +989,8 @@ class CLMMLPGuardedController(ControllerBase):
             patch=patch,
         )
 
-    def _decide_entry(self, snapshot: Snapshot) -> Decision:
+    def _decide_entry(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
-
-        if snapshot.active_lp:
-            return Decision(intent=Intent(flow=IntentFlow.NONE, stage=IntentStage.WAIT, reason="lp_active"))
-
-        if not self._is_entry_triggered(snapshot.current_price):
-            return Decision(intent=Intent(flow=IntentFlow.NONE, stage=IntentStage.NONE, reason="idle"))
-
-        if not self.config.reenter_enabled and self._ctx.stoploss.last_exit_reason == "stop_loss":
-            return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="reenter_disabled"))
-
-        if now < self._ctx.stoploss.until_ts:
-            return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="stoploss_cooldown"))
-
-        if self._ctx.rebalance.plans:
-            return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="rebalance_pending"))
-
-        if self._ctx.swap.awaiting_balance_refresh:
-            return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="wait_balance_refresh"))
 
         delta, reason = self._compute_inventory_delta(snapshot.current_price, snapshot.wallet_base, snapshot.wallet_quote)
         if delta is None:
@@ -963,6 +999,7 @@ class CLMMLPGuardedController(ControllerBase):
 
         swap_plan = self._maybe_plan_inventory_swap(
             now=now,
+            ctx=ctx,
             current_price=snapshot.current_price,
             delta_base=delta_base,
             delta_quote_value=delta_quote_value,
@@ -1046,6 +1083,7 @@ class CLMMLPGuardedController(ControllerBase):
         self,
         *,
         now: float,
+        ctx: ControllerContext,
         current_price: Optional[Decimal],
         delta_base: Decimal,
         delta_quote_value: Decimal,
@@ -1058,10 +1096,10 @@ class CLMMLPGuardedController(ControllerBase):
         if not self.config.auto_swap_enabled:
             return Decision(intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="swap_required"))
 
-        if self.config.cooldown_seconds > 0 and (now - self._ctx.swap.last_inventory_swap_ts) < self.config.cooldown_seconds:
+        if self.config.cooldown_seconds > 0 and (now - ctx.swap.last_inventory_swap_ts) < self.config.cooldown_seconds:
             return Decision(intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="swap_cooldown"))
 
-        swap_action = self._build_inventory_swap_action(current_price, delta_base, delta_quote_value)
+        swap_action = self._build_inventory_swap_action(current_price, delta_base)
         if swap_action is None:
             return Decision(intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="swap_required"))
 
@@ -1082,11 +1120,8 @@ class CLMMLPGuardedController(ControllerBase):
         self,
         current_price: Optional[Decimal],
         delta_base: Decimal,
-        delta_quote_value: Decimal,
     ) -> Optional[CreateExecutorAction]:
         if current_price is None or current_price <= 0:
-            return None
-        if delta_quote_value < self._swap_min_quote_value():
             return None
 
         if delta_base > 0:

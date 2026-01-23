@@ -192,7 +192,6 @@ class Regions:
     has_active_swaps: bool
     active_swap_label: Optional[str]
     has_active_lp: bool
-    price_ok: bool
     awaiting_balance_refresh: bool
     stoploss_cooldown_active: bool
     stoploss_pending_liquidation: bool
