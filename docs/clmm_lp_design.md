@@ -365,7 +365,7 @@ Controller 将关键内部状态输出到 `processed_data`，便于观察与诊�
 - `controller_state` / `lp_state`：控制器与 LP executor 状态。
 - `stop_loss_anchor`：预算止损锚定值（quote 计价）。
 - `pending_liquidation`：是否等待止损清仓。
-- `rebalance_stage`：再平衡阶段（WAIT_REOPEN / READY_TO_OPEN）。
+- `rebalance_pending` / `rebalance_plans`：再平衡计划数量与明细（按 `executor_id` 跟踪 stage/reopen_after_ts/open_executor_id）。
 - `inventory_swap_failed`：最近一次库存纠偏 swap 是否失败。
 - `lp_failure_blocked`：LP executor 是否已进入失败锁。
 

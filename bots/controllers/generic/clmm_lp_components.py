@@ -39,102 +39,6 @@ class IntentStage(str, Enum):
     STOP_LP = "STOP_LP"
 
 
-# Fixed cost-filter constants to keep behavior deterministic and avoid parameter sprawl.
-COST_FILTER_FEE_EWMA_ALPHA = Decimal("0.1")
-COST_FILTER_FEE_SAMPLE_MIN_SECONDS = Decimal("10")
-COST_FILTER_IN_RANGE_TIME_SEC = Decimal("3600")
-COST_FILTER_SWAP_NOTIONAL_PCT = Decimal("0.5")
-COST_FILTER_SWAP_FEE_BUFFER_PCT = Decimal("0.3")
-COST_FILTER_FEE_RATE_FLOOR = Decimal("0.000000001")
-COST_FILTER_SAFETY_FACTOR = Decimal("2")
-COST_FILTER_FORCE_REBALANCE_MULTIPLIER = 10
-COST_FILTER_FORCE_REBALANCE_MIN_SEC = 600
-
-
-def evaluate_cost_filter(
-    *,
-    enabled: bool,
-    current_price: Decimal,
-    position_value: Decimal,
-    fee_rate_ewma: Optional[Decimal],
-    fee_rate_bootstrap_quote_per_hour: Decimal,
-    position_width_pct: Decimal,
-    auto_swap_enabled: bool,
-    swap_slippage_pct: Decimal,
-    fixed_cost_quote: Decimal,
-    max_payback_sec: int,
-) -> Tuple[bool, Dict[str, object]]:
-    details: Dict[str, object] = {}
-    if not enabled:
-        details["reason"] = "disabled"
-        return True, details
-    if current_price <= 0:
-        details["reason"] = "invalid_price"
-        return False, details
-
-    fee_rate = fee_rate_ewma
-    fee_rate_source = "ewma"
-    if fee_rate is None or fee_rate <= 0:
-        fee_rate = fee_rate_bootstrap_quote_per_hour / Decimal("3600")
-        fee_rate_source = "bootstrap" if fee_rate > 0 else "zero"
-
-    half_width = (position_width_pct / Decimal("100")) / Decimal("2")
-    in_range_time = COST_FILTER_IN_RANGE_TIME_SEC
-
-    expected_fees = fee_rate * in_range_time
-    fixed_cost = max(Decimal("0"), fixed_cost_quote)
-    if auto_swap_enabled:
-        swap_notional_pct = COST_FILTER_SWAP_NOTIONAL_PCT
-    else:
-        swap_notional_pct = Decimal("0")
-    swap_notional = position_value * swap_notional_pct
-    swap_fee_pct = max(Decimal("0"), swap_slippage_pct + COST_FILTER_SWAP_FEE_BUFFER_PCT)
-    swap_cost = swap_notional * (swap_fee_pct / Decimal("100"))
-    cost = fixed_cost + swap_cost
-
-    details.update({
-        "fee_rate": fee_rate,
-        "fee_rate_source": fee_rate_source,
-        "in_range_time": in_range_time,
-        "in_range_source": "fixed",
-        "lower_width": half_width,
-        "upper_width": half_width,
-        "expected_fees": expected_fees,
-        "position_value": position_value,
-        "fixed_cost": fixed_cost,
-        "swap_notional": swap_notional,
-        "swap_cost": swap_cost,
-        "cost": cost,
-    })
-    if cost <= 0:
-        details["reason"] = "zero_cost"
-        return True, details
-
-    if expected_fees < (cost * COST_FILTER_SAFETY_FACTOR):
-        details["reason"] = "fee_rate_zero" if fee_rate <= 0 else "expected_fee_below_threshold"
-        return False, details
-
-    min_fee_rate = max(Decimal("0"), COST_FILTER_FEE_RATE_FLOOR)
-    payback = cost / max(fee_rate, min_fee_rate)
-    details["payback_sec"] = payback
-    details["max_payback_sec"] = Decimal(str(max_payback_sec))
-    if payback > Decimal(str(max_payback_sec)):
-        details["reason"] = "payback_exceeded"
-        return False, details
-    details["reason"] = "approved"
-    return True, details
-
-
-def should_force_rebalance(now: float, out_of_range_since: float, rebalance_seconds: int) -> bool:
-    if rebalance_seconds <= 0:
-        return False
-    threshold = max(
-        rebalance_seconds * COST_FILTER_FORCE_REBALANCE_MULTIPLIER,
-        COST_FILTER_FORCE_REBALANCE_MIN_SEC,
-    )
-    return (now - out_of_range_since) >= threshold
-
-
 def to_decimal(value: object, default: Decimal = Decimal("0")) -> Decimal:
     if value is None:
         return default
@@ -150,6 +54,15 @@ def to_optional_decimal(value: object) -> Optional[Decimal]:
     try:
         return Decimal(str(value))
     except Exception:
+        return None
+
+
+def to_optional_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
         return None
 
 
@@ -285,7 +198,6 @@ class SwapView:
 class Snapshot:
     now: float
     current_price: Optional[Decimal]
-    pool_price: Optional[Decimal]
     router_price: Optional[Decimal]
     wallet_base: Decimal
     wallet_quote: Decimal
@@ -316,13 +228,6 @@ class BudgetAnchor:
 
 
 @dataclass(frozen=True)
-class EntryLog:
-    reason: str
-    current_price: Optional[Decimal]
-    details: Optional[Dict[str, object]] = None
-
-
-@dataclass(frozen=True)
 class Intent:
     flow: IntentFlow
     stage: IntentStage = IntentStage.NONE
@@ -345,9 +250,18 @@ class LpContext:
     fee: FeeEstimatorContext = field(default_factory=FeeEstimatorContext)
 
 
+class RebalanceStage(str, Enum):
+    STOP_REQUESTED = "STOP_REQUESTED"
+    WAIT_REOPEN = "WAIT_REOPEN"
+    OPEN_REQUESTED = "OPEN_REQUESTED"
+
+
 @dataclass(frozen=True)
 class RebalancePlan:
-    reopen_after_ts: float
+    stage: RebalanceStage
+    reopen_after_ts: float = 0.0
+    open_executor_id: Optional[str] = None
+    requested_at_ts: float = 0.0
 
 
 @dataclass
@@ -396,8 +310,6 @@ class DecisionPatch:
     clear_rebalance_all: bool = False
     add_rebalance_plans: Dict[str, RebalancePlan] = field(default_factory=dict)
     clear_rebalance_plans: Set[str] = field(default_factory=set)
-    clear_out_of_range_since: Set[str] = field(default_factory=set)
-    update_out_of_range_since: Dict[str, float] = field(default_factory=dict)
     record_rebalance_ts: Optional[float] = None
 
     set_stoploss_until_ts: Optional[float] = None
@@ -406,6 +318,7 @@ class DecisionPatch:
     set_stoploss_liquidation_target_base: Optional[Decimal] = None
     set_stoploss_last_liquidation_attempt_ts: Optional[float] = None
 
+    set_swap_awaiting_balance_refresh: Optional[bool] = None
     set_swap_last_inventory_swap_ts: Optional[float] = None
     set_swap_inventory_swap_failed: Optional[bool] = None
 
@@ -416,6 +329,4 @@ class DecisionPatch:
 class Decision:
     intent: Intent
     actions: List[ExecutorAction] = field(default_factory=list)
-    entry_log: Optional[EntryLog] = None
     patch: DecisionPatch = field(default_factory=DecisionPatch)
-
