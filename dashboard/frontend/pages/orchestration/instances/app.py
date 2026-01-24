@@ -15,15 +15,14 @@ backend_api_client = get_backend_api_client()
 # Initialize session state for auto-refresh and selections
 if "auto_refresh_enabled" not in st.session_state:
     st.session_state.auto_refresh_enabled = True
-if "refresh_interval" not in st.session_state:
-    st.session_state.refresh_interval = 10
 if "selected_instance" not in st.session_state:
     st.session_state.selected_instance = None
 
-REFRESH_OPTIONS = [10, 30, 60]
+REFRESH_INTERVAL = 10
 
 STATUS_REASON_MAP = {
     "mqtt_disconnected": "MQTT disconnected",
+    "mqtt_stale": "No recent MQTT signal",
     "container_stopped": "Container stopped",
     "container_missing": "Container not found",
 }
@@ -67,6 +66,22 @@ def format_number(value: Optional[float], precision: int = 2) -> str:
     except (TypeError, ValueError):
         return "-"
     return f"{number:,.{precision}f}"
+
+
+def format_age(seconds: Optional[float]) -> Optional[str]:
+    if seconds is None:
+        return None
+    try:
+        total_seconds = max(0, int(seconds))
+    except (TypeError, ValueError):
+        return None
+    minutes, secs = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h {minutes}m"
+    if minutes:
+        return f"{minutes}m {secs}s"
+    return f"{secs}s"
 
 
 def response_ok(response: Dict[str, Any]) -> bool:
@@ -433,52 +448,61 @@ def render_overview(instances: List[Dict[str, Any]]):
         mqtt_status = instance.get("mqtt_status", "unknown")
         health_state = instance.get("health_state", "unknown")
         reason = instance.get("reason")
-        image = instance.get("image")
+        last_seen_label = format_age(instance.get("mqtt_last_seen_age"))
 
         with st.container(border=True):
             st.markdown(f"{format_label(health_state, HEALTH_LABELS)} **{bot_name}**")
-            st.caption(
-                f"Docker: {format_label(docker_status, DOCKER_LABELS)} | MQTT: {format_label(mqtt_status, MQTT_LABELS)}"
-            )
+            meta_parts = [
+                f"Docker: {format_label(docker_status, DOCKER_LABELS)}",
+                f"MQTT: {format_label(mqtt_status, MQTT_LABELS)}",
+            ]
+            if last_seen_label:
+                meta_parts.append(f"Last seen {last_seen_label} ago")
+            st.caption(" | ".join(meta_parts))
             if reason:
                 st.caption(f"Reason: {STATUS_REASON_MAP.get(reason, reason)}")
-            if image:
-                st.caption(f"Image: {image}")
 
             action_cols = st.columns([1, 1, 1])
+            primary_label = "—"
+            primary_action = None
             if docker_status == "running":
-                with action_cols[0]:
-                    if mqtt_status in {"connected", "stale"}:
-                        if st.button("⏹️ Stop Bot", key=f"stop_bot_{bot_name}", use_container_width=True):
-                            stop_bot(bot_name)
-                    else:
-                        if st.button("⛔ Stop Container", key=f"stop_container_{bot_name}", use_container_width=True):
-                            stop_container(bot_name)
-                with action_cols[1]:
-                    if st.button("📦 Archive", key=f"archive_{bot_name}", use_container_width=True):
-                        archive_bot(bot_name, docker_status)
-                with action_cols[2]:
-                    if st.button("🔍 Inspect", key=f"inspect_{bot_name}", use_container_width=True):
-                        st.session_state.selected_instance = bot_name
-            else:
-                with action_cols[0]:
-                    if docker_status in {"exited", "created", "dead"}:
-                        if st.button("▶️ Start Container", key=f"start_container_{bot_name}", use_container_width=True):
-                            start_container(bot_name)
-                    elif docker_status == "missing":
-                        if mqtt_status in {"connected", "stale"}:
-                            if st.button("⏹️ Stop Bot", key=f"stop_orphan_{bot_name}", use_container_width=True):
-                                stop_bot(bot_name)
-                        else:
-                            if st.button("➕ Launch New", key=f"launch_{bot_name}", use_container_width=True):
-                                st.switch_page("frontend/pages/orchestration/launch_bot_v2/app.py")
-                with action_cols[1]:
-                    if docker_status != "missing":
-                        if st.button("📦 Archive", key=f"archive_{bot_name}", use_container_width=True):
-                            archive_bot(bot_name, docker_status)
-                with action_cols[2]:
-                    if st.button("🔍 Inspect", key=f"inspect_{bot_name}", use_container_width=True):
-                        st.session_state.selected_instance = bot_name
+                if mqtt_status in {"connected", "stale"}:
+                    primary_label = "⏹️ Stop Bot"
+                    primary_action = lambda name=bot_name: stop_bot(name)
+                else:
+                    primary_label = "⛔ Stop Container"
+                    primary_action = lambda name=bot_name: stop_container(name)
+            elif docker_status in {"exited", "created", "dead"}:
+                primary_label = "▶️ Start Container"
+                primary_action = lambda name=bot_name: start_container(name)
+            elif docker_status == "missing":
+                if mqtt_status in {"connected", "stale"}:
+                    primary_label = "⏹️ Stop Bot"
+                    primary_action = lambda name=bot_name: stop_bot(name)
+                else:
+                    primary_label = "➕ Launch New"
+                    primary_action = lambda: st.switch_page("frontend/pages/orchestration/launch_bot_v2/app.py")
+
+            with action_cols[0]:
+                if st.button(
+                    primary_label,
+                    key=f"primary_{bot_name}",
+                    use_container_width=True,
+                    disabled=primary_action is None,
+                ):
+                    if primary_action:
+                        primary_action()
+            with action_cols[1]:
+                if st.button(
+                    "📦 Archive",
+                    key=f"archive_{bot_name}",
+                    use_container_width=True,
+                    disabled=docker_status == "missing",
+                ):
+                    archive_bot(bot_name, docker_status)
+            with action_cols[2]:
+                if st.button("🔍 Inspect", key=f"inspect_{bot_name}", use_container_width=True):
+                    st.session_state.selected_instance = bot_name
 
 
 def render_controller_tables(bot_name: str, performance: Dict[str, Any], controller_configs: List[Dict[str, Any]]):
@@ -746,8 +770,8 @@ def render_inspector(instances: List[Dict[str, Any]]):
     with status_cols[2]:
         st.metric("MQTT", format_label(mqtt_status, MQTT_LABELS))
     with status_cols[3]:
-        recently_active = "Yes" if instance.get("recently_active") else "No"
-        st.metric("Recently Active", recently_active)
+        last_seen_label = format_age(instance.get("mqtt_last_seen_age"))
+        st.metric("Last Seen", f"{last_seen_label} ago" if last_seen_label else "-")
 
     if reason:
         st.caption(f"Reason: {STATUS_REASON_MAP.get(reason, reason)}")
@@ -770,32 +794,47 @@ def render_inspector(instances: List[Dict[str, Any]]):
         else:
             bot_data = {}
 
+        primary_label = "—"
+        primary_action = None
+        if docker_status == "running":
+            if bot_status_value == "stopped":
+                primary_label = "▶️ Start Bot"
+                primary_action = lambda name=bot_name: start_bot(name)
+            elif mqtt_status in {"connected", "stale"}:
+                primary_label = "⏹️ Stop Bot"
+                primary_action = lambda name=bot_name: stop_bot(name)
+            else:
+                primary_label = "⛔ Stop Container"
+                primary_action = lambda name=bot_name: stop_container(name)
+        elif docker_status in {"exited", "created", "dead"}:
+            primary_label = "▶️ Start Container"
+            primary_action = lambda name=bot_name: start_container(name)
+        elif docker_status == "missing":
+            if mqtt_status in {"connected", "stale"}:
+                primary_label = "⏹️ Stop Bot"
+                primary_action = lambda name=bot_name: stop_bot(name)
+            else:
+                primary_label = "➕ Launch New"
+                primary_action = lambda: st.switch_page("frontend/pages/orchestration/launch_bot_v2/app.py")
+
         with action_cols[0]:
-            if docker_status == "running":
-                if bot_status_value == "stopped":
-                    if st.button("▶️ Start Bot", key=f"start_bot_{bot_name}", use_container_width=True):
-                        start_bot(bot_name)
-                else:
-                    if mqtt_status in {"connected", "stale"}:
-                        if st.button("⏹️ Stop Bot", key=f"stop_bot_inspect_{bot_name}", use_container_width=True):
-                            stop_bot(bot_name)
-                    else:
-                        if st.button("⛔ Stop Container", key=f"stop_container_inspect_{bot_name}", use_container_width=True):
-                            stop_container(bot_name)
-            elif docker_status in {"exited", "created", "dead"}:
-                if st.button("▶️ Start Container", key=f"start_container_inspect_{bot_name}", use_container_width=True):
-                    start_container(bot_name)
-            elif docker_status == "missing":
-                if mqtt_status in {"connected", "stale"}:
-                    if st.button("⏹️ Stop Bot", key=f"stop_orphan_inspect_{bot_name}", use_container_width=True):
-                        stop_bot(bot_name)
-                else:
-                    st.caption("Container missing. Re-deploy from Launch Bot.")
+            if st.button(
+                primary_label,
+                key=f"primary_inspect_{bot_name}",
+                use_container_width=True,
+                disabled=primary_action is None,
+            ):
+                if primary_action:
+                    primary_action()
 
         with action_cols[1]:
-            if docker_status != "missing":
-                if st.button("📦 Archive", key=f"archive_inspect_{bot_name}", use_container_width=True):
-                    archive_bot(bot_name, docker_status)
+            if st.button(
+                "📦 Archive",
+                key=f"archive_inspect_{bot_name}",
+                use_container_width=True,
+                disabled=docker_status == "missing",
+            ):
+                archive_bot(bot_name, docker_status)
 
         with action_cols[2]:
             if st.button("📜 Logs Page", key=f"open_logs_{bot_name}", use_container_width=True):
@@ -837,27 +876,20 @@ def render_inspector(instances: List[Dict[str, Any]]):
 st.title("🦅 Hummingbot Instances")
 st.caption("Manage container lifecycle, controller health, and logs in one place.")
 
-header_cols = st.columns([2, 1, 1, 1])
+header_cols = st.columns([3, 1, 1])
 status_placeholder = header_cols[0].empty()
 
 with header_cols[1]:
-    st.session_state.refresh_interval = st.selectbox(
-        "Refresh (sec)",
-        options=REFRESH_OPTIONS,
-        index=REFRESH_OPTIONS.index(st.session_state.refresh_interval),
-    )
-
-with header_cols[2]:
     auto_refresh_label = "⏸️ Pause Auto-refresh" if st.session_state.auto_refresh_enabled else "▶️ Start Auto-refresh"
     if st.button(auto_refresh_label, use_container_width=True):
         st.session_state.auto_refresh_enabled = not st.session_state.auto_refresh_enabled
 
-with header_cols[3]:
+with header_cols[2]:
     if st.button("🔄 Refresh Now", use_container_width=True):
         pass
 
 
-@st.fragment(run_every=st.session_state.refresh_interval if st.session_state.auto_refresh_enabled else None)
+@st.fragment(run_every=REFRESH_INTERVAL if st.session_state.auto_refresh_enabled else None)
 def show_bot_instances():
     """Fragment to display bot instances with auto-refresh."""
     try:
@@ -886,7 +918,7 @@ def show_bot_instances():
 
         if st.session_state.auto_refresh_enabled:
             status_placeholder.info(
-                f"🔄 Auto-refreshing every {st.session_state.refresh_interval} seconds · "
+                f"🔄 Auto-refreshing every {REFRESH_INTERVAL} seconds · "
                 f"Running {counts['running']} · Degraded {counts['degraded']} · "
                 f"Stopped {counts['stopped']} · Orphaned {counts['orphaned']}"
             )
