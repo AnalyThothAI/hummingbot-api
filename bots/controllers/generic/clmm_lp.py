@@ -333,8 +333,8 @@ class CLMMLPGuardedController(ControllerBase):
     async def _update_wallet_balances(self, connector) -> None:
         try:
             await asyncio.wait_for(connector.update_balances(), timeout=3.0)
-            self._wallet_base = Decimal(str(connector.get_balance(self._tokens.base_token) or 0))
-            self._wallet_quote = Decimal(str(connector.get_balance(self._tokens.quote_token) or 0))
+            self._wallet_base = Decimal(str(connector.get_available_balance(self._tokens.base_token) or 0))
+            self._wallet_quote = Decimal(str(connector.get_available_balance(self._tokens.quote_token) or 0))
             self._last_balance_update_ts = self.market_data_provider.time()
             self._ctx.swap.awaiting_balance_refresh = False
         except Exception:
@@ -427,19 +427,6 @@ class CLMMLPGuardedController(ControllerBase):
                     self._ctx.swap.awaiting_balance_refresh = True
                     self._ctx.rebalance.plans.pop(executor_id, None)
                     continue
-                if plan.requested_at_ts > 0 and (now - plan.requested_at_ts) > 30.0:
-                    self.logger().warning(
-                        "Rebalance open request timed out: old_executor=%s expected_new_executor=%s",
-                        executor_id,
-                        open_id,
-                    )
-                    if open_id:
-                        self._ctx.lp.pop(open_id, None)
-                    self._ctx.rebalance.plans[executor_id] = RebalancePlan(
-                        stage=RebalanceStage.WAIT_REOPEN,
-                        reopen_after_ts=max(plan.reopen_after_ts, now),
-                        requested_at_ts=now,
-                    )
             elif plan.stage == RebalanceStage.STOP_REQUESTED:
                 old_lp = snapshot.lp.get(executor_id)
                 if old_lp is None or not old_lp.is_active:
