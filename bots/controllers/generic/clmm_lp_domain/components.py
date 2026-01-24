@@ -10,18 +10,6 @@ from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
 
-class ControllerState(str, Enum):
-    IDLE = "IDLE"
-    ACTIVE = "ACTIVE"
-    REBALANCE_WAIT_CLOSE = "REBALANCE_WAIT_CLOSE"
-    INVENTORY_SWAP = "INVENTORY_SWAP"
-    READY_TO_OPEN = "READY_TO_OPEN"
-    WAIT_SWAP = "WAIT_SWAP"
-    STOPLOSS_PAUSE = "STOPLOSS_PAUSE"
-    MANUAL_STOP = "MANUAL_STOP"
-    LP_FAILURE = "LP_FAILURE"
-
-
 class IntentFlow(str, Enum):
     NONE = "NONE"
     ENTRY = "ENTRY"
@@ -37,6 +25,11 @@ class IntentStage(str, Enum):
     SUBMIT_SWAP = "SUBMIT_SWAP"
     SUBMIT_LP = "SUBMIT_LP"
     STOP_LP = "STOP_LP"
+
+
+class SwapPurpose(str, Enum):
+    INVENTORY = "inventory"
+    STOPLOSS = "liquidate"
 
 
 @dataclass(frozen=True)
@@ -165,6 +158,7 @@ class SwapView:
     is_done: bool
     close_type: Optional[CloseType]
     level_id: Optional[str]
+    purpose: Optional[SwapPurpose]
     amount: Decimal
 
 
@@ -265,8 +259,8 @@ class SwapContext:
 @dataclass
 class StopLossContext:
     until_ts: float = 0.0
-    pending_liquidation: bool = False
-    liquidation_target_base: Optional[Decimal] = None
+    pending_liquidation: bool = False  # True when additional base must be sold to complete stoploss liquidation.
+    liquidation_target_base: Optional[Decimal] = None  # Remaining base amount to liquidate.
     last_liquidation_attempt_ts: float = 0.0
     last_exit_reason: Optional[str] = None
 

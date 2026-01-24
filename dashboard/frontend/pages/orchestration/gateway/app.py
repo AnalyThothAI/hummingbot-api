@@ -467,23 +467,23 @@ with tabs[1]:
     st.caption("Add custom pools for supported connectors. Restart Gateway after adding pools.")
 
     st.markdown("**Add Pool**")
-    with st.form("gateway_add_pool"):
-        set_default_choice("pool_connector", "uniswap", connectors_list)
-        connector_name = select_connector("Connector", "pool_connector", connectors_list)
-        pool_network_options = networks_for_connector(connector_name, network_options)
-        preferred_network = preferred_pool_network(connector_name, pool_network_options)
-        if preferred_network:
-            set_default_selection("pool_network", "pool_network_ctx", connector_name, preferred_network)
-        else:
-            default_pool_network = default_network_id_for_connector(
-                connector_name,
-                pool_network_options,
-                chain_defaults,
-            )
-            set_default_selection("pool_network", "pool_network_ctx", connector_name, default_pool_network)
-        network_id = select_network("Network", "pool_network", pool_network_options)
-        pool_type = st.selectbox("Pool Type", ["clmm", "amm"])
+    set_default_choice("pool_connector", "uniswap", connectors_list)
+    connector_name = select_connector("Connector", "pool_connector", connectors_list)
+    pool_network_options = networks_for_connector(connector_name, network_options)
+    preferred_network = preferred_pool_network(connector_name, pool_network_options)
+    if preferred_network:
+        set_default_selection("pool_network", "pool_network_ctx", connector_name, preferred_network)
+    else:
+        default_pool_network = default_network_id_for_connector(
+            connector_name,
+            pool_network_options,
+            chain_defaults,
+        )
+        set_default_selection("pool_network", "pool_network_ctx", connector_name, default_pool_network)
+    network_id = select_network("Network", "pool_network", pool_network_options)
+    pool_type = st.selectbox("Pool Type", ["clmm", "amm"], key="pool_type")
 
+    with st.form("gateway_add_pool"):
         col1a, col2a, col3a = st.columns(3)
         with col1a:
             base_symbol = st.text_input("Base Symbol")
