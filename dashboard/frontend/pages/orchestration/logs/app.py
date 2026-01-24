@@ -85,8 +85,12 @@ if not filtered:
     st.info("No containers match the current filters.")
     st.stop()
 
-default_container = "gateway" if any(row["name"] == "gateway" for row in filtered) else filtered[0]["name"]
 container_options = [row["name"] for row in filtered]
+preferred_container = st.session_state.pop("logs_selected_container", None)
+if preferred_container in container_options:
+    default_container = preferred_container
+else:
+    default_container = "gateway" if any(row["name"] == "gateway" for row in filtered) else filtered[0]["name"]
 
 selected_container = st.selectbox(
     "Container",

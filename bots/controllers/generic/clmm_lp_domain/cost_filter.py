@@ -23,7 +23,9 @@ class CostFilter:
         *,
         now: float,
         position_address: str,
-        pending_fee_quote: Decimal,
+        base_fee: Decimal,
+        quote_fee: Decimal,
+        price: Decimal,
         ctx: FeeEstimatorContext,
     ) -> None:
         if not position_address:
@@ -31,14 +33,16 @@ class CostFilter:
 
         if ctx.last_position_address != position_address:
             ctx.last_position_address = position_address
-            ctx.last_fee_value = None
+            ctx.last_base_fee = None
+            ctx.last_quote_fee = None
             ctx.last_fee_ts = None
             ctx.fee_rate_ewma = None
             return
 
-        if ctx.last_fee_ts is None or ctx.last_fee_value is None:
+        if ctx.last_fee_ts is None or ctx.last_base_fee is None or ctx.last_quote_fee is None:
             ctx.last_fee_ts = now
-            ctx.last_fee_value = pending_fee_quote
+            ctx.last_base_fee = base_fee
+            ctx.last_quote_fee = quote_fee
             return
 
         dt = Decimal(str(now - ctx.last_fee_ts))
@@ -47,13 +51,22 @@ class CostFilter:
         if dt < cls.FEE_SAMPLE_MIN_SECONDS:
             return
 
-        delta = pending_fee_quote - ctx.last_fee_value
-        if delta < 0:
+        delta_base_fee = base_fee - ctx.last_base_fee
+        delta_quote_fee = quote_fee - ctx.last_quote_fee
+        if delta_base_fee < 0 or delta_quote_fee < 0:
             ctx.last_fee_ts = now
-            ctx.last_fee_value = pending_fee_quote
+            ctx.last_base_fee = base_fee
+            ctx.last_quote_fee = quote_fee
             return
 
-        fee_rate = delta / dt
+        delta_fee_quote = (delta_base_fee * price) + delta_quote_fee
+        if delta_fee_quote < 0:
+            ctx.last_fee_ts = now
+            ctx.last_base_fee = base_fee
+            ctx.last_quote_fee = quote_fee
+            return
+
+        fee_rate = delta_fee_quote / dt
         alpha = cls.FEE_EWMA_ALPHA
         if ctx.fee_rate_ewma is None:
             ctx.fee_rate_ewma = fee_rate
@@ -61,7 +74,8 @@ class CostFilter:
             ctx.fee_rate_ewma = (ctx.fee_rate_ewma * (Decimal("1") - alpha)) + (fee_rate * alpha)
 
         ctx.last_fee_ts = now
-        ctx.last_fee_value = pending_fee_quote
+        ctx.last_base_fee = base_fee
+        ctx.last_quote_fee = quote_fee
 
     @classmethod
     def allow_rebalance(

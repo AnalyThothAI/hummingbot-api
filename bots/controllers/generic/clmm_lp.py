@@ -33,12 +33,13 @@ from .clmm_lp_domain.components import (
     LpContext,
     PositionBudget,
     Regions,
-    RebalancePlan,
     RebalanceStage,
     Snapshot,
     SwapView,
     TokenOrderMapper,
 )
+from .clmm_lp_domain.open_planner import plan_open
+from .clmm_lp_domain.rebalance_engine import RebalanceEngine
 
 Rule = Callable[[Snapshot, ControllerContext, Regions], Optional[Decision]]
 
@@ -126,6 +127,17 @@ class CLMMLPGuardedController(ControllerBase):
 
         self._ctx = ControllerContext()
         self._latest_snapshot: Optional[Snapshot] = None
+        self._rebalance_engine = RebalanceEngine(
+            controller_id=self.config.id,
+            config=self.config,
+            estimate_position_value=self._estimate_position_value,
+            out_of_range_deviation_pct=self._out_of_range_deviation_pct,
+            can_rebalance_now=self._can_rebalance_now,
+            swap_slippage_pct=self._swap_slippage_pct,
+            compute_inventory_delta=self._compute_inventory_delta,
+            maybe_plan_inventory_swap=self._maybe_plan_inventory_swap,
+            build_open_lp_action=self._build_open_lp_action,
+        )
         self._rules: List[Rule] = [
             self._rule_manual_kill_switch,
             self._rule_failure_blocked,
@@ -192,7 +204,7 @@ class CLMMLPGuardedController(ControllerBase):
         self._latest_snapshot = None
 
         self._reconcile_done_swaps(snapshot)
-        self._reconcile_rebalance_plans(snapshot)
+        self._rebalance_engine.reconcile(snapshot, self._ctx)
         self._ensure_anchors(snapshot)
         self._update_fee_rate_estimates(snapshot)
 
@@ -224,6 +236,63 @@ class CLMMLPGuardedController(ControllerBase):
         })
 
         return decision.actions
+
+    def get_custom_info(self) -> Dict:
+        data = self.processed_data or {}
+        active_lp = data.get("active_lp") or []
+        active_swaps = data.get("active_swaps") or []
+
+        def _safe_float(value: Optional[Decimal]) -> Optional[float]:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
+        intent_flow = data.get("intent_flow")
+        intent_stage = data.get("intent_stage")
+        intent_reason = data.get("intent_reason")
+        intent = {
+            "flow": intent_flow,
+            "stage": intent_stage,
+            "reason": intent_reason,
+        }
+        if not any(intent.values()):
+            intent = {}
+
+        wallet = {}
+        wallet_base = _safe_float(data.get("wallet_base"))
+        wallet_quote = _safe_float(data.get("wallet_quote"))
+        if wallet_base is not None:
+            wallet["base"] = wallet_base
+        if wallet_quote is not None:
+            wallet["quote"] = wallet_quote
+
+        flags = {}
+        if data.get("stop_loss_active") is not None:
+            flags["stop_loss_active"] = bool(data.get("stop_loss_active"))
+        if data.get("pending_liquidation") is not None:
+            flags["pending_liquidation"] = bool(data.get("pending_liquidation"))
+        if data.get("rebalance_pending") is not None:
+            flags["rebalance_pending"] = int(data.get("rebalance_pending") or 0)
+
+        info = {
+            "state": data.get("controller_state"),
+            "state_reason": data.get("state_reason"),
+            "intent": intent,
+            "price": _safe_float(data.get("current_price")),
+            "wallet": wallet,
+            "positions": {
+                "lp_active": len(active_lp),
+                "swap_active": len(active_swaps),
+            },
+            "flags": flags,
+        }
+
+        return {
+            key: value
+            for key, value in info.items()
+            if value not in (None, {}, [])
+        }
 
     def _build_snapshot(self, now: float) -> Snapshot:
         current_price = self._get_current_price()
@@ -405,45 +474,15 @@ class CLMMLPGuardedController(ControllerBase):
             position_address = lp_view.position_address or ""
             if not position_address:
                 continue
-            pending_fee_quote = lp_view.base_fee * current_price + lp_view.quote_fee
             ctx = self._ctx.lp.setdefault(lp_view.executor_id, LpContext()).fee
             CostFilter.update_fee_rate_ewma(
                 now=snapshot.now,
                 position_address=position_address,
-                pending_fee_quote=pending_fee_quote,
+                base_fee=lp_view.base_fee,
+                quote_fee=lp_view.quote_fee,
+                price=current_price,
                 ctx=ctx,
             )
-
-    def _reconcile_rebalance_plans(self, snapshot: Snapshot):
-        now = snapshot.now
-        for executor_id, plan in list(self._ctx.rebalance.plans.items()):
-            if plan.stage == RebalanceStage.OPEN_REQUESTED:
-                open_id = plan.open_executor_id
-                open_lp = snapshot.lp.get(open_id) if open_id else None
-                if open_lp and (
-                    open_lp.position_address
-                    or open_lp.state in {LPPositionStates.IN_RANGE.value, LPPositionStates.OUT_OF_RANGE.value}
-                ):
-                    self._ctx.swap.awaiting_balance_refresh = True
-                    self._ctx.rebalance.plans.pop(executor_id, None)
-                    continue
-            elif plan.stage == RebalanceStage.STOP_REQUESTED:
-                old_lp = snapshot.lp.get(executor_id)
-                if old_lp is None or not old_lp.is_active:
-                    self._ctx.swap.awaiting_balance_refresh = True
-                    self._ctx.rebalance.plans[executor_id] = RebalancePlan(
-                        stage=RebalanceStage.WAIT_REOPEN,
-                        reopen_after_ts=plan.reopen_after_ts,
-                        requested_at_ts=plan.requested_at_ts,
-                    )
-            elif plan.stage == RebalanceStage.WAIT_REOPEN:
-                old_lp = snapshot.lp.get(executor_id)
-                if old_lp is not None and old_lp.is_active:
-                    self._ctx.rebalance.plans[executor_id] = RebalancePlan(
-                        stage=RebalanceStage.STOP_REQUESTED,
-                        reopen_after_ts=plan.reopen_after_ts,
-                        requested_at_ts=plan.requested_at_ts if plan.requested_at_ts > 0 else now,
-                    )
 
     def _decide(self, snapshot: Snapshot) -> Decision:
         regions = self._compute_regions(snapshot)
@@ -564,7 +603,7 @@ class CLMMLPGuardedController(ControllerBase):
         ctx: ControllerContext,
         __: Regions,
     ) -> Optional[Decision]:
-        return self._decide_rebalance_stops(snapshot, ctx)
+        return self._rebalance_engine.decide_stop(snapshot, ctx)
 
     def _rule_lp_active_gate(
         self,
@@ -620,12 +659,7 @@ class CLMMLPGuardedController(ControllerBase):
     ) -> Optional[Decision]:
         if not regions.rebalance_pending:
             return None
-        if regions.rebalance_open_in_progress:
-            return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="open_in_progress"))
-        rebalance_open = self._decide_rebalance_reopen(snapshot, ctx)
-        if rebalance_open is not None:
-            return rebalance_open
-        return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="rebalance_wait"))
+        return self._rebalance_engine.decide_reopen_or_wait(snapshot, ctx)
 
     def _rule_reenter_blocked(
         self,
@@ -746,94 +780,6 @@ class CLMMLPGuardedController(ControllerBase):
             patch=patch,
         )
 
-    def _decide_rebalance_stops(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[Decision]:
-        current_price = snapshot.current_price
-        now = snapshot.now
-        stop_actions: List[ExecutorAction] = []
-        patch = DecisionPatch()
-
-        # Idempotent stop: once STOP_REQUESTED, keep emitting StopExecutorAction until the LP closes.
-        for executor_id, plan in ctx.rebalance.plans.items():
-            if plan.stage != RebalanceStage.STOP_REQUESTED:
-                continue
-            lp_view = snapshot.lp.get(executor_id)
-            if lp_view is None or not lp_view.is_active:
-                continue
-            if lp_view.in_transition:
-                continue
-            stop_actions.append(StopExecutorAction(controller_id=self.config.id, executor_id=executor_id))
-
-        # Fresh out-of-range detection: request a rebalance stop and create a STOP_REQUESTED plan.
-        for lp_view in snapshot.active_lp:
-            if lp_view.executor_id in ctx.rebalance.plans:
-                continue
-            if lp_view.in_transition:
-                continue
-
-            lower_price = lp_view.lower_price
-            upper_price = lp_view.upper_price
-            if lower_price is None or upper_price is None or lower_price <= 0 or upper_price <= 0:
-                continue
-
-            effective_price = current_price if current_price is not None else lp_view.current_price
-            if effective_price is None or effective_price <= 0:
-                continue
-
-            if lower_price <= effective_price <= upper_price:
-                continue
-
-            deviation_pct = self._out_of_range_deviation_pct(effective_price, lower_price, upper_price)
-            hysteresis_pct = max(Decimal("0"), self.config.hysteresis_pct)
-            if deviation_pct < (hysteresis_pct * Decimal("100")):
-                continue
-
-            out_of_range_since = lp_view.out_of_range_since
-            if out_of_range_since is None:
-                continue
-            if (now - out_of_range_since) < self.config.rebalance_seconds:
-                continue
-            if (now - ctx.rebalance.last_rebalance_ts) < self.config.cooldown_seconds:
-                continue
-            if not self._can_rebalance_now(now, ctx):
-                continue
-
-            fee_rate_ewma = ctx.lp.get(lp_view.executor_id, LpContext()).fee.fee_rate_ewma
-            allow_rebalance = CostFilter.allow_rebalance(
-                enabled=self.config.cost_filter_enabled,
-                position_value=self._estimate_position_value(lp_view, effective_price),
-                fee_rate_ewma=fee_rate_ewma,
-                fee_rate_bootstrap_quote_per_hour=self.config.cost_filter_fee_rate_bootstrap_quote_per_hour,
-                auto_swap_enabled=self.config.auto_swap_enabled,
-                swap_slippage_pct=self._swap_slippage_pct(),
-                fixed_cost_quote=self.config.cost_filter_fixed_cost_quote,
-                max_payback_sec=self.config.cost_filter_max_payback_sec,
-            )
-            if not allow_rebalance and CostFilter.should_force_rebalance(
-                now=now,
-                out_of_range_since=out_of_range_since,
-                rebalance_seconds=self.config.rebalance_seconds,
-            ):
-                allow_rebalance = True
-            if not allow_rebalance:
-                continue
-
-            stop_actions.append(StopExecutorAction(controller_id=self.config.id, executor_id=lp_view.executor_id))
-            patch.rebalance.add_plans[lp_view.executor_id] = RebalancePlan(
-                stage=RebalanceStage.STOP_REQUESTED,
-                reopen_after_ts=now + self.config.reopen_delay_sec,
-                requested_at_ts=now,
-            )
-            patch.rebalance.record_rebalance_ts = now
-
-        if not stop_actions:
-            return None
-        patch.swap.awaiting_balance_refresh = True
-        return Decision(
-            intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.STOP_LP, reason="out_of_range_rebalance"),
-            actions=stop_actions,
-            patch=patch,
-        )
-
     def _out_of_range_deviation_pct(self, price: Decimal, lower: Decimal, upper: Decimal) -> Decimal:
         if price < lower:
             return (lower - price) / lower * Decimal("100")
@@ -848,103 +794,15 @@ class CLMMLPGuardedController(ControllerBase):
             ctx.rebalance.timestamps.popleft()
         return len(ctx.rebalance.timestamps) < self.config.max_rebalances_per_hour
 
-    def _decide_rebalance_reopen(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[Decision]:
-        current_price = snapshot.current_price
-        if current_price is None or current_price <= 0:
-            return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="price_unavailable"))
-
-        eligible_ids = [
-            executor_id
-            for executor_id, plan in ctx.rebalance.plans.items()
-            if plan.stage == RebalanceStage.WAIT_REOPEN
-            and plan.open_executor_id is None
-            and snapshot.now >= plan.reopen_after_ts
-            and not (snapshot.lp.get(executor_id) and snapshot.lp[executor_id].is_active)
-        ]
-        if not eligible_ids:
-            return None
-
-        executor_id = sorted(eligible_ids, key=lambda i: ctx.rebalance.plans[i].reopen_after_ts)[0]
-
-        delta, reason, open_amounts = self._compute_inventory_delta(
-            current_price,
-            snapshot.wallet_base,
-            snapshot.wallet_quote,
-        )
-        if delta is None:
-            return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason=reason or "insufficient_balance"))
-        delta_base, delta_quote_value = delta
-
-        swap_plan = self._maybe_plan_inventory_swap(
-            now=snapshot.now,
-            ctx=ctx,
-            current_price=current_price,
-            delta_base=delta_base,
-            delta_quote_value=delta_quote_value,
-            flow=IntentFlow.REBALANCE,
-        )
-        if swap_plan is not None:
-            return swap_plan
-
-        if open_amounts is None:
-            return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="insufficient_balance"))
-        base_amt, quote_amt = open_amounts
-        action = self._build_open_lp_action(current_price, base_amt, quote_amt)
-        if action is None:
-            return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="budget_unavailable"))
-
-        prev_plan = ctx.rebalance.plans.get(executor_id)
-        reopen_after_ts = prev_plan.reopen_after_ts if prev_plan is not None else snapshot.now
-        patch = DecisionPatch()
-        patch.rebalance.add_plans[executor_id] = RebalancePlan(
-            stage=RebalanceStage.OPEN_REQUESTED,
-            reopen_after_ts=reopen_after_ts,
-            open_executor_id=action.executor_config.id,
-            requested_at_ts=snapshot.now,
-        )
-        patch.swap.awaiting_balance_refresh = True
-        return Decision(
-            intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.SUBMIT_LP, reason="rebalance_open"),
-            actions=[action],
-            patch=patch,
-        )
-
     def _decide_entry(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
-        now = snapshot.now
-
-        delta, reason, open_amounts = self._compute_inventory_delta(
-            snapshot.current_price,
-            snapshot.wallet_base,
-            snapshot.wallet_quote,
-        )
-        if delta is None:
-            return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason=reason or "insufficient_balance"))
-        delta_base, delta_quote_value = delta
-
-        swap_plan = self._maybe_plan_inventory_swap(
-            now=now,
+        return plan_open(
+            snapshot=snapshot,
             ctx=ctx,
-            current_price=snapshot.current_price,
-            delta_base=delta_base,
-            delta_quote_value=delta_quote_value,
             flow=IntentFlow.ENTRY,
-        )
-        if swap_plan is not None:
-            return swap_plan
-
-        if open_amounts is None:
-            return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="insufficient_balance"))
-        base_amt, quote_amt = open_amounts
-        action = self._build_open_lp_action(snapshot.current_price, base_amt, quote_amt)
-        if action is None:
-            return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="budget_unavailable"))
-
-        patch = DecisionPatch()
-        patch.swap.awaiting_balance_refresh = True
-        return Decision(
-            intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.SUBMIT_LP, reason="entry_open"),
-            actions=[action],
-            patch=patch,
+            reason="entry_open",
+            compute_inventory_delta=self._compute_inventory_delta,
+            maybe_plan_inventory_swap=self._maybe_plan_inventory_swap,
+            build_open_lp_action=self._build_open_lp_action,
         )
 
     def _is_entry_triggered(self, current_price: Optional[Decimal]) -> bool:

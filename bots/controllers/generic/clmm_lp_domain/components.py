@@ -220,7 +220,8 @@ class Intent:
 @dataclass
 class FeeEstimatorContext:
     fee_rate_ewma: Optional[Decimal] = None
-    last_fee_value: Optional[Decimal] = None
+    last_base_fee: Optional[Decimal] = None
+    last_quote_fee: Optional[Decimal] = None
     last_fee_ts: Optional[float] = None
     last_position_address: Optional[str] = None
 
