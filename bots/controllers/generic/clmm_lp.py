@@ -4,7 +4,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field
 
 from hummingbot.core.data_type.common import MarketDict, TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
@@ -66,7 +66,7 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
 
     position_width_pct: Decimal = Field(default=Decimal("12"), json_schema_extra={"is_updatable": True})
     rebalance_seconds: int = Field(default=60, json_schema_extra={"is_updatable": True})
-    hysteresis_pct: Decimal = Field(default=Decimal("0.20"), json_schema_extra={"is_updatable": True})
+    hysteresis_pct: Decimal = Field(default=Decimal("0.002"), json_schema_extra={"is_updatable": True})
     cooldown_seconds: int = Field(default=30, json_schema_extra={"is_updatable": True})
     max_rebalances_per_hour: int = Field(default=20, json_schema_extra={"is_updatable": True})
     reopen_delay_sec: int = Field(default=5, json_schema_extra={"is_updatable": True})
@@ -74,8 +74,8 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
     auto_swap_enabled: bool = Field(default=True, json_schema_extra={"is_updatable": True})
     target_base_value_pct: Decimal = Field(default=Decimal("0.5"), json_schema_extra={"is_updatable": True})
     swap_min_value_pct: Decimal = Field(default=Decimal("0.05"), json_schema_extra={"is_updatable": True})
-    swap_safety_buffer_pct: Decimal = Field(default=Decimal("2"), json_schema_extra={"is_updatable": True})
-    swap_slippage_pct: Decimal = Field(default=Decimal("1"), json_schema_extra={"is_updatable": True})
+    swap_safety_buffer_pct: Decimal = Field(default=Decimal("0.02"), json_schema_extra={"is_updatable": True})
+    swap_slippage_pct: Decimal = Field(default=Decimal("0.01"), json_schema_extra={"is_updatable": True})
 
     cost_filter_enabled: bool = Field(default=False, json_schema_extra={"is_updatable": True})
     cost_filter_fee_rate_bootstrap_quote_per_hour: Decimal = Field(
@@ -97,71 +97,6 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
     native_token_symbol: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
     min_native_balance: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     balance_refresh_interval_sec: int = Field(default=20, json_schema_extra={"is_updatable": True})
-
-    @field_validator("position_value_quote", mode="before")
-    @classmethod
-    def validate_position_value_quote(cls, v):
-        value = Decimal(str(v))
-        if value <= 0:
-            raise ValueError("position_value_quote must be > 0")
-        return value
-
-    @field_validator("target_base_value_pct", mode="before")
-    @classmethod
-    def validate_target_base_value_pct(cls, v):
-        value = Decimal(str(v))
-        if value < 0 or value > 1:
-            raise ValueError("target_base_value_pct must be between 0 and 1")
-        return value
-
-    @field_validator("pool_address", mode="before")
-    @classmethod
-    def validate_pool_address(cls, v):
-        value = str(v or "").strip()
-        if not value:
-            raise ValueError("pool_address is required")
-        return value
-
-    @field_validator("swap_min_value_pct", mode="before")
-    @classmethod
-    def validate_swap_min_value_pct(cls, v):
-        value = Decimal(str(v))
-        if value < 0 or value > 1:
-            raise ValueError("swap_min_value_pct must be between 0 and 1")
-        return value
-
-    @field_validator("swap_slippage_pct", mode="before")
-    @classmethod
-    def validate_swap_slippage_pct(cls, v):
-        value = Decimal(str(v))
-        if value < 0 or value > 100:
-            raise ValueError("swap_slippage_pct must be between 0 and 100")
-        return value
-
-    @field_validator("swap_safety_buffer_pct", mode="before")
-    @classmethod
-    def validate_swap_safety_buffer_pct(cls, v):
-        value = Decimal(str(v))
-        if value < 0 or value > 100:
-            raise ValueError("swap_safety_buffer_pct must be between 0 and 100")
-        return value
-
-    @field_validator("hysteresis_pct", mode="before")
-    @classmethod
-    def validate_hysteresis_pct(cls, v):
-        value = Decimal(str(v))
-        if value < 0 or value > 100:
-            raise ValueError("hysteresis_pct must be between 0 and 100")
-        return value
-
-    @field_validator("stop_loss_pnl_pct", mode="before")
-    @classmethod
-    def validate_stop_loss_pnl_pct(cls, v):
-        value = Decimal(str(v))
-        if value < 0 or value > 1:
-            raise ValueError("stop_loss_pnl_pct must be between 0 and 1")
-        return value
-
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
         pool_pair = self.pool_trading_pair or self.trading_pair
@@ -856,7 +791,8 @@ class CLMMLPGuardedController(ControllerBase):
                 continue
 
             deviation_pct = self._out_of_range_deviation_pct(effective_price, lower_price, upper_price)
-            if deviation_pct < self.config.hysteresis_pct:
+            hysteresis_pct = max(Decimal("0"), self.config.hysteresis_pct)
+            if deviation_pct < (hysteresis_pct * Decimal("100")):
                 continue
 
             out_of_range_since = lp_view.out_of_range_since
@@ -876,7 +812,7 @@ class CLMMLPGuardedController(ControllerBase):
                 fee_rate_ewma=fee_rate_ewma,
                 fee_rate_bootstrap_quote_per_hour=self.config.cost_filter_fee_rate_bootstrap_quote_per_hour,
                 auto_swap_enabled=self.config.auto_swap_enabled,
-                swap_slippage_pct=self.config.swap_slippage_pct,
+                swap_slippage_pct=self._swap_slippage_pct(),
                 fixed_cost_quote=self.config.cost_filter_fixed_cost_quote,
                 max_payback_sec=self.config.cost_filter_max_payback_sec,
             )
@@ -1154,7 +1090,7 @@ class CLMMLPGuardedController(ControllerBase):
             side=side,
             amount=amount,
             amount_in_is_quote=amount_in_is_quote,
-            slippage_pct=self.config.swap_slippage_pct,
+            slippage_pct=self._swap_slippage_pct(),
             pool_address=self.config.pool_address or None,
             level_id="inventory",
             budget_key=self._budget_key,
@@ -1177,7 +1113,7 @@ class CLMMLPGuardedController(ControllerBase):
             side=TradeType.SELL,
             amount=swap_amount,
             amount_in_is_quote=False,
-            slippage_pct=self.config.swap_slippage_pct,
+            slippage_pct=self._swap_slippage_pct(),
             pool_address=self.config.pool_address or None,
             level_id="liquidate",
             budget_key=self._budget_key,
@@ -1191,7 +1127,12 @@ class CLMMLPGuardedController(ControllerBase):
         buffer_pct = max(Decimal("0"), self.config.swap_safety_buffer_pct)
         if buffer_pct <= 0:
             return amount
-        return amount * (Decimal("1") - (buffer_pct / Decimal("100")))
+        if buffer_pct >= 1:
+            return Decimal("0")
+        return amount * (Decimal("1") - buffer_pct)
+
+    def _swap_slippage_pct(self) -> Decimal:
+        return max(Decimal("0"), self.config.swap_slippage_pct) * Decimal("100")
 
     def _build_open_lp_action(
         self,

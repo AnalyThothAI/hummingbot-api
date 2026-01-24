@@ -18,7 +18,7 @@ position_value_quote: 20
 position_width_pct: 20
 
 rebalance_seconds: 60
-hysteresis_pct: 0.2
+hysteresis_pct: 0.002
 cooldown_seconds: 30
 max_rebalances_per_hour: 20
 reopen_delay_sec: 5
@@ -26,8 +26,8 @@ reopen_delay_sec: 5
 auto_swap_enabled: true
 target_base_value_pct: 0.5
 swap_min_value_pct: 0.05
-swap_safety_buffer_pct: 2
-swap_slippage_pct: 1
+swap_safety_buffer_pct: 0.02
+swap_slippage_pct: 0.01
 
 cost_filter_enabled: false
 cost_filter_fee_rate_bootstrap_quote_per_hour: 0
