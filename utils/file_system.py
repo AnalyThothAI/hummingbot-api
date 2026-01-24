@@ -2,6 +2,7 @@ import importlib
 import inspect
 import logging
 import os
+from collections import deque
 
 # Create module-specific logger
 logger = logging.getLogger(__name__)
@@ -232,6 +233,33 @@ class FileSystemUtil:
         
         with open(full_path, 'r', encoding='utf-8') as file:
             return file.read()
+
+    def read_file_tail(self, file_path: str, tail: Optional[int] = None) -> str:
+        """
+        Reads the last N lines of a file (or the whole file if tail is None).
+        :param file_path: The relative path to the file from base_path.
+        :param tail: Number of lines from the end of the file to return.
+        :return: The content of the file as a string.
+        :raises FileNotFoundError: If the file does not exist.
+        :raises PermissionError: If access is denied to the file.
+        :raises IsADirectoryError: If the path points to a directory.
+        """
+        if tail is None:
+            return self.read_file(file_path)
+        if tail <= 0:
+            return ""
+
+        full_path = self._get_full_path(file_path)
+        if not os.path.exists(full_path):
+            raise FileNotFoundError(f"File '{file_path}' not found")
+        if os.path.isdir(full_path):
+            raise IsADirectoryError(f"Path '{file_path}' is a directory, not a file")
+
+        lines = deque(maxlen=tail)
+        with open(full_path, 'r', encoding='utf-8', errors='replace') as file:
+            for line in file:
+                lines.append(line.rstrip("\n"))
+        return "\n".join(lines)
 
     def dump_dict_to_yaml(self, filename: str, data_dict: dict) -> None:
         """

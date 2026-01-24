@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
+from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
 
 # Create module-specific logger
 logger = logging.getLogger(__name__)
@@ -275,6 +275,53 @@ def get_instances_summary(
 
     instances = sorted(containers.values(), key=lambda item: item["name"])
     return {"status": "success", "data": {"instances": instances}}
+
+
+@router.get("/instances/{bot_name}/logs")
+def get_instance_logs(
+    bot_name: str,
+    log_type: str = Query(default="bot"),
+    tail: int = Query(default=200, ge=1, le=10000),
+):
+    """Fetch instance log files from bots/instances/<bot_name>/logs."""
+    if "/" in bot_name or "\\" in bot_name or ".." in bot_name:
+        raise HTTPException(status_code=400, detail="Invalid bot name.")
+
+    log_type_key = log_type.lower()
+    log_file_map = {
+        "errors": "errors.log",
+        "error": "errors.log",
+        "hummingbot": "logs_hummingbot.log",
+        "hb": "logs_hummingbot.log",
+        "bot": f"logs_{bot_name}.log",
+        "instance": f"logs_{bot_name}.log",
+    }
+    log_file = log_file_map.get(log_type_key)
+    if not log_file:
+        raise HTTPException(status_code=400, detail="Invalid log type.")
+
+    log_path = f"instances/{bot_name}/logs/{log_file}"
+    try:
+        logs_text = fs_util.read_file_tail(log_path, tail=tail)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Log file not found.")
+    except IsADirectoryError:
+        raise HTTPException(status_code=400, detail="Log path is not a file.")
+    except PermissionError:
+        raise HTTPException(status_code=403, detail="Permission denied reading log file.")
+    except Exception as exc:
+        logger.error(f"Failed to read log file {log_path}: {exc}")
+        raise HTTPException(status_code=500, detail="Failed to read log file.")
+
+    return {
+        "status": "success",
+        "data": {
+            "bot_name": bot_name,
+            "log_type": log_type_key,
+            "log_file": log_file,
+            "logs": logs_text,
+        },
+    }
 
 
 @router.get("/{bot_name}/status")

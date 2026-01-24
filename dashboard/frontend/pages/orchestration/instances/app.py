@@ -11,12 +11,6 @@ initialize_st_page(icon="🦅", show_readme=False)
 # Initialize backend client
 backend_api_client = get_backend_api_client()
 
-# Initialize session state for selections
-if "selected_instance" not in st.session_state:
-    st.session_state.selected_instance = None
-if "instances_view" not in st.session_state:
-    st.session_state.instances_view = "Overview"
-
 REFRESH_INTERVAL = 10
 
 STATUS_REASON_MAP = {
@@ -453,22 +447,50 @@ def render_overview(instances: List[Dict[str, Any]]):
         last_seen_label = format_age(instance.get("mqtt_last_seen_age"))
 
         with st.container(border=True):
-            st.markdown(f"**{bot_name}** · {format_label(health_state, HEALTH_LABELS)}")
-            meta_parts = [
-                f"Docker: {format_label(docker_status, DOCKER_LABELS)}",
-                f"MQTT: {format_label(mqtt_status, MQTT_LABELS)}",
-            ]
-            if last_seen_label:
-                meta_parts.append(f"Last seen {last_seen_label} ago")
-            st.caption(" • ".join(meta_parts))
-            if reason:
-                st.caption(f"Reason: {STATUS_REASON_MAP.get(reason, reason)}")
+            header_cols = st.columns([4, 1])
+            with header_cols[0]:
+                st.markdown(f"**{bot_name}** · {format_label(health_state, HEALTH_LABELS)}")
+                meta_parts = [
+                    f"Docker: {format_label(docker_status, DOCKER_LABELS)}",
+                    f"MQTT: {format_label(mqtt_status, MQTT_LABELS)}",
+                ]
+                if last_seen_label:
+                    meta_parts.append(f"Last seen {last_seen_label} ago")
+                st.caption(" • ".join(meta_parts))
+                if reason:
+                    st.caption(f"Reason: {STATUS_REASON_MAP.get(reason, reason)}")
+            with header_cols[1]:
+                show_details = st.toggle(
+                    "Details",
+                    value=True,
+                    key=f"details_{bot_name}",
+                )
+
+            bot_status = {}
+            bot_data = {}
+            bot_status_value = None
+            if show_details:
+                try:
+                    bot_status = backend_api_client.bot_orchestration.get_bot_status(bot_name)
+                except Exception as exc:
+                    bot_status = {"status": "error", "error": str(exc)}
+
+                if bot_status.get("status") == "success":
+                    bot_data = bot_status.get("data", {})
+                    bot_status_value = bot_data.get("status", "unknown")
+
+            archive_disabled = docker_status == "missing" or (
+                docker_status == "running" and bot_status_value != "stopped"
+            )
 
             action_cols = st.columns(3)
             primary_label = "—"
             primary_action = None
             if docker_status == "running":
-                if mqtt_status in {"connected", "stale"}:
+                if bot_status_value == "stopped":
+                    primary_label = "▶️ Start Bot"
+                    primary_action = lambda name=bot_name: start_bot(name)
+                elif mqtt_status in {"connected", "stale"}:
                     primary_label = "⏹️ Stop Bot"
                     primary_action = lambda name=bot_name: stop_bot(name)
                 else:
@@ -499,14 +521,39 @@ def render_overview(instances: List[Dict[str, Any]]):
                     "📦 Archive",
                     key=f"archive_{bot_name}",
                     use_container_width=True,
-                    disabled=docker_status in {"missing", "running"},
+                    disabled=archive_disabled,
                 ):
                     archive_bot(bot_name, docker_status)
             with action_cols[2]:
-                if st.button("🔍 Inspect", key=f"inspect_{bot_name}", use_container_width=True):
-                    st.session_state.selected_instance = bot_name
-                    st.session_state.instances_view = "Inspector"
-                    st.rerun()
+                if st.button("📜 Logs Page", key=f"open_logs_{bot_name}", use_container_width=True):
+                    st.session_state.logs_selected_container = bot_name
+                    st.switch_page("frontend/pages/orchestration/logs/app.py")
+
+            if not show_details:
+                continue
+
+            if bot_status.get("status") != "success":
+                st.caption("Bot status unavailable.")
+                continue
+
+            bot_state = bot_data.get("status", "unknown")
+            performance = bot_data.get("performance", {})
+
+            controller_configs = []
+            if bot_state in {"running", "idle"}:
+                try:
+                    controller_configs = backend_api_client.controllers.get_bot_controller_configs(bot_name)
+                    controller_configs = controller_configs if controller_configs else []
+                except Exception as e:
+                    st.warning(f"Could not fetch controller configs for {bot_name}: {e}")
+                    controller_configs = []
+
+            if performance:
+                render_controller_tables(bot_name, performance, controller_configs)
+            elif bot_state in {"running", "idle"}:
+                st.caption("No controller performance data available yet.")
+
+            render_logs(bot_name, bot_data)
 
 
 def render_controller_tables(bot_name: str, performance: Dict[str, Any], controller_configs: List[Dict[str, Any]]):
@@ -621,7 +668,7 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
 
 def render_logs(bot_name: str, bot_data: Dict[str, Any]):
     with st.expander("Logs", expanded=False):
-        log_tabs = st.tabs(["Bot Logs", "Container Logs"])
+        log_tabs = st.tabs(["Bot Logs", "Instance Logs"])
 
         with log_tabs[0]:
             error_logs = bot_data.get("error_logs", [])
@@ -631,12 +678,13 @@ def render_logs(bot_name: str, bot_data: Dict[str, Any]):
                 "Stream",
                 options=["Errors", "General"],
                 horizontal=True,
+                index=1,
                 key=f"bot_log_type_{bot_name}",
             )
             log_lines = st.selectbox(
                 "Lines",
                 options=[50, 100, 200],
-                index=1,
+                index=2,
                 key=f"bot_log_lines_{bot_name}",
             )
             search = st.text_input(
@@ -657,43 +705,50 @@ def render_logs(bot_name: str, bot_data: Dict[str, Any]):
                 st.info("No bot logs available for the selected filters.")
 
         with log_tabs[1]:
-            load_container_logs = st.toggle(
-                "Load container logs",
-                value=False,
-                key=f"container_logs_toggle_{bot_name}",
+            log_type_label = st.radio(
+                "Stream",
+                options=["Errors", "Hummingbot", "Bot"],
+                horizontal=True,
+                index=2,
+                key=f"instance_log_type_{bot_name}",
             )
-            if not load_container_logs:
-                st.caption("Enable to fetch container logs on demand.")
-                return
-
             log_lines = st.selectbox(
                 "Lines",
                 options=[50, 100, 200, 500],
-                index=1,
-                key=f"container_log_lines_{bot_name}",
+                index=2,
+                key=f"instance_log_lines_{bot_name}",
             )
             search = st.text_input(
                 "Search",
-                placeholder="Filter container logs",
-                key=f"container_log_search_{bot_name}",
+                placeholder="Filter instance logs",
+                key=f"instance_log_search_{bot_name}",
             )
-            cache_key = f"container_logs_cache_{bot_name}"
+
+            log_type_map = {
+                "Errors": "errors",
+                "Hummingbot": "hummingbot",
+                "Bot": "bot",
+            }
+            log_type_value = log_type_map.get(log_type_label, "bot")
+
+            cache_key = f"instance_logs_cache_{bot_name}"
             cache = st.session_state.get(cache_key, {})
             cached_text = cache.get("text", "")
+            cached_type = cache.get("type")
             cached_lines = cache.get("lines")
             cached_at = cache.get("fetched_at")
 
             fetch_now = st.button(
-                "Fetch container logs",
-                key=f"fetch_container_logs_{bot_name}",
+                "Refresh instance logs",
+                key=f"refresh_instance_logs_{bot_name}",
                 use_container_width=True,
             )
 
-            if fetch_now or not cached_text or cached_lines != log_lines:
+            if fetch_now or not cached_text or cached_type != log_type_value or cached_lines != log_lines:
                 logs_response = backend_api_request(
                     "GET",
-                    f"/docker/containers/{bot_name}/logs",
-                    params={"tail": log_lines},
+                    f"/bot-orchestration/instances/{bot_name}/logs",
+                    params={"log_type": log_type_value, "tail": log_lines},
                 )
 
                 if not logs_response.get("ok"):
@@ -701,22 +756,24 @@ def render_logs(bot_name: str, bot_data: Dict[str, Any]):
                     if status_code == 401:
                         st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
                     elif status_code == 404:
-                        st.error("Logs endpoint not available. Recreate the hummingbot-api container.")
+                        st.error("Instance log file not found.")
                     else:
-                        st.error(logs_response.get("error", "Failed to fetch logs."))
+                        st.error(logs_response.get("error", "Failed to fetch instance logs."))
                     return
 
                 cached_text = logs_response.get("data", {}).get("logs", "")
+                cached_type = log_type_value
                 cached_lines = log_lines
                 cached_at = datetime.now()
                 st.session_state[cache_key] = {
                     "text": cached_text,
+                    "type": cached_type,
                     "lines": cached_lines,
                     "fetched_at": cached_at,
                 }
 
             if not cached_text:
-                st.info("No container logs available.")
+                st.info("No instance logs available.")
                 return
 
             if cached_at:
@@ -725,7 +782,7 @@ def render_logs(bot_name: str, bot_data: Dict[str, Any]):
             log_entries = cached_text.strip().split("\n")
             log_entries = filter_logs(log_entries, search, log_lines)
             if not log_entries:
-                st.info("No container logs match the current filters.")
+                st.info("No instance logs match the current filters.")
                 return
 
             visible_logs = "\n".join(log_entries)
@@ -737,136 +794,6 @@ def render_logs(bot_name: str, bot_data: Dict[str, Any]):
                 mime="text/plain",
                 use_container_width=True,
             )
-
-
-def render_inspector(instances: List[Dict[str, Any]]):
-    instance_names = [instance.get("name") for instance in instances if instance.get("name")]
-    if not instance_names:
-        st.info("No instances available.")
-        return
-
-    if st.session_state.selected_instance not in instance_names:
-        st.session_state.selected_instance = instance_names[0]
-
-    selected_name = st.selectbox(
-        "Select instance",
-        options=instance_names,
-        index=instance_names.index(st.session_state.selected_instance),
-        key="selected_instance",
-    )
-
-    instance = next((row for row in instances if row.get("name") == selected_name), {})
-    bot_name = instance.get("name", "Unknown")
-    docker_status = instance.get("docker_status", "unknown")
-    mqtt_status = instance.get("mqtt_status", "unknown")
-    health_state = instance.get("health_state", "unknown")
-    reason = instance.get("reason")
-
-    st.subheader(f"Instance: {bot_name}")
-
-    status_cols = st.columns(4)
-    with status_cols[0]:
-        st.metric("Health", format_label(health_state, HEALTH_LABELS))
-    with status_cols[1]:
-        st.metric("Docker", format_label(docker_status, DOCKER_LABELS))
-    with status_cols[2]:
-        st.metric("MQTT", format_label(mqtt_status, MQTT_LABELS))
-    with status_cols[3]:
-        last_seen_label = format_age(instance.get("mqtt_last_seen_age"))
-        st.metric("Last Seen", f"{last_seen_label} ago" if last_seen_label else "-")
-
-    if reason:
-        st.caption(f"Reason: {STATUS_REASON_MAP.get(reason, reason)}")
-
-    with st.container(border=True):
-        action_cols = st.columns(3)
-        bot_status_value = "unknown"
-
-        try:
-            bot_status = backend_api_client.bot_orchestration.get_bot_status(bot_name)
-        except Exception as exc:
-            bot_status = {"status": "error", "error": str(exc)}
-
-        if bot_status.get("status") == "success":
-            bot_data = bot_status.get("data", {})
-            bot_status_value = bot_data.get("status", "unknown")
-        else:
-            bot_data = {}
-
-        archive_disabled = docker_status == "missing" or (
-            docker_status == "running" and bot_status_value != "stopped"
-        )
-
-        primary_label = "—"
-        primary_action = None
-        if docker_status == "running":
-            if bot_status_value == "stopped":
-                primary_label = "▶️ Start Bot"
-                primary_action = lambda name=bot_name: start_bot(name)
-            elif mqtt_status in {"connected", "stale"}:
-                primary_label = "⏹️ Stop Bot"
-                primary_action = lambda name=bot_name: stop_bot(name)
-            else:
-                primary_label = "⛔ Stop Container"
-                primary_action = lambda name=bot_name: stop_container(name)
-        elif docker_status in {"exited", "created", "dead"}:
-            primary_label = "▶️ Start Container"
-            primary_action = lambda name=bot_name: start_container(name)
-        elif docker_status == "missing":
-            if mqtt_status in {"connected", "stale"}:
-                primary_label = "⏹️ Stop Bot"
-                primary_action = lambda name=bot_name: stop_bot(name)
-            else:
-                primary_label = "➕ Launch New"
-                primary_action = lambda: st.switch_page("frontend/pages/orchestration/launch_bot_v2/app.py")
-
-        with action_cols[0]:
-            if st.button(
-                primary_label,
-                key=f"primary_inspect_{bot_name}",
-                use_container_width=True,
-                disabled=primary_action is None,
-            ):
-                if primary_action:
-                    primary_action()
-
-        with action_cols[1]:
-            if st.button(
-                "📦 Archive",
-                key=f"archive_inspect_{bot_name}",
-                use_container_width=True,
-                disabled=archive_disabled,
-            ):
-                archive_bot(bot_name, docker_status)
-
-        with action_cols[2]:
-            if st.button("📜 Logs Page", key=f"open_logs_{bot_name}", use_container_width=True):
-                st.session_state.logs_selected_container = bot_name
-                st.switch_page("frontend/pages/orchestration/logs/app.py")
-
-    if bot_status.get("status") != "success":
-        st.caption("Bot status unavailable.")
-        return
-
-    bot_data = bot_status.get("data", {})
-    bot_state = bot_data.get("status", "unknown")
-    performance = bot_data.get("performance", {})
-
-    controller_configs = []
-    if bot_state in {"running", "idle"}:
-        try:
-            controller_configs = backend_api_client.controllers.get_bot_controller_configs(bot_name)
-            controller_configs = controller_configs if controller_configs else []
-        except Exception as e:
-            st.warning(f"Could not fetch controller configs for {bot_name}: {e}")
-            controller_configs = []
-
-    if performance:
-        render_controller_tables(bot_name, performance, controller_configs)
-    elif bot_state in {"running", "idle"}:
-        st.caption("No controller performance data available yet.")
-
-    render_logs(bot_name, bot_data)
 
 
 # Page Header
@@ -919,16 +846,7 @@ def show_bot_instances():
             f"Stopped {counts['stopped']} · Orphaned {counts['orphaned']}"
         )
 
-        view = st.radio(
-            "View",
-            options=["Overview", "Inspector"],
-            horizontal=True,
-            key="instances_view",
-        )
-        if view == "Overview":
-            render_overview(instances)
-        else:
-            render_inspector(instances)
+        render_overview(instances)
 
     except Exception as e:
         st.error(f"Failed to connect to backend: {e}")

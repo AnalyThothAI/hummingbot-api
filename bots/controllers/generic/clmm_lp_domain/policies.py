@@ -32,6 +32,13 @@ class UniswapV3Policy(CLMMPolicyBase):
         super().__init__(config)
         self._tick_spacing: Optional[int] = None
 
+    def _pool_order_inverted(self) -> bool:
+        trading_pair = getattr(self._config, "trading_pair", "")
+        pool_trading_pair = getattr(self._config, "pool_trading_pair", None) or trading_pair
+        base, quote = trading_pair.split("-") if "-" in trading_pair else ("", "")
+        pool_base, pool_quote = pool_trading_pair.split("-") if "-" in pool_trading_pair else ("", "")
+        return pool_base == quote and pool_quote == base
+
     async def update(self, connector) -> None:
         if connector is None or not self._config.pool_address:
             return None
@@ -60,9 +67,28 @@ class UniswapV3Policy(CLMMPolicyBase):
             return None
         if self._tick_spacing is None or self._tick_spacing <= 0:
             return None
+        lower, upper = base_plan.lower, base_plan.upper
+        if self._pool_order_inverted():
+            if lower <= 0 or upper <= 0 or lower >= upper:
+                return None
+            pool_lower = Decimal("1") / upper
+            pool_upper = Decimal("1") / lower
+            aligned = RangeCalculator.align_bounds_to_ticks(
+                pool_lower,
+                pool_upper,
+                tick_spacing=self._tick_spacing,
+                tick_base=self._tick_base,
+            )
+            if aligned is None:
+                return None
+            aligned_lower = Decimal("1") / aligned[1]
+            aligned_upper = Decimal("1") / aligned[0]
+            if aligned_lower >= aligned_upper:
+                return None
+            return RangePlan(center_price=center_price, lower=aligned_lower, upper=aligned_upper)
         aligned = RangeCalculator.align_bounds_to_ticks(
-            base_plan.lower,
-            base_plan.upper,
+            lower,
+            upper,
             tick_spacing=self._tick_spacing,
             tick_base=self._tick_base,
         )
@@ -75,15 +101,32 @@ class UniswapV3Policy(CLMMPolicyBase):
             return None
         multiplier = max(1, int(self._config.ratio_clamp_tick_multiplier))
         clamp_ticks = self._tick_spacing * multiplier
-        clamped_price = RangeCalculator.clamp_price_by_ticks(
-            price,
-            lower,
-            upper,
-            tick_base=self._tick_base,
-            clamp_ticks=clamp_ticks,
-        )
-        if clamped_price is None:
-            return None
+        if self._pool_order_inverted():
+            if price <= 0 or lower <= 0 or upper <= 0 or lower >= upper:
+                return None
+            pool_price = Decimal("1") / price
+            pool_lower = Decimal("1") / upper
+            pool_upper = Decimal("1") / lower
+            clamped_pool_price = RangeCalculator.clamp_price_by_ticks(
+                pool_price,
+                pool_lower,
+                pool_upper,
+                tick_base=self._tick_base,
+                clamp_ticks=clamp_ticks,
+            )
+            if clamped_pool_price is None or clamped_pool_price <= 0:
+                return None
+            clamped_price = Decimal("1") / clamped_pool_price
+        else:
+            clamped_price = RangeCalculator.clamp_price_by_ticks(
+                price,
+                lower,
+                upper,
+                tick_base=self._tick_base,
+                clamp_ticks=clamp_ticks,
+            )
+            if clamped_price is None:
+                return None
         return V3Math.quote_per_base_ratio(clamped_price, lower, upper)
 
 
