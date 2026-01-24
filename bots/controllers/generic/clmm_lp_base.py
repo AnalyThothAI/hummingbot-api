@@ -517,8 +517,8 @@ class CLMMLPBaseController(ControllerBase):
             self._rule_failure_blocked,
             self._rule_detect_lp_failure,
             self._rule_swap_concurrency_guard,
-            self._rule_swap_in_progress_gate,
             self._rule_stoploss_trigger,
+            self._rule_swap_in_progress_gate,
             self._rule_rebalance_stop,
             self._rule_lp_active_gate,
             self._rule_wait_balance_refresh,
@@ -645,7 +645,8 @@ class CLMMLPBaseController(ControllerBase):
                         trigger_value = anchor.value_quote - (anchor.value_quote * self.config.stop_loss_pnl_pct)
                         lp_item["stoploss_trigger_quote"] = float(trigger_value)
                 if fee_ctx is not None and fee_ctx.fee_rate_ewma is not None:
-                    lp_item["fee_rate_ewma_quote_per_hour"] = float(fee_ctx.fee_rate_ewma)
+                    fee_rate_per_hour = fee_ctx.fee_rate_ewma * Decimal("3600")
+                    lp_item["fee_rate_ewma_quote_per_hour"] = float(fee_rate_per_hour)
                 if lp_view.out_of_range_since is not None:
                     lp_item["out_of_range_since"] = lp_view.out_of_range_since
                 lp_details.append(lp_item)
@@ -794,9 +795,6 @@ class CLMMLPBaseController(ControllerBase):
             stoploss_cooldown_active=snapshot.now < self._ctx.stoploss.until_ts,
             stoploss_pending_liquidation=bool(self._ctx.stoploss.pending_liquidation),
             rebalance_pending=bool(self._ctx.rebalance.plans),
-            rebalance_open_in_progress=any(
-                plan.stage == RebalanceStage.OPEN_REQUESTED for plan in self._ctx.rebalance.plans.values()
-            ),
             entry_triggered=self._is_entry_triggered(snapshot.current_price),
             reenter_blocked=(
                 (not self.config.reenter_enabled) and self._ctx.stoploss.last_exit_reason == "stop_loss"

@@ -190,7 +190,6 @@ class Regions:
     stoploss_cooldown_active: bool
     stoploss_pending_liquidation: bool
     rebalance_pending: bool
-    rebalance_open_in_progress: bool
     entry_triggered: bool
     reenter_blocked: bool
 
