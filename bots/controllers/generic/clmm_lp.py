@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from decimal import Decimal
 from enum import Enum
@@ -8,6 +9,7 @@ from pydantic import Field, field_validator, model_validator
 from hummingbot.core.data_type.common import MarketDict, TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.logger import HummingbotLogger
+from hummingbot.core.utils.async_utils import safe_ensure_future
 from hummingbot.strategy_v2.budget.budget_coordinator import BudgetCoordinatorRegistry
 from hummingbot.strategy_v2.controllers import ControllerBase, ControllerConfigBase
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
@@ -94,7 +96,7 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
     budget_key: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
     native_token_symbol: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
     min_native_balance: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
-    balance_refresh_interval_sec: int = Field(default=10, json_schema_extra={"is_updatable": True})
+    balance_refresh_interval_sec: int = Field(default=20, json_schema_extra={"is_updatable": True})
 
     @field_validator("position_value_quote", mode="before")
     @classmethod
@@ -160,27 +162,6 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
             raise ValueError("stop_loss_pnl_pct must be between 0 and 1")
         return value
 
-    @field_validator("pool_trading_pair", mode="before")
-    @classmethod
-    def normalize_pool_trading_pair(cls, v):
-        if v is None:
-            return None
-        value = str(v).strip()
-        return value or None
-
-    @model_validator(mode="after")
-    def validate_pool_trading_pair(self):
-        if not self.pool_trading_pair:
-            return self
-        ref_tokens = self.trading_pair.split("-")
-        pool_tokens = self.pool_trading_pair.split("-")
-        if len(ref_tokens) != 2:
-            raise ValueError("trading_pair must be in BASE-QUOTE format")
-        if len(pool_tokens) != 2:
-            raise ValueError("pool_trading_pair must be in BASE-QUOTE format")
-        if pool_tokens != ref_tokens and pool_tokens != list(reversed(ref_tokens)):
-            raise ValueError("pool_trading_pair must match trading_pair or be its reverse")
-        return self
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
         pool_pair = self.pool_trading_pair or self.trading_pair
@@ -229,6 +210,7 @@ class CLMMLPGuardedController(ControllerBase):
         self._wallet_base: Decimal = Decimal("0")
         self._wallet_quote: Decimal = Decimal("0")
         self._last_balance_update_ts: float = 0.0
+        self._wallet_update_task: Optional[asyncio.Task] = None
 
         rate_connector = self.config.router_connector
         self.market_data_provider.initialize_rate_sources([
@@ -241,7 +223,7 @@ class CLMMLPGuardedController(ControllerBase):
     async def update_processed_data(self):
         now = self.market_data_provider.time()
 
-        await self._update_wallet_balances(now)
+        self._schedule_wallet_balance_refresh(now)
 
         snapshot = self._build_snapshot(now)
         self._latest_snapshot = snapshot
@@ -385,7 +367,9 @@ class CLMMLPGuardedController(ControllerBase):
             return None
         return Decimal(str(price))
 
-    async def _update_wallet_balances(self, now: float):
+    def _schedule_wallet_balance_refresh(self, now: float) -> None:
+        if self._wallet_update_task is not None and not self._wallet_update_task.done():
+            return
         if self.config.balance_refresh_interval_sec > 0:
             if not self._ctx.swap.awaiting_balance_refresh and (
                 (now - self._last_balance_update_ts) < self.config.balance_refresh_interval_sec
@@ -395,11 +379,19 @@ class CLMMLPGuardedController(ControllerBase):
         connector = self.market_data_provider.connectors.get(self.config.connector_name)
         if connector is None:
             return
+        self._wallet_update_task = safe_ensure_future(self._update_wallet_balances(connector))
+        self._wallet_update_task.add_done_callback(self._clear_wallet_update_task)
+
+    def _clear_wallet_update_task(self, task: asyncio.Task) -> None:
+        if self._wallet_update_task is task:
+            self._wallet_update_task = None
+
+    async def _update_wallet_balances(self, connector) -> None:
         try:
             await connector.update_balances()
             self._wallet_base = Decimal(str(connector.get_balance(self._tokens.base_token) or 0))
             self._wallet_quote = Decimal(str(connector.get_balance(self._tokens.quote_token) or 0))
-            self._last_balance_update_ts = now
+            self._last_balance_update_ts = self.market_data_provider.time()
             self._ctx.swap.awaiting_balance_refresh = False
         except Exception:
             return
@@ -488,6 +480,7 @@ class CLMMLPGuardedController(ControllerBase):
                     open_lp.position_address
                     or open_lp.state in {LPPositionStates.IN_RANGE.value, LPPositionStates.OUT_OF_RANGE.value}
                 ):
+                    self._ctx.swap.awaiting_balance_refresh = True
                     self._ctx.rebalance.plans.pop(executor_id, None)
                     continue
                 if plan.requested_at_ts > 0 and (now - plan.requested_at_ts) > 30.0:
@@ -506,6 +499,7 @@ class CLMMLPGuardedController(ControllerBase):
             elif plan.stage == RebalanceStage.STOP_REQUESTED:
                 old_lp = snapshot.lp.get(executor_id)
                 if old_lp is None or not old_lp.is_active:
+                    self._ctx.swap.awaiting_balance_refresh = True
                     self._ctx.rebalance.plans[executor_id] = RebalancePlan(
                         stage=RebalanceStage.WAIT_REOPEN,
                         reopen_after_ts=plan.reopen_after_ts,
@@ -558,9 +552,13 @@ class CLMMLPGuardedController(ControllerBase):
         if not regions.manual_stop:
             return None
         actions = [StopExecutorAction(controller_id=self.config.id, executor_id=v.executor_id) for v in snapshot.active_lp]
+        patch = DecisionPatch()
+        if actions:
+            patch.swap.awaiting_balance_refresh = True
         return Decision(
             intent=Intent(flow=IntentFlow.MANUAL, stage=IntentStage.STOP_LP, reason="manual_kill_switch"),
             actions=actions,
+            patch=patch,
         )
 
     def _rule_failure_blocked(
@@ -593,6 +591,8 @@ class CLMMLPGuardedController(ControllerBase):
         patch.failure.set_reason = reason
         patch.rebalance.clear_all = True
         patch.stoploss.pending_liquidation = False
+        if actions:
+            patch.swap.awaiting_balance_refresh = True
         self.logger().error("LP executor failure detected (%s). Manual intervention required.", reason)
         return Decision(
             intent=Intent(flow=IntentFlow.FAILURE, stage=IntentStage.STOP_LP, reason=reason),
@@ -758,6 +758,8 @@ class CLMMLPGuardedController(ControllerBase):
         patch.rebalance.clear_all = True
         patch.stoploss.last_exit_reason = "stop_loss"
         patch.stoploss.until_ts = snapshot.now + self.config.stop_loss_pause_sec
+        if actions:
+            patch.swap.awaiting_balance_refresh = True
         if self._stop_loss_liquidation_mode == StopLossLiquidationMode.QUOTE:
             patch.stoploss.pending_liquidation = True
             patch.stoploss.last_liquidation_attempt_ts = 0.0
@@ -897,6 +899,7 @@ class CLMMLPGuardedController(ControllerBase):
 
         if not stop_actions:
             return None
+        patch.swap.awaiting_balance_refresh = True
         return Decision(
             intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.STOP_LP, reason="out_of_range_rebalance"),
             actions=stop_actions,
@@ -971,6 +974,7 @@ class CLMMLPGuardedController(ControllerBase):
             open_executor_id=action.executor_config.id,
             requested_at_ts=snapshot.now,
         )
+        patch.swap.awaiting_balance_refresh = True
         return Decision(
             intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.SUBMIT_LP, reason="rebalance_open"),
             actions=[action],
@@ -1007,9 +1011,12 @@ class CLMMLPGuardedController(ControllerBase):
         if action is None:
             return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="budget_unavailable"))
 
+        patch = DecisionPatch()
+        patch.swap.awaiting_balance_refresh = True
         return Decision(
             intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.SUBMIT_LP, reason="entry_open"),
             actions=[action],
+            patch=patch,
         )
 
     def _is_entry_triggered(self, current_price: Optional[Decimal]) -> bool:
