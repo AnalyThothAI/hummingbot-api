@@ -30,6 +30,8 @@ class MQTTManager:
         self._bot_controller_reports: Dict[str, Dict] = defaultdict(dict)
         self._bot_logs: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
         self._bot_error_logs: Dict[str, deque] = defaultdict(lambda: deque(maxlen=100))
+        self._bot_performance_seen: Dict[str, float] = {}
+        self._bot_log_seen: Dict[str, float] = {}
 
         # Auto-discovered bots
         self._discovered_bots: Dict[str, float] = {}  # bot_id: last_seen_timestamp
@@ -193,6 +195,7 @@ class MQTTManager:
         }
         """
         if isinstance(data, dict):
+            self._bot_performance_seen[bot_id] = time.time()
             for controller_id, controller_report in data.items():
                 if bot_id not in self._bot_controller_reports:
                     self._bot_controller_reports[bot_id] = {}
@@ -200,6 +203,7 @@ class MQTTManager:
 
     async def _handle_log(self, bot_id: str, data: Any):
         """Handle log messages with deduplication."""
+        self._bot_log_seen[bot_id] = time.time()
         # Create a unique message identifier for deduplication
         if isinstance(data, dict):
             level = data.get("level_name") or data.get("levelname") or data.get("level", "INFO")
@@ -500,6 +504,8 @@ class MQTTManager:
         self._bot_logs.pop(bot_id, None)
         self._bot_error_logs.pop(bot_id, None)
         self._discovered_bots.pop(bot_id, None)
+        self._bot_performance_seen.pop(bot_id, None)
+        self._bot_log_seen.pop(bot_id, None)
 
     def clear_bot_controller_reports(self, bot_id: str):
         """Clear only controller report data for a bot (useful when bot is stopped)."""
@@ -513,6 +519,14 @@ class MQTTManager:
     def get_last_seen_map(self) -> Dict[str, float]:
         """Return a copy of the last-seen timestamp map for discovered bots."""
         return dict(self._discovered_bots)
+
+    def get_performance_last_seen(self, bot_id: str) -> Optional[float]:
+        """Return the last performance update timestamp for a bot."""
+        return self._bot_performance_seen.get(bot_id)
+
+    def get_log_last_seen(self, bot_id: str) -> Optional[float]:
+        """Return the last log update timestamp for a bot."""
+        return self._bot_log_seen.get(bot_id)
 
     def get_discovered_bots(self, timeout_seconds: int = 300) -> list:
         """Get list of auto-discovered bots.

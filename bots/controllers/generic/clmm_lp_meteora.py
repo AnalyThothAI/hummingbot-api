@@ -4,6 +4,7 @@ from typing import Optional
 from pydantic import Field, field_validator
 
 from . import clmm_lp_base
+from .clmm_lp_domain.components import PoolDomainAdapter
 from .clmm_lp_domain.policies import MeteoraPolicy
 
 
@@ -37,4 +38,5 @@ class CLMMLPMeteoraConfig(clmm_lp_base.CLMMLPBaseConfig):
 
 class CLMMLPMeteoraController(clmm_lp_base.CLMMLPBaseController):
     def __init__(self, config: CLMMLPMeteoraConfig, *args, **kwargs):
-        super().__init__(config, MeteoraPolicy(config), *args, **kwargs)
+        domain = PoolDomainAdapter.from_config(config.trading_pair, config.pool_trading_pair)
+        super().__init__(config, MeteoraPolicy(config, domain), domain, *args, **kwargs)

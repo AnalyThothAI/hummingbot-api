@@ -40,7 +40,7 @@ class IntentStage(str, Enum):
 
 
 @dataclass(frozen=True)
-class TokenOrderMapper:
+class PoolDomainAdapter:
     trading_pair: str
     pool_trading_pair: str
     base_token: str
@@ -50,7 +50,7 @@ class TokenOrderMapper:
     pool_order_inverted: bool
 
     @classmethod
-    def from_config(cls, trading_pair: str, pool_trading_pair: Optional[str]) -> "TokenOrderMapper":
+    def from_config(cls, trading_pair: str, pool_trading_pair: Optional[str]) -> "PoolDomainAdapter":
         ref_tokens = trading_pair.split("-")
         pool_pair = pool_trading_pair or trading_pair
         pool_tokens = pool_pair.split("-")
@@ -90,21 +90,21 @@ class TokenOrderMapper:
         return None
 
     @staticmethod
-    def lp_amounts_to_strategy(lp_base: Decimal, lp_quote: Decimal, inverted: bool) -> Tuple[Decimal, Decimal]:
+    def pool_amounts_to_strategy(lp_base: Decimal, lp_quote: Decimal, inverted: bool) -> Tuple[Decimal, Decimal]:
         return (lp_quote, lp_base) if inverted else (lp_base, lp_quote)
 
-    def strategy_amounts_to_lp(self, base_amt: Decimal, quote_amt: Decimal) -> Tuple[Decimal, Decimal]:
+    def strategy_amounts_to_pool(self, base_amt: Decimal, quote_amt: Decimal) -> Tuple[Decimal, Decimal]:
         return (quote_amt, base_amt) if self.pool_order_inverted else (base_amt, quote_amt)
 
     @staticmethod
-    def lp_price_to_strategy(price: Decimal, inverted: bool) -> Decimal:
+    def pool_price_to_strategy(price: Decimal, inverted: bool) -> Decimal:
         if not inverted:
             return price
         if price <= 0:
             return price
         return Decimal("1") / price
 
-    def strategy_price_to_lp(self, price: Decimal) -> Decimal:
+    def strategy_price_to_pool(self, price: Decimal) -> Decimal:
         if not self.pool_order_inverted:
             return price
         if price <= 0:
@@ -112,7 +112,7 @@ class TokenOrderMapper:
         return Decimal("1") / price
 
     @staticmethod
-    def lp_bounds_to_strategy(lower: Decimal, upper: Decimal, inverted: bool) -> Tuple[Decimal, Decimal]:
+    def pool_bounds_to_strategy(lower: Decimal, upper: Decimal, inverted: bool) -> Tuple[Decimal, Decimal]:
         if not inverted:
             return lower, upper
         if lower <= 0 or upper <= 0:
@@ -123,7 +123,7 @@ class TokenOrderMapper:
             mapped_lower, mapped_upper = mapped_upper, mapped_lower
         return mapped_lower, mapped_upper
 
-    def strategy_bounds_to_lp(self, lower: Decimal, upper: Decimal) -> Tuple[Decimal, Decimal]:
+    def strategy_bounds_to_pool(self, lower: Decimal, upper: Decimal) -> Tuple[Decimal, Decimal]:
         if not self.pool_order_inverted:
             return lower, upper
         if lower <= 0 or upper <= 0:
@@ -235,6 +235,7 @@ class LpContext:
 class RebalanceStage(str, Enum):
     STOP_REQUESTED = "STOP_REQUESTED"
     WAIT_REOPEN = "WAIT_REOPEN"
+    WAIT_SWAP = "WAIT_SWAP"
     OPEN_REQUESTED = "OPEN_REQUESTED"
 
 

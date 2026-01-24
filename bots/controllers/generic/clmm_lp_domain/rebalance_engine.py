@@ -74,6 +74,16 @@ class RebalanceEngine:
                         reopen_after_ts=plan.reopen_after_ts,
                         requested_at_ts=plan.requested_at_ts,
                     )
+            elif plan.stage == RebalanceStage.WAIT_SWAP:
+                if any(swap.is_active and swap.level_id == "inventory" for swap in snapshot.swaps.values()):
+                    continue
+                if ctx.swap.awaiting_balance_refresh:
+                    continue
+                ctx.rebalance.plans[executor_id] = RebalancePlan(
+                    stage=RebalanceStage.WAIT_REOPEN,
+                    reopen_after_ts=plan.reopen_after_ts,
+                    requested_at_ts=plan.requested_at_ts,
+                )
             elif plan.stage == RebalanceStage.WAIT_REOPEN:
                 old_lp = snapshot.lp.get(executor_id)
                 if old_lp is not None and old_lp.is_active:
@@ -175,6 +185,8 @@ class RebalanceEngine:
             return None
         if any(plan.stage == RebalanceStage.OPEN_REQUESTED for plan in ctx.rebalance.plans.values()):
             return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="open_in_progress"))
+        if any(plan.stage == RebalanceStage.WAIT_SWAP for plan in ctx.rebalance.plans.values()):
+            return Decision(intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.WAIT, reason="swap_in_progress"))
 
         decision = self._decide_rebalance_reopen(snapshot, ctx)
         if decision is not None:
@@ -209,7 +221,7 @@ class RebalanceEngine:
                 requested_at_ts=snapshot.now,
             )
 
-        return plan_open(
+        decision = plan_open(
             snapshot=snapshot,
             ctx=ctx,
             flow=IntentFlow.REBALANCE,
@@ -219,3 +231,16 @@ class RebalanceEngine:
             build_open_lp_action=self._build_open_lp_action,
             patch_mutator=_patch_reopen,
         )
+        if decision is None:
+            return None
+        if decision.intent.stage != IntentStage.SUBMIT_SWAP:
+            return decision
+        prev_plan = ctx.rebalance.plans.get(executor_id)
+        reopen_after_ts = prev_plan.reopen_after_ts if prev_plan is not None else snapshot.now
+        requested_at_ts = prev_plan.requested_at_ts if prev_plan is not None else snapshot.now
+        decision.patch.rebalance.add_plans[executor_id] = RebalancePlan(
+            stage=RebalanceStage.WAIT_SWAP,
+            reopen_after_ts=reopen_after_ts,
+            requested_at_ts=requested_at_ts,
+        )
+        return decision

@@ -34,7 +34,7 @@ from .clmm_lp_domain.components import (
     RebalanceStage,
     Snapshot,
     SwapView,
-    TokenOrderMapper,
+    PoolDomainAdapter,
 )
 from .clmm_lp_domain.open_planner import OpenProposal, plan_open
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
@@ -113,12 +113,12 @@ class CLMMLPBaseController(ControllerBase):
             cls._logger = logging.getLogger(__name__)
         return cls._logger
 
-    def __init__(self, config: CLMMLPBaseConfig, policy: CLMMPolicyBase, *args, **kwargs):
+    def __init__(self, config: CLMMLPBaseConfig, policy: CLMMPolicyBase, domain: PoolDomainAdapter, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
         self.config: CLMMLPBaseConfig = config
         self._policy = policy
 
-        self._tokens = TokenOrderMapper.from_config(config.trading_pair, config.pool_trading_pair)
+        self._domain = domain
 
         self._budget_key = self.config.budget_key or self.config.id
         self._budget_coordinator = BudgetCoordinatorRegistry.get(self._budget_key)
@@ -253,6 +253,8 @@ class CLMMLPBaseController(ControllerBase):
         active_swaps = data.get("active_swaps") or []
 
         def _safe_float(value: Optional[Decimal]) -> Optional[float]:
+            if value is None:
+                return None
             try:
                 return float(value)
             except (TypeError, ValueError):
@@ -344,11 +346,11 @@ class CLMMLPBaseController(ControllerBase):
         lp_base_fee = Decimal(str(custom.get("base_fee", 0)))
         lp_quote_fee = Decimal(str(custom.get("quote_fee", 0)))
 
-        inverted = self._tokens.executor_token_order_inverted(executor)
+        inverted = self._domain.executor_token_order_inverted(executor)
         if inverted is None:
-            inverted = self._tokens.pool_order_inverted
-        base_amount, quote_amount = self._tokens.lp_amounts_to_strategy(lp_base_amount, lp_quote_amount, inverted)
-        base_fee, quote_fee = self._tokens.lp_amounts_to_strategy(lp_base_fee, lp_quote_fee, inverted)
+            inverted = self._domain.pool_order_inverted
+        base_amount, quote_amount = self._domain.pool_amounts_to_strategy(lp_base_amount, lp_quote_amount, inverted)
+        base_fee, quote_fee = self._domain.pool_amounts_to_strategy(lp_base_fee, lp_quote_fee, inverted)
 
         lower = custom.get("lower_price")
         upper = custom.get("upper_price")
@@ -357,9 +359,9 @@ class CLMMLPBaseController(ControllerBase):
         upper = Decimal(str(upper)) if upper is not None else None
         price = Decimal(str(price)) if price is not None else None
         if lower is not None and upper is not None:
-            lower, upper = self._tokens.lp_bounds_to_strategy(lower, upper, inverted)
+            lower, upper = self._domain.pool_bounds_to_strategy(lower, upper, inverted)
         if price is not None:
-            price = self._tokens.lp_price_to_strategy(price, inverted)
+            price = self._domain.pool_price_to_strategy(price, inverted)
         out_of_range_since = custom.get("out_of_range_since")
         out_of_range_since = float(out_of_range_since) if out_of_range_since is not None else None
 
@@ -412,8 +414,8 @@ class CLMMLPBaseController(ControllerBase):
     async def _update_wallet_balances(self, connector) -> None:
         try:
             await asyncio.wait_for(connector.update_balances(), timeout=3.0)
-            self._wallet_base = Decimal(str(connector.get_available_balance(self._tokens.base_token) or 0))
-            self._wallet_quote = Decimal(str(connector.get_available_balance(self._tokens.quote_token) or 0))
+            self._wallet_base = Decimal(str(connector.get_available_balance(self._domain.base_token) or 0))
+            self._wallet_quote = Decimal(str(connector.get_available_balance(self._domain.quote_token) or 0))
             self._last_balance_update_ts = self.market_data_provider.time()
             self._ctx.swap.awaiting_balance_refresh = False
             self._ctx.swap.awaiting_balance_refresh_since = 0.0
@@ -1019,20 +1021,20 @@ class CLMMLPBaseController(ControllerBase):
         if proposal.open_base <= 0 or proposal.open_quote <= 0:
             return None
         lower_price, upper_price = proposal.lower, proposal.upper
-        lp_base_amt, lp_quote_amt = self._tokens.strategy_amounts_to_lp(
+        lp_base_amt, lp_quote_amt = self._domain.strategy_amounts_to_pool(
             proposal.open_base,
             proposal.open_quote,
         )
-        lp_lower_price, lp_upper_price = self._tokens.strategy_bounds_to_lp(lower_price, upper_price)
+        lp_lower_price, lp_upper_price = self._domain.strategy_bounds_to_pool(lower_price, upper_price)
 
         side = self._get_side_from_amounts(lp_base_amt, lp_quote_amt)
         executor_config = LPPositionExecutorConfig(
             timestamp=self.market_data_provider.time(),
             connector_name=self.config.connector_name,
             pool_address=self.config.pool_address,
-            trading_pair=self._tokens.pool_trading_pair,
-            base_token=self._tokens.pool_base_token,
-            quote_token=self._tokens.pool_quote_token,
+            trading_pair=self._domain.pool_trading_pair,
+            base_token=self._domain.pool_base_token,
+            quote_token=self._domain.pool_quote_token,
             lower_price=lp_lower_price,
             upper_price=lp_upper_price,
             base_amount=lp_base_amt,
@@ -1077,9 +1079,9 @@ class CLMMLPBaseController(ControllerBase):
             return None
         requirements: Dict[str, Decimal] = {}
         if base_amt > 0:
-            requirements[self._tokens.base_token] = base_amt
+            requirements[self._domain.base_token] = base_amt
         if quote_amt > 0:
-            requirements[self._tokens.quote_token] = quote_amt
+            requirements[self._domain.quote_token] = quote_amt
         reservation_id = self._budget_coordinator.reserve(
             connector_name=self.config.connector_name,
             connector=connector,

@@ -1,13 +1,15 @@
 from decimal import Decimal
 from typing import Dict, Optional
 
+from .components import PoolDomainAdapter
 from .range_calculator import RangeCalculator, RangePlan
 from .v3_math import V3Math
 
 
 class CLMMPolicyBase:
-    def __init__(self, config) -> None:
+    def __init__(self, config, domain: PoolDomainAdapter) -> None:
         self._config = config
+        self._domain = domain
 
     async def update(self, connector) -> None:
         return None
@@ -28,16 +30,9 @@ class CLMMPolicyBase:
 class UniswapV3Policy(CLMMPolicyBase):
     _tick_base = Decimal("1.0001")
 
-    def __init__(self, config) -> None:
-        super().__init__(config)
+    def __init__(self, config, domain: PoolDomainAdapter) -> None:
+        super().__init__(config, domain)
         self._tick_spacing: Optional[int] = None
-
-    def _pool_order_inverted(self) -> bool:
-        trading_pair = getattr(self._config, "trading_pair", "")
-        pool_trading_pair = getattr(self._config, "pool_trading_pair", None) or trading_pair
-        base, quote = trading_pair.split("-") if "-" in trading_pair else ("", "")
-        pool_base, pool_quote = pool_trading_pair.split("-") if "-" in pool_trading_pair else ("", "")
-        return pool_base == quote and pool_quote == base
 
     async def update(self, connector) -> None:
         if connector is None or not self._config.pool_address:
@@ -68,65 +63,39 @@ class UniswapV3Policy(CLMMPolicyBase):
         if self._tick_spacing is None or self._tick_spacing <= 0:
             return None
         lower, upper = base_plan.lower, base_plan.upper
-        if self._pool_order_inverted():
-            if lower <= 0 or upper <= 0 or lower >= upper:
-                return None
-            pool_lower = Decimal("1") / upper
-            pool_upper = Decimal("1") / lower
-            aligned = RangeCalculator.align_bounds_to_ticks(
-                pool_lower,
-                pool_upper,
-                tick_spacing=self._tick_spacing,
-                tick_base=self._tick_base,
-            )
-            if aligned is None:
-                return None
-            aligned_lower = Decimal("1") / aligned[1]
-            aligned_upper = Decimal("1") / aligned[0]
-            if aligned_lower >= aligned_upper:
-                return None
-            return RangePlan(center_price=center_price, lower=aligned_lower, upper=aligned_upper)
+        pool_lower, pool_upper = self._domain.strategy_bounds_to_pool(lower, upper)
         aligned = RangeCalculator.align_bounds_to_ticks(
-            lower,
-            upper,
+            pool_lower,
+            pool_upper,
             tick_spacing=self._tick_spacing,
             tick_base=self._tick_base,
         )
         if aligned is None:
             return None
-        return RangePlan(center_price=center_price, lower=aligned[0], upper=aligned[1])
+        aligned_lower, aligned_upper = self._domain.pool_bounds_to_strategy(aligned[0], aligned[1], self._domain.pool_order_inverted)
+        if aligned_lower >= aligned_upper:
+            return None
+        return RangePlan(center_price=center_price, lower=aligned_lower, upper=aligned_upper)
 
     def quote_per_base_ratio(self, price: Decimal, lower: Decimal, upper: Decimal) -> Optional[Decimal]:
         if self._tick_spacing is None or self._tick_spacing <= 0:
             return None
         multiplier = max(1, int(self._config.ratio_clamp_tick_multiplier))
         clamp_ticks = self._tick_spacing * multiplier
-        if self._pool_order_inverted():
-            if price <= 0 or lower <= 0 or upper <= 0 or lower >= upper:
-                return None
-            pool_price = Decimal("1") / price
-            pool_lower = Decimal("1") / upper
-            pool_upper = Decimal("1") / lower
-            clamped_pool_price = RangeCalculator.clamp_price_by_ticks(
-                pool_price,
-                pool_lower,
-                pool_upper,
-                tick_base=self._tick_base,
-                clamp_ticks=clamp_ticks,
-            )
-            if clamped_pool_price is None or clamped_pool_price <= 0:
-                return None
-            clamped_price = Decimal("1") / clamped_pool_price
-        else:
-            clamped_price = RangeCalculator.clamp_price_by_ticks(
-                price,
-                lower,
-                upper,
-                tick_base=self._tick_base,
-                clamp_ticks=clamp_ticks,
-            )
-            if clamped_price is None:
-                return None
+        if price <= 0 or lower <= 0 or upper <= 0 or lower >= upper:
+            return None
+        pool_price = self._domain.strategy_price_to_pool(price)
+        pool_lower, pool_upper = self._domain.strategy_bounds_to_pool(lower, upper)
+        clamped_pool_price = RangeCalculator.clamp_price_by_ticks(
+            pool_price,
+            pool_lower,
+            pool_upper,
+            tick_base=self._tick_base,
+            clamp_ticks=clamp_ticks,
+        )
+        if clamped_pool_price is None:
+            return None
+        clamped_price = self._domain.pool_price_to_strategy(clamped_pool_price, self._domain.pool_order_inverted)
         return V3Math.quote_per_base_ratio(clamped_price, lower, upper)
 
 

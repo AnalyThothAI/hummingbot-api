@@ -44,6 +44,14 @@ MQTT_LABELS = {
     "unknown": "Unknown",
 }
 
+STRATEGY_LABELS = {
+    "running": "Running",
+    "idle": "Idle",
+    "stopped": "Stopped",
+    "stopping": "Stopping",
+    "unknown": "Unknown",
+}
+
 
 def format_label(value: Optional[str], mapping: Dict[str, str]) -> str:
     if not value:
@@ -135,8 +143,8 @@ def stop_bot(bot_name: str, skip_order_cancellation: bool = False):
     response = backend_api_request("POST", "/bot-orchestration/stop-bot", json_body=payload)
     if handle_action_response(
         response,
-        f"Stop command sent to {bot_name}.",
-        f"Failed to stop bot {bot_name}.",
+        f"Stop strategy command sent to {bot_name}.",
+        f"Failed to stop strategy for {bot_name}.",
         require_success_flag=True,
     ):
         return
@@ -147,8 +155,8 @@ def start_bot(bot_name: str):
     response = backend_api_request("POST", "/bot-orchestration/start-bot", json_body=payload)
     if handle_action_response(
         response,
-        f"Start command sent to {bot_name}.",
-        f"Failed to start bot {bot_name}.",
+        f"Start strategy command sent to {bot_name}.",
+        f"Failed to start strategy for {bot_name}.",
         require_success_flag=True,
     ):
         return
@@ -375,6 +383,40 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
     return active_controllers, stopped_controllers, error_controllers, total_global_pnl_quote, total_volume_traded, total_unrealized_pnl_quote, config_map
 
 
+def build_lp_position_rows(performance: Dict[str, Any], config_map: Dict[str, Any]) -> List[Dict[str, str]]:
+    rows = []
+    if not isinstance(performance, dict):
+        return rows
+
+    for controller_id, inner_dict in performance.items():
+        if not isinstance(inner_dict, dict):
+            continue
+        custom_info = inner_dict.get("custom_info", {})
+        positions = custom_info.get("lp_positions")
+        if not isinstance(positions, list) or not positions:
+            continue
+
+        controller_config = config_map.get(controller_id, {})
+        controller_name = controller_config.get("controller_name", controller_id)
+        trading_pair = controller_config.get("trading_pair")
+
+        for pos in positions:
+            if not isinstance(pos, dict):
+                continue
+            rows.append({
+                "Controller": controller_name,
+                "Pair": trading_pair or "-",
+                "State": pos.get("state") or "-",
+                "Position": pos.get("position") or "-",
+                "Lower": format_number(pos.get("lower"), 6),
+                "Upper": format_number(pos.get("upper"), 6),
+                "Base": format_number(pos.get("base"), 4),
+                "Quote": format_number(pos.get("quote"), 4),
+            })
+
+    return rows
+
+
 def format_error_logs(error_logs: List[Any]) -> List[str]:
     formatted = []
     for log in error_logs:
@@ -479,44 +521,60 @@ def render_overview(instances: List[Dict[str, Any]]):
                     bot_data = bot_status.get("data", {})
                     bot_status_value = bot_data.get("status", "unknown")
 
+            if bot_status_value:
+                st.caption(f"Strategy: {format_label(bot_status_value, STRATEGY_LABELS)}")
+
             archive_disabled = docker_status == "missing" or (
                 docker_status == "running" and bot_status_value != "stopped"
             )
 
-            action_cols = st.columns(3)
-            primary_label = "—"
-            primary_action = None
-            if docker_status == "running":
+            strategy_label = "—"
+            strategy_action = None
+            strategy_available = mqtt_status in {"connected", "stale"}
+            if strategy_available:
                 if bot_status_value == "stopped":
-                    primary_label = "▶️ Start Bot"
-                    primary_action = lambda name=bot_name: start_bot(name)
-                elif mqtt_status in {"connected", "stale"}:
-                    primary_label = "⏹️ Stop Bot"
-                    primary_action = lambda name=bot_name: stop_bot(name)
+                    strategy_label = "▶️ Start Strategy"
+                    strategy_action = lambda name=bot_name: start_bot(name)
                 else:
-                    primary_label = "⛔ Stop Container"
-                    primary_action = lambda name=bot_name: stop_container(name)
-            elif docker_status in {"exited", "created", "dead"}:
-                primary_label = "▶️ Start Container"
-                primary_action = lambda name=bot_name: start_container(name)
-            elif docker_status == "missing":
-                if mqtt_status in {"connected", "stale"}:
-                    primary_label = "⏹️ Stop Bot"
-                    primary_action = lambda name=bot_name: stop_bot(name)
-                else:
-                    primary_label = "➕ Launch New"
-                    primary_action = lambda: st.switch_page("frontend/pages/orchestration/launch_bot_v2/app.py")
+                    strategy_label = "⏹️ Stop Strategy"
+                    strategy_action = lambda name=bot_name: stop_bot(name)
+            elif bot_status_value == "stopped":
+                strategy_label = "▶️ Start Strategy"
+            else:
+                strategy_label = "⏹️ Stop Strategy"
 
+            container_label = "—"
+            container_action = None
+            if docker_status == "running":
+                container_label = "⛔ Stop Container"
+                container_action = lambda name=bot_name: stop_container(name)
+            elif docker_status in {"exited", "created", "dead"}:
+                container_label = "▶️ Start Container"
+                container_action = lambda name=bot_name: start_container(name)
+            elif docker_status == "missing":
+                container_label = "➕ Launch New"
+                container_action = lambda: st.switch_page("frontend/pages/orchestration/launch_bot_v2/app.py")
+
+            action_cols = st.columns(4)
             with action_cols[0]:
                 if st.button(
-                    primary_label,
-                    key=f"primary_{bot_name}",
+                    strategy_label,
+                    key=f"strategy_{bot_name}",
                     use_container_width=True,
-                    disabled=primary_action is None,
+                    disabled=strategy_action is None,
                 ):
-                    if primary_action:
-                        primary_action()
+                    if strategy_action:
+                        strategy_action()
             with action_cols[1]:
+                if st.button(
+                    container_label,
+                    key=f"container_{bot_name}",
+                    use_container_width=True,
+                    disabled=container_action is None,
+                ):
+                    if container_action:
+                        container_action()
+            with action_cols[2]:
                 if st.button(
                     "📦 Archive",
                     key=f"archive_{bot_name}",
@@ -524,7 +582,7 @@ def render_overview(instances: List[Dict[str, Any]]):
                     disabled=archive_disabled,
                 ):
                     archive_bot(bot_name, docker_status)
-            with action_cols[2]:
+            with action_cols[3]:
                 if st.button("📜 Logs Page", key=f"open_logs_{bot_name}", use_container_width=True):
                     st.session_state.logs_selected_container = bot_name
                     st.switch_page("frontend/pages/orchestration/logs/app.py")
@@ -533,7 +591,7 @@ def render_overview(instances: List[Dict[str, Any]]):
                 continue
 
             if bot_status.get("status") != "success":
-                st.caption("Bot status unavailable.")
+                st.caption("Strategy status unavailable.")
                 continue
 
             bot_state = bot_data.get("status", "unknown")
@@ -664,6 +722,12 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
         ]
         if missing:
             st.info(f"Controllers configured but not reporting yet: {', '.join(missing)}")
+
+    lp_rows = build_lp_position_rows(performance, config_map)
+    if lp_rows:
+        with st.expander("LP Positions", expanded=True):
+            lp_df = pd.DataFrame(lp_rows)
+            st.dataframe(lp_df, use_container_width=True, hide_index=True)
 
 
 def render_logs(bot_name: str, bot_data: Dict[str, Any]):

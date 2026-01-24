@@ -2,6 +2,7 @@ import asyncio
 import logging
 from typing import Optional
 import re
+import time
 
 import docker
 
@@ -313,19 +314,32 @@ class BotsOrchestrator:
             error_logs = self.mqtt_manager.get_bot_error_logs(bot_name)
             general_logs = self.mqtt_manager.get_bot_logs(bot_name)
 
-            # Check if bot has sent recent messages (within last 30 seconds)
+            activity_timeout = settings.app.mqtt_activity_timeout_seconds
+            now = time.time()
+            performance_last_seen = self.mqtt_manager.get_performance_last_seen(bot_name)
+            log_last_seen = self.mqtt_manager.get_log_last_seen(bot_name)
+            strategy_last_seen = max(
+                [ts for ts in [performance_last_seen, log_last_seen] if ts is not None],
+                default=None,
+            )
+            performance_recent = (
+                performance_last_seen is not None and (now - performance_last_seen) <= activity_timeout
+            )
+            log_recent = log_last_seen is not None and (now - log_last_seen) <= activity_timeout
+
+            # Determine strategy status using controller performance/log activity (no heartbeat dependency).
+            if len(performance) > 0:
+                status = "running" if performance_recent else "idle"
+            elif log_recent:
+                status = "running"
+            else:
+                status = "stopped"
+
+            # Keep MQTT activity signal for diagnostics
             discovered_bots = self.mqtt_manager.get_discovered_bots(
                 timeout_seconds=settings.app.mqtt_activity_timeout_seconds
             )
             recently_active = bot_name in discovered_bots
-
-            # Determine status based on recent MQTT activity first, then performance data.
-            if recently_active:
-                status = "running"
-            elif len(performance) > 0:
-                status = "idle"  # Has performance data but no recent activity
-            else:
-                status = "stopped"
 
             return {
                 "status": status,
@@ -333,6 +347,7 @@ class BotsOrchestrator:
                 "error_logs": error_logs,
                 "general_logs": general_logs,
                 "recently_active": recently_active,
+                "strategy_last_seen": strategy_last_seen,
             }
         except Exception as e:
             return {"status": "error", "error": str(e)}
