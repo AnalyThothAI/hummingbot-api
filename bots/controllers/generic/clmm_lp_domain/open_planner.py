@@ -7,7 +7,7 @@ from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction
 from .components import ControllerContext, Decision, DecisionPatch, Intent, IntentFlow, IntentStage, Snapshot
 
 MaybePlanInventorySwap = Callable[..., Optional[Decision]]
-BuildOpenLPAction = Callable[["OpenProposal"], Optional[CreateExecutorAction]]
+BuildOpenLPAction = Callable[["OpenProposal", float], Optional[CreateExecutorAction]]
 PatchMutator = Callable[[DecisionPatch, CreateExecutorAction], None]
 
 
@@ -21,6 +21,7 @@ class OpenProposal:
     delta_quote_value: Decimal
     open_base: Decimal
     open_quote: Decimal
+    min_swap_value_quote: Decimal
 
 
 BuildOpenProposal = Callable[
@@ -56,12 +57,13 @@ def plan_open(
         current_price=snapshot.current_price,
         delta_base=proposal.delta_base,
         delta_quote_value=proposal.delta_quote_value,
+        min_swap_value=proposal.min_swap_value_quote,
         flow=flow,
     )
     if swap_plan is not None:
         return swap_plan
 
-    action = build_open_lp_action(proposal)
+    action = build_open_lp_action(proposal, snapshot.now)
     if action is None:
         return Decision(intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="budget_unavailable"))
 

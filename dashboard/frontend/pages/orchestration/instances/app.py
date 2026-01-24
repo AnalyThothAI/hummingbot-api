@@ -317,9 +317,19 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
     total_global_pnl_quote = 0
     total_volume_traded = 0
     total_unrealized_pnl_quote = 0
+    total_realized_pnl_quote = 0
 
     if not isinstance(performance, dict):
-        return active_controllers, stopped_controllers, error_controllers, total_global_pnl_quote, total_volume_traded, total_unrealized_pnl_quote, config_map
+        return (
+            active_controllers,
+            stopped_controllers,
+            error_controllers,
+            total_global_pnl_quote,
+            total_volume_traded,
+            total_unrealized_pnl_quote,
+            total_realized_pnl_quote,
+            config_map,
+        )
 
     for controller, inner_dict in performance.items():
         controller_status = inner_dict.get("status")
@@ -343,6 +353,7 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         unrealized_pnl_quote = controller_performance.get("unrealized_pnl_quote", 0)
         global_pnl_quote = controller_performance.get("global_pnl_quote", 0)
         volume_traded = controller_performance.get("volume_traded", 0)
+        nav_quote = custom_info.get("nav_quote")
 
         close_types = controller_performance.get("close_type_counts", {})
         tp = close_types.get("CloseType.TAKE_PROFIT", 0)
@@ -366,6 +377,7 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
             "Realized PNL ($)": round(realized_pnl_quote, 2),
             "Unrealized PNL ($)": round(unrealized_pnl_quote, 2),
             "NET PNL ($)": round(global_pnl_quote, 2),
+            "NAV ($)": round(nav_quote, 2) if nav_quote is not None else None,
             "Volume ($)": round(volume_traded, 2),
             "Close Types": close_types_str,
             "_controller_id": controller,
@@ -374,13 +386,23 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         total_global_pnl_quote += global_pnl_quote
         total_volume_traded += volume_traded
         total_unrealized_pnl_quote += unrealized_pnl_quote
+        total_realized_pnl_quote += realized_pnl_quote
 
         if kill_switch_status:
             stopped_controllers.append(controller_info)
         else:
             active_controllers.append(controller_info)
 
-    return active_controllers, stopped_controllers, error_controllers, total_global_pnl_quote, total_volume_traded, total_unrealized_pnl_quote, config_map
+    return (
+        active_controllers,
+        stopped_controllers,
+        error_controllers,
+        total_global_pnl_quote,
+        total_volume_traded,
+        total_unrealized_pnl_quote,
+        total_realized_pnl_quote,
+        config_map,
+    )
 
 
 def build_lp_position_rows(performance: Dict[str, Any], config_map: Dict[str, Any]) -> List[Dict[str, str]]:
@@ -622,19 +644,22 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
         total_global_pnl_quote,
         total_volume_traded,
         total_unrealized_pnl_quote,
+        total_realized_pnl_quote,
         config_map,
     ) = build_controller_rows(performance, controller_configs)
 
     total_global_pnl_pct = total_global_pnl_quote / total_volume_traded if total_volume_traded > 0 else 0
 
-    metric_cols = st.columns(4)
+    metric_cols = st.columns(5)
     with metric_cols[0]:
         st.metric("🏦 NET PNL", f"${total_global_pnl_quote:.2f}")
     with metric_cols[1]:
         st.metric("💹 Unrealized PNL", f"${total_unrealized_pnl_quote:.2f}")
     with metric_cols[2]:
-        st.metric("📊 NET PNL (%)", f"{total_global_pnl_pct:.2%}")
+        st.metric("✅ Realized PNL", f"${total_realized_pnl_quote:.2f}")
     with metric_cols[3]:
+        st.metric("📊 NET PNL (%)", f"{total_global_pnl_pct:.2%}")
+    with metric_cols[4]:
         st.metric("💸 Volume Traded", f"${total_volume_traded:.2f}")
 
     st.caption(

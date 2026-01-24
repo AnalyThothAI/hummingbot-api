@@ -95,6 +95,8 @@ class CostFilter:
 
         fee_rate = fee_rate_ewma
         if fee_rate is None or fee_rate <= 0:
+            if fee_rate_bootstrap_quote_per_hour <= 0:
+                return True
             fee_rate = fee_rate_bootstrap_quote_per_hour / Decimal("3600")
 
         expected_fees = fee_rate * cls.IN_RANGE_TIME_SEC

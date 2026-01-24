@@ -160,6 +160,11 @@ class SwapView:
     level_id: Optional[str]
     purpose: Optional[SwapPurpose]
     amount: Decimal
+    executed_amount_base: Optional[Decimal] = None
+    executed_amount_quote: Optional[Decimal] = None
+    amount_in: Optional[Decimal] = None
+    amount_out: Optional[Decimal] = None
+    amount_in_is_quote: Optional[bool] = None
 
 
 @dataclass(frozen=True)
@@ -188,13 +193,6 @@ class Regions:
     rebalance_open_in_progress: bool
     entry_triggered: bool
     reenter_blocked: bool
-
-
-@dataclass(frozen=True)
-class PositionBudget:
-    total_value_quote: Decimal
-    target_base: Decimal
-    target_quote: Decimal
 
 
 @dataclass(frozen=True)

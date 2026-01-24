@@ -43,7 +43,9 @@ class UniswapV3Policy(CLMMPolicyBase):
         pool_info = await getter(self._config.pool_address)
         if pool_info is None:
             return None
-        tick_spacing = getattr(pool_info, "bin_step", None)
+        tick_spacing = getattr(pool_info, "tick_spacing", None)
+        if tick_spacing is None:
+            tick_spacing = getattr(pool_info, "bin_step", None)
         if tick_spacing is None:
             return None
         try:

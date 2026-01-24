@@ -1,10 +1,10 @@
 import asyncio
 import logging
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
 
-from pydantic import Field
+from pydantic import Field, field_validator
 
 from hummingbot.core.data_type.common import MarketDict, TradeType
 from hummingbot.logger import HummingbotLogger
@@ -96,6 +96,24 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     min_native_balance: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     balance_refresh_interval_sec: int = Field(default=20, json_schema_extra={"is_updatable": True})
     balance_refresh_timeout_sec: int = Field(default=30, json_schema_extra={"is_updatable": True})
+
+    @field_validator(
+        "hysteresis_pct",
+        "swap_min_value_pct",
+        "swap_safety_buffer_pct",
+        "swap_slippage_pct",
+        "stop_loss_pnl_pct",
+        mode="after",
+    )
+    @classmethod
+    def validate_ratio_pct(cls, v, info):
+        if v is None:
+            return v
+        if v < 0:
+            raise ValueError(f"{info.field_name} must be >= 0")
+        if v >= 1:
+            raise ValueError(f"{info.field_name} must be < 1 (use ratio, e.g. 0.01 for 1%)")
+        return v
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
         pool_pair = self.pool_trading_pair or self.trading_pair
@@ -202,7 +220,19 @@ class CLMMLPBaseController(ControllerBase):
         return decision.actions
 
     def get_custom_info(self) -> Dict:
-        return {}
+        snapshot = self._latest_snapshot or self._build_snapshot(self.market_data_provider.time())
+        nav = self._compute_nav(snapshot)
+        if nav is None:
+            return {}
+        nav_value, lp_value, wallet_value, budget_value = nav
+        info = {
+            "nav_quote": float(nav_value),
+            "nav_lp_quote": float(lp_value),
+            "nav_wallet_quote": float(wallet_value),
+        }
+        if budget_value > 0:
+            info["nav_budget_quote"] = float(budget_value)
+        return info
 
     def _log_decision_actions(self, decision: Decision) -> None:
         if not decision.actions:
@@ -226,6 +256,16 @@ class CLMMLPBaseController(ControllerBase):
             if executor.type == "lp_position_executor":
                 lp[executor.id] = self._parse_lp_view(executor)
             elif executor.type == "gateway_swap_executor":
+                custom = executor.custom_info or {}
+                executed_amount_base = self._to_decimal(custom.get("executed_amount_base"))
+                executed_amount_quote = self._to_decimal(custom.get("executed_amount_quote"))
+                amount_in = self._to_decimal(custom.get("amount_in"))
+                amount_out = self._to_decimal(custom.get("amount_out"))
+                amount_in_is_quote = custom.get("amount_in_is_quote")
+                if not isinstance(amount_in_is_quote, bool):
+                    amount_in_is_quote = getattr(executor.config, "amount_in_is_quote", None)
+                    if not isinstance(amount_in_is_quote, bool):
+                        amount_in_is_quote = None
                 swaps[executor.id] = SwapView(
                     executor_id=executor.id,
                     is_active=executor.is_active,
@@ -234,6 +274,11 @@ class CLMMLPBaseController(ControllerBase):
                     level_id=getattr(executor.config, "level_id", None),
                     purpose=self._swap_purpose(getattr(executor.config, "level_id", None)),
                     amount=Decimal(str(getattr(executor.config, "amount", 0))),
+                    executed_amount_base=executed_amount_base,
+                    executed_amount_quote=executed_amount_quote,
+                    amount_in=amount_in,
+                    amount_out=amount_out,
+                    amount_in_is_quote=amount_in_is_quote,
                 )
 
         active_lp = [v for v in lp.values() if v.is_active]
@@ -293,11 +338,34 @@ class CLMMLPBaseController(ControllerBase):
             out_of_range_since=out_of_range_since,
         )
 
+    def _compute_nav(self, snapshot: Snapshot) -> Optional[Tuple[Decimal, Decimal, Decimal, Decimal]]:
+        current_price = snapshot.current_price
+        if current_price is None or current_price <= 0:
+            return None
+        lp_value = sum(self._estimate_position_value(lp, current_price) for lp in snapshot.active_lp)
+        wallet_value = snapshot.wallet_base * current_price + snapshot.wallet_quote
+        budget_value = max(Decimal("0"), self.config.position_value_quote)
+        if budget_value <= 0:
+            nav_value = lp_value + wallet_value
+        else:
+            unallocated_value = max(Decimal("0"), budget_value - lp_value)
+            nav_value = lp_value + min(wallet_value, unallocated_value)
+        return nav_value, lp_value, wallet_value, budget_value
+
     def _get_current_price(self) -> Optional[Decimal]:
         price = self.market_data_provider.get_rate(self.config.trading_pair)
         if price is None:
             return None
         return Decimal(str(price))
+
+    @staticmethod
+    def _to_decimal(value: Optional[object]) -> Optional[Decimal]:
+        if value is None:
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, TypeError):
+            return None
 
     def _schedule_wallet_balance_refresh(self, now: float) -> None:
         if self._wallet_update_task is not None and not self._wallet_update_task.done():
@@ -323,14 +391,17 @@ class CLMMLPBaseController(ControllerBase):
 
     async def _update_wallet_balances(self, connector) -> None:
         try:
-            await asyncio.wait_for(connector.update_balances(), timeout=3.0)
+            await asyncio.wait_for(
+                connector.update_balances(),
+                timeout=self.config.balance_refresh_timeout_sec,
+            )
             self._wallet_base = Decimal(str(connector.get_available_balance(self._domain.base_token) or 0))
             self._wallet_quote = Decimal(str(connector.get_available_balance(self._domain.quote_token) or 0))
             self._last_balance_update_ts = self.market_data_provider.time()
             self._ctx.swap.awaiting_balance_refresh = False
             self._ctx.swap.awaiting_balance_refresh_since = 0.0
         except Exception:
-            self.logger().warning("update_balances failed")
+            self.logger().exception("update_balances failed")
 
     def _clear_stale_balance_refresh(self, now: float) -> None:
         if not self._ctx.swap.awaiting_balance_refresh:
@@ -428,7 +499,7 @@ class CLMMLPBaseController(ControllerBase):
         return Decision(intent=Intent(flow=IntentFlow.NONE, stage=IntentStage.NONE, reason="idle"))
 
     def _compute_regions(self, snapshot: Snapshot) -> Regions:
-        label = snapshot.active_swaps[0].level_id if snapshot.active_swaps else None
+        label = self._select_active_swap_label(snapshot.active_swaps)
         return Regions(
             manual_stop=bool(self.config.manual_kill_switch),
             failure_blocked=bool(self._ctx.failure.blocked),
@@ -447,6 +518,16 @@ class CLMMLPBaseController(ControllerBase):
                 (not self.config.reenter_enabled) and self._ctx.stoploss.last_exit_reason == "stop_loss"
             ),
         )
+
+    @staticmethod
+    def _select_active_swap_label(active_swaps: List[SwapView]) -> Optional[str]:
+        if not active_swaps:
+            return None
+        if any(swap.purpose == SwapPurpose.STOPLOSS for swap in active_swaps):
+            return SwapPurpose.STOPLOSS.value
+        if any(swap.purpose == SwapPurpose.INVENTORY for swap in active_swaps):
+            return SwapPurpose.INVENTORY.value
+        return active_swaps[0].level_id
 
     def _rule_manual_kill_switch(
         self,
@@ -688,7 +769,17 @@ class CLMMLPBaseController(ControllerBase):
         base_to_liquidate = snapshot.wallet_base
         target = ctx.stoploss.liquidation_target_base
         if target is not None:
-            base_to_liquidate = min(base_to_liquidate, max(Decimal("0"), target))
+            target = max(Decimal("0"), target)
+            min_base = self._min_liquidation_base(current_price)
+            if target <= min_base:
+                patch = DecisionPatch()
+                patch.stoploss.pending_liquidation = False
+                patch.stoploss.liquidation_target_base = None
+                return Decision(
+                    intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="stop_loss_liquidation_complete"),
+                    patch=patch,
+                )
+            base_to_liquidate = min(base_to_liquidate, target)
 
         if base_to_liquidate <= 0:
             expected_base = max(Decimal("0"), target or Decimal("0"))
@@ -770,13 +861,18 @@ class CLMMLPBaseController(ControllerBase):
         ratio = self._policy.quote_per_base_ratio(current_price, range_plan.lower, range_plan.upper)
         if ratio is None:
             return None, "ratio_unavailable"
-        targets = V3Math.target_amounts_from_value(total_value, current_price, ratio)
+        total_wallet_value = wallet_base * current_price + wallet_quote
+        reserve_quote = max(Decimal("0"), self.config.cost_filter_fixed_cost_quote)
+        effective_budget = min(total_value, total_wallet_value)
+        if reserve_quote > 0:
+            effective_budget = max(Decimal("0"), effective_budget - reserve_quote)
+        if effective_budget <= 0:
+            return None, "insufficient_balance"
+
+        targets = V3Math.target_amounts_from_value(effective_budget, current_price, ratio)
         if targets is None:
             return None, "target_unavailable"
         target_base, target_quote = targets
-        total_wallet_value = wallet_base * current_price + wallet_quote
-        if total_wallet_value < total_value:
-            return None, "insufficient_balance"
 
         open_base = min(wallet_base, target_base)
         open_quote = min(wallet_quote, target_quote)
@@ -800,11 +896,13 @@ class CLMMLPBaseController(ControllerBase):
                 return None, "insufficient_balance"
             delta_base = -min(base_surplus, quote_deficit / current_price)
 
+        min_pct = max(Decimal("0"), self.config.swap_min_value_pct)
+        min_swap_value = effective_budget * min_pct
         delta_quote_value = abs(delta_base * current_price)
         if open_base <= 0 or open_quote <= 0:
             if not self.config.auto_swap_enabled:
                 return None, "swap_required"
-            if delta_quote_value <= 0 or delta_quote_value < self._swap_min_quote_value():
+            if delta_quote_value <= 0 or delta_quote_value < min_swap_value:
                 return None, "swap_required"
         return OpenProposal(
             lower=range_plan.lower,
@@ -815,6 +913,7 @@ class CLMMLPBaseController(ControllerBase):
             delta_quote_value=delta_quote_value,
             open_base=open_base,
             open_quote=open_quote,
+            min_swap_value_quote=min_swap_value,
         ), None
 
     def _maybe_plan_inventory_swap(
@@ -825,9 +924,11 @@ class CLMMLPBaseController(ControllerBase):
         current_price: Optional[Decimal],
         delta_base: Decimal,
         delta_quote_value: Decimal,
+        min_swap_value: Optional[Decimal] = None,
         flow: IntentFlow,
     ) -> Optional[Decision]:
-        min_swap_value = self._swap_min_quote_value()
+        if min_swap_value is None:
+            min_swap_value = self._swap_min_quote_value()
         if delta_quote_value <= 0 or delta_quote_value < min_swap_value:
             return None
 
@@ -854,6 +955,45 @@ class CLMMLPBaseController(ControllerBase):
         min_pct = max(Decimal("0"), self.config.swap_min_value_pct)
         return self.config.position_value_quote * min_pct
 
+    def _min_liquidation_base(self, current_price: Decimal) -> Decimal:
+        if current_price <= 0:
+            return Decimal("0")
+        min_quote = self._swap_min_quote_value()
+        min_base = min_quote / current_price if min_quote > 0 else Decimal("0")
+        return max(min_base, Decimal("0.00000001"))
+
+    def _build_swap_action(
+        self,
+        *,
+        level_id: str,
+        side: TradeType,
+        amount: Decimal,
+        amount_in_is_quote: bool,
+        apply_buffer: bool,
+    ) -> Optional[CreateExecutorAction]:
+        if amount <= 0:
+            return None
+        if apply_buffer:
+            amount = self._apply_swap_buffer(amount)
+            if amount <= 0:
+                return None
+        executor_config = GatewaySwapExecutorConfig(
+            timestamp=self.market_data_provider.time(),
+            connector_name=self.config.router_connector,
+            trading_pair=self.config.trading_pair,
+            side=side,
+            amount=amount,
+            amount_in_is_quote=amount_in_is_quote,
+            slippage_pct=self._swap_slippage_pct(),
+            pool_address=self.config.pool_address or None,
+            level_id=level_id,
+            budget_key=self._budget_key,
+        )
+        return CreateExecutorAction(
+            controller_id=self.config.id,
+            executor_config=executor_config,
+        )
+
     def _build_inventory_swap_action(
         self,
         current_price: Optional[Decimal],
@@ -864,57 +1004,33 @@ class CLMMLPBaseController(ControllerBase):
 
         if delta_base > 0:
             amount = abs(delta_base * current_price)
-            if amount <= 0:
-                return None
-            side = TradeType.BUY
-            amount_in_is_quote = True
-        elif delta_base < 0:
-            amount = self._apply_swap_buffer(abs(delta_base))
-            if amount <= 0:
-                return None
-            side = TradeType.SELL
-            amount_in_is_quote = False
-        else:
-            return None
-
-        executor_config = GatewaySwapExecutorConfig(
-            timestamp=self.market_data_provider.time(),
-            connector_name=self.config.router_connector,
-            trading_pair=self.config.trading_pair,
-            side=side,
-            amount=amount,
-            amount_in_is_quote=amount_in_is_quote,
-            slippage_pct=self._swap_slippage_pct(),
-            pool_address=self.config.pool_address or None,
-            level_id="inventory",
-            budget_key=self._budget_key,
-        )
-        return CreateExecutorAction(
-            controller_id=self.config.id,
-            executor_config=executor_config,
-        )
+            return self._build_swap_action(
+                level_id="inventory",
+                side=TradeType.BUY,
+                amount=amount,
+                amount_in_is_quote=True,
+                apply_buffer=False,
+            )
+        if delta_base < 0:
+            amount = abs(delta_base)
+            return self._build_swap_action(
+                level_id="inventory",
+                side=TradeType.SELL,
+                amount=amount,
+                amount_in_is_quote=False,
+                apply_buffer=True,
+            )
+        return None
 
     def _build_liquidation_action(self, base_amount: Decimal) -> Optional[CreateExecutorAction]:
         if base_amount <= 0:
             return None
-        swap_amount = self._apply_swap_buffer(base_amount)
-        if swap_amount <= 0:
-            return None
-        executor_config = GatewaySwapExecutorConfig(
-            timestamp=self.market_data_provider.time(),
-            connector_name=self.config.router_connector,
-            trading_pair=self.config.trading_pair,
-            side=TradeType.SELL,
-            amount=swap_amount,
-            amount_in_is_quote=False,
-            slippage_pct=self._swap_slippage_pct(),
-            pool_address=self.config.pool_address or None,
+        return self._build_swap_action(
             level_id="liquidate",
-            budget_key=self._budget_key,
-        )
-        return CreateExecutorAction(
-            controller_id=self.config.id,
-            executor_config=executor_config,
+            side=TradeType.SELL,
+            amount=base_amount,
+            amount_in_is_quote=False,
+            apply_buffer=False,
         )
 
     def _apply_swap_buffer(self, amount: Decimal) -> Decimal:
@@ -980,6 +1096,16 @@ class CLMMLPBaseController(ControllerBase):
         self._rebalance_engine.reconcile(snapshot, self._ctx)
         self._ensure_anchors(snapshot)
         self._update_fee_rate_estimates(snapshot)
+        self._cleanup_ctx(snapshot)
+
+    def _cleanup_ctx(self, snapshot: Snapshot) -> None:
+        for executor_id in list(self._ctx.lp.keys()):
+            lp_view = snapshot.lp.get(executor_id)
+            if lp_view is None or lp_view.is_done:
+                self._ctx.lp.pop(executor_id, None)
+        if self._ctx.swap.settled_executor_ids:
+            active_swap_ids = set(snapshot.swaps.keys())
+            self._ctx.swap.settled_executor_ids.intersection_update(active_swap_ids)
 
     @staticmethod
     def _get_side_from_amounts(base_amt: Decimal, quote_amt: Decimal) -> int:
@@ -1044,7 +1170,7 @@ class CLMMLPBaseController(ControllerBase):
         if target is None:
             self._ctx.stoploss.pending_liquidation = True
             return
-        sold = max(Decimal("0"), swap.amount)
+        sold = self._resolve_liquidation_sold_base(swap)
         remaining = max(Decimal("0"), target - sold)
         if remaining <= 0:
             self._ctx.stoploss.pending_liquidation = False
@@ -1052,6 +1178,19 @@ class CLMMLPBaseController(ControllerBase):
             return
         self._ctx.stoploss.pending_liquidation = True
         self._ctx.stoploss.liquidation_target_base = remaining
+
+    def _resolve_liquidation_sold_base(self, swap: SwapView) -> Decimal:
+        sold = None
+        if swap.executed_amount_base is not None and swap.executed_amount_base > 0:
+            sold = swap.executed_amount_base
+        elif swap.amount_in is not None and swap.amount_in_is_quote is False and swap.amount_in > 0:
+            sold = swap.amount_in
+        else:
+            sold = swap.amount
+        sold = max(Decimal("0"), sold)
+        if swap.amount > 0:
+            sold = min(sold, swap.amount)
+        return sold
 
     def _mark_balance_refresh(self, now: float) -> None:
         self._ctx.swap.awaiting_balance_refresh = True
