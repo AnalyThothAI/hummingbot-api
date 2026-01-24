@@ -516,6 +516,7 @@ class CLMMLPBaseController(ControllerBase):
             self._rule_manual_kill_switch,
             self._rule_failure_blocked,
             self._rule_detect_lp_failure,
+            self._rule_swap_concurrency_guard,
             self._rule_swap_in_progress_gate,
             self._rule_stoploss_trigger,
             self._rule_rebalance_stop,
@@ -804,13 +805,51 @@ class CLMMLPBaseController(ControllerBase):
 
     @staticmethod
     def _select_active_swap_label(active_swaps: List[SwapView]) -> Optional[str]:
+        swap = CLMMLPBaseController._select_swap_to_keep(active_swaps)
+        return swap.level_id if swap is not None else None
+
+    @staticmethod
+    def _select_swap_to_keep(active_swaps: List[SwapView]) -> Optional[SwapView]:
         if not active_swaps:
             return None
         for purpose in (SwapPurpose.STOPLOSS, SwapPurpose.INVENTORY):
-            if any(swap.purpose == purpose for swap in active_swaps):
-                return purpose.value
-        active_sorted = sorted(active_swaps, key=lambda swap: swap.executor_id)
-        return active_sorted[0].level_id
+            for swap in active_swaps:
+                if swap.purpose == purpose:
+                    return swap
+        return min(active_swaps, key=lambda swap: swap.executor_id)
+
+    def _rule_swap_concurrency_guard(
+        self,
+        snapshot: Snapshot,
+        _: ControllerContext,
+        regions: Regions,
+    ) -> Optional[Decision]:
+        if len(snapshot.active_swaps) <= 1:
+            return None
+        keep = self._select_swap_to_keep(snapshot.active_swaps)
+        if keep is None:
+            return None
+        actions = [
+            StopExecutorAction(controller_id=self.config.id, executor_id=swap.executor_id)
+            for swap in snapshot.active_swaps
+            if swap.executor_id != keep.executor_id
+        ]
+        if not actions:
+            return None
+        if keep.purpose == SwapPurpose.STOPLOSS:
+            flow = IntentFlow.STOPLOSS
+        elif regions.rebalance_pending:
+            flow = IntentFlow.REBALANCE
+        else:
+            flow = IntentFlow.ENTRY
+        patch = DecisionPatch()
+        patch.swap.awaiting_balance_refresh = True
+        patch.swap.awaiting_balance_refresh_since = snapshot.now
+        return Decision(
+            intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="concurrent_swaps"),
+            actions=actions,
+            patch=patch,
+        )
 
     def _build_stop_actions(self, snapshot: Snapshot) -> List[StopExecutorAction]:
         actions: List[StopExecutorAction] = []

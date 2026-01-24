@@ -11,8 +11,8 @@ pool_address: "0x7231d17Fa843e5516Bf1d7d6f6c87147d279C2bA"
 target_price: 0
 trigger_above: true
 
-position_value_quote: 20
-position_width_pct: 30
+position_value_quote: 40
+position_width_pct: 28
 ratio_clamp_tick_multiplier: 2
 
 rebalance_seconds: 60
