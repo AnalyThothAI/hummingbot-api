@@ -73,7 +73,7 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
 
     auto_swap_enabled: bool = Field(default=True, json_schema_extra={"is_updatable": True})
     target_base_value_pct: Decimal = Field(default=Decimal("0.5"), json_schema_extra={"is_updatable": True})
-    swap_min_value_pct: Decimal = Field(default=Decimal("0.05"), json_schema_extra={"is_updatable": True})
+    swap_min_value_pct: Decimal = Field(default=Decimal("0.005"), json_schema_extra={"is_updatable": True})
     swap_safety_buffer_pct: Decimal = Field(default=Decimal("0.02"), json_schema_extra={"is_updatable": True})
     swap_slippage_pct: Decimal = Field(default=Decimal("0.01"), json_schema_extra={"is_updatable": True})
 
@@ -145,6 +145,7 @@ class CLMMLPGuardedController(ControllerBase):
         self._wallet_base: Decimal = Decimal("0")
         self._wallet_quote: Decimal = Decimal("0")
         self._last_balance_update_ts: float = 0.0
+        self._last_balance_attempt_ts: float = 0.0
         self._wallet_update_task: Optional[asyncio.Task] = None
 
         rate_connector = self.config.router_connector
@@ -190,7 +191,7 @@ class CLMMLPGuardedController(ControllerBase):
             snapshot = self._build_snapshot(self.market_data_provider.time())
         self._latest_snapshot = None
 
-        self._reconcile_done_swaps(snapshot.now)
+        self._reconcile_done_swaps(snapshot)
         self._reconcile_rebalance_plans(snapshot)
         self._ensure_anchors(snapshot)
         self._update_fee_rate_estimates(snapshot)
@@ -241,8 +242,11 @@ class CLMMLPGuardedController(ControllerBase):
                     is_done=executor.is_done,
                     close_type=executor.close_type,
                     level_id=getattr(executor.config, "level_id", None),
+                    amount=Decimal(str(getattr(executor.config, "amount", 0))),
                 )
 
+        active_lp = [v for v in lp.values() if v.is_active]
+        active_swaps = [v for v in swaps.values() if v.is_active]
         return Snapshot(
             now=now,
             current_price=current_price,
@@ -250,6 +254,8 @@ class CLMMLPGuardedController(ControllerBase):
             wallet_quote=self._wallet_quote,
             lp=lp,
             swaps=swaps,
+            active_lp=active_lp,
+            active_swaps=active_swaps,
         )
 
     def _parse_lp_view(self, executor: ExecutorInfo) -> LPView:
@@ -305,6 +311,8 @@ class CLMMLPGuardedController(ControllerBase):
     def _schedule_wallet_balance_refresh(self, now: float) -> None:
         if self._wallet_update_task is not None and not self._wallet_update_task.done():
             return
+        if (now - self._last_balance_attempt_ts) < 1.0:
+            return
         if self.config.balance_refresh_interval_sec > 0:
             if not self._ctx.swap.awaiting_balance_refresh and (
                 (now - self._last_balance_update_ts) < self.config.balance_refresh_interval_sec
@@ -314,6 +322,7 @@ class CLMMLPGuardedController(ControllerBase):
         connector = self.market_data_provider.connectors.get(self.config.connector_name)
         if connector is None:
             return
+        self._last_balance_attempt_ts = now
         self._wallet_update_task = safe_ensure_future(self._update_wallet_balances(connector))
         self._wallet_update_task.add_done_callback(self._clear_wallet_update_task)
 
@@ -323,13 +332,13 @@ class CLMMLPGuardedController(ControllerBase):
 
     async def _update_wallet_balances(self, connector) -> None:
         try:
-            await connector.update_balances()
+            await asyncio.wait_for(connector.update_balances(), timeout=3.0)
             self._wallet_base = Decimal(str(connector.get_balance(self._tokens.base_token) or 0))
             self._wallet_quote = Decimal(str(connector.get_balance(self._tokens.quote_token) or 0))
             self._last_balance_update_ts = self.market_data_provider.time()
             self._ctx.swap.awaiting_balance_refresh = False
         except Exception:
-            return
+            self.logger().warning("update_balances failed")
 
     def _ensure_anchors(self, snapshot: Snapshot):
         price = snapshot.current_price
@@ -514,7 +523,7 @@ class CLMMLPGuardedController(ControllerBase):
         _: ControllerContext,
         __: Regions,
     ) -> Optional[Decision]:
-        detected = self._detect_lp_failure()
+        detected = self._detect_lp_failure(snapshot)
         if detected is None:
             return None
         failed_id, reason = detected
@@ -651,17 +660,13 @@ class CLMMLPGuardedController(ControllerBase):
             return Decision(intent=Intent(flow=IntentFlow.NONE, stage=IntentStage.NONE, reason="idle"))
         return self._decide_entry(snapshot, ctx)
 
-    def _detect_lp_failure(self) -> Optional[Tuple[str, str]]:
-        for executor in self.executors_info:
-            if executor.type != "lp_position_executor":
-                continue
-            if executor.controller_id != self.config.id:
-                continue
-            state = (executor.custom_info or {}).get("state")
+    def _detect_lp_failure(self, snapshot: Snapshot) -> Optional[Tuple[str, str]]:
+        for executor_id, lp_view in snapshot.lp.items():
+            state = lp_view.state
             if state == LPPositionStates.RETRIES_EXCEEDED.value:
-                return executor.id, "retries_exceeded"
-            if executor.close_type == CloseType.FAILED:
-                return executor.id, "executor_failed"
+                return executor_id, "retries_exceeded"
+            if lp_view.close_type == CloseType.FAILED:
+                return executor_id, "executor_failed"
         return None
 
     def _decide_stoploss(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[Decision]:
@@ -1068,8 +1073,7 @@ class CLMMLPGuardedController(ControllerBase):
             return None
 
         if delta_base > 0:
-            delta_quote_value = abs(delta_base * current_price)
-            amount = self._apply_swap_buffer(delta_quote_value)
+            amount = abs(delta_base * current_price)
             if amount <= 0:
                 return None
             side = TradeType.BUY
@@ -1190,9 +1194,9 @@ class CLMMLPGuardedController(ControllerBase):
     ) -> Tuple[Decimal, Decimal]:
         total_width = self.config.position_width_pct / Decimal("100")
         if base_amt > 0 and quote_amt > 0:
-            half_width = total_width / Decimal("2")
-            lower_price = current_price * (Decimal("1") - half_width)
-            upper_price = current_price * (Decimal("1") + half_width)
+            factor = (Decimal("1") + total_width).sqrt()
+            lower_price = current_price / factor
+            upper_price = current_price * factor
         elif base_amt > 0:
             lower_price = current_price
             upper_price = current_price * (Decimal("1") + total_width)
@@ -1272,28 +1276,25 @@ class CLMMLPGuardedController(ControllerBase):
 
         return ControllerState.IDLE, intent.reason
 
-    def _reconcile_done_swaps(self, now: float):
-        for executor in self.executors_info:
-            if executor.type != "gateway_swap_executor":
+    def _reconcile_done_swaps(self, snapshot: Snapshot):
+        now = snapshot.now
+        for swap in snapshot.swaps.values():
+            if not swap.is_done:
                 continue
-            if executor.controller_id != self.config.id:
+            if swap.executor_id in self._ctx.swap.settled_executor_ids:
                 continue
-            if not executor.is_done:
-                continue
-            if executor.id in self._ctx.swap.settled_executor_ids:
-                continue
-            self._ctx.swap.settled_executor_ids.add(executor.id)
+            self._ctx.swap.settled_executor_ids.add(swap.executor_id)
 
-            level_id = getattr(executor.config, "level_id", None)
+            level_id = swap.level_id
             if level_id == "liquidate":
                 self._ctx.stoploss.last_liquidation_attempt_ts = now
-                if executor.close_type == CloseType.COMPLETED:
+                if swap.close_type == CloseType.COMPLETED:
                     self._ctx.swap.awaiting_balance_refresh = True
                     target = self._ctx.stoploss.liquidation_target_base
                     if target is None:
                         self._ctx.stoploss.pending_liquidation = True
                     else:
-                        sold = Decimal(str(getattr(executor.config, "amount", 0)))
+                        sold = max(Decimal("0"), swap.amount)
                         remaining = max(Decimal("0"), target - max(Decimal("0"), sold))
                         if remaining <= 0:
                             self._ctx.stoploss.pending_liquidation = False
@@ -1304,5 +1305,5 @@ class CLMMLPGuardedController(ControllerBase):
                 else:
                     self._ctx.stoploss.pending_liquidation = True
             elif level_id == "inventory":
-                if executor.close_type == CloseType.COMPLETED:
+                if swap.close_type == CloseType.COMPLETED:
                     self._ctx.swap.awaiting_balance_refresh = True

@@ -165,6 +165,7 @@ class SwapView:
     is_done: bool
     close_type: Optional[CloseType]
     level_id: Optional[str]
+    amount: Decimal
 
 
 @dataclass(frozen=True)
@@ -175,14 +176,8 @@ class Snapshot:
     wallet_quote: Decimal
     lp: Dict[str, LPView]
     swaps: Dict[str, SwapView]
-
-    @property
-    def active_lp(self) -> List[LPView]:
-        return [v for v in self.lp.values() if v.is_active]
-
-    @property
-    def active_swaps(self) -> List[SwapView]:
-        return [v for v in self.swaps.values() if v.is_active]
+    active_lp: List[LPView]
+    active_swaps: List[SwapView]
 
 
 @dataclass(frozen=True)
