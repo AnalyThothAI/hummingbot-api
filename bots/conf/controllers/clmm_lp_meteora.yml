@@ -12,11 +12,8 @@ trigger_above: true
 
 position_value_quote: 20
 position_width_pct: 20
-
-twap_lookback: 60
 ratio_edge_buffer_pct: 0.02
 strategy_type: 0
-candles_config: meteora.SOL-USDC.1m.500
 
 rebalance_seconds: 60
 hysteresis_pct: 0.002

@@ -1,9 +1,5 @@
 from decimal import Decimal
-from typing import List
-
 from pydantic import Field, field_validator
-
-from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 
 from . import clmm_lp_base
 from .clmm_lp_domain.policies import UniswapV3Policy
@@ -11,8 +7,6 @@ from .clmm_lp_domain.policies import UniswapV3Policy
 
 class CLMMLPUniswapConfig(clmm_lp_base.CLMMLPBaseConfig):
     controller_name: str = "clmm_lp_uniswap"
-    candles_config: List[CandlesConfig] = []
-
     connector_name: str = "uniswap/clmm"
     router_connector: str = "uniswap/router"
     trading_pair: str = "ETH-USDC"

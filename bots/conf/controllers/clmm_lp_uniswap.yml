@@ -13,10 +13,7 @@ trigger_above: true
 
 position_value_quote: 20
 position_width_pct: 20
-
-twap_lookback: 60
 ratio_clamp_tick_multiplier: 2
-candles_config: uniswap.MEMES-USDT.1m.500
 
 rebalance_seconds: 60
 hysteresis_pct: 0.002
@@ -40,6 +37,6 @@ stop_loss_liquidation_mode: quote
 reenter_enabled: true
 
 budget_key: clmm_lp_uniswap
-native_token_symbol: ETH
-min_native_balance: 0.01
+native_token_symbol: BNB
+min_native_balance: 0.0001
 balance_refresh_interval_sec: 20

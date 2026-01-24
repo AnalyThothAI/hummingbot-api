@@ -4,11 +4,9 @@ from decimal import Decimal
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
 
-from pydantic import Field, field_validator
-from pydantic_core.core_schema import ValidationInfo
+from pydantic import Field
 
 from hummingbot.core.data_type.common import MarketDict, TradeType
-from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 from hummingbot.logger import HummingbotLogger
 from hummingbot.core.utils.async_utils import safe_ensure_future
 from hummingbot.strategy_v2.budget.budget_coordinator import BudgetCoordinatorRegistry
@@ -54,8 +52,6 @@ class StopLossLiquidationMode(str, Enum):
 class CLMMLPBaseConfig(ControllerConfigBase):
     controller_type: str = "generic"
     controller_name: str = "clmm_lp_base"
-    candles_config: List[CandlesConfig] = []
-
     connector_name: str = ""
     router_connector: str = ""
     trading_pair: str = ""
@@ -68,7 +64,6 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     position_value_quote: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
 
     position_width_pct: Decimal = Field(default=Decimal("12"), json_schema_extra={"is_updatable": True})
-    twap_lookback: Optional[int] = Field(default=None, json_schema_extra={"is_updatable": True})
     rebalance_seconds: int = Field(default=60, json_schema_extra={"is_updatable": True})
     hysteresis_pct: Decimal = Field(default=Decimal("0.002"), json_schema_extra={"is_updatable": True})
     cooldown_seconds: int = Field(default=30, json_schema_extra={"is_updatable": True})
@@ -107,25 +102,6 @@ class CLMMLPBaseConfig(ControllerConfigBase):
         markets = markets.add_or_update(self.connector_name, pool_pair)
         markets = markets.add_or_update(self.router_connector, self.trading_pair)
         return markets
-
-    @field_validator("candles_config", mode="after")
-    @classmethod
-    def validate_candles_config(cls, v):
-        if not v or len(v) != 1:
-            raise ValueError("candles_config must contain exactly one TWAP source")
-        return v
-
-    @field_validator("twap_lookback", mode="after")
-    @classmethod
-    def validate_twap_lookback(cls, v, validation_info: ValidationInfo):
-        if v is None or v <= 0:
-            raise ValueError("twap_lookback must be > 0")
-        candles_config = validation_info.data.get("candles_config")
-        if candles_config:
-            max_records = candles_config[0].max_records
-            if max_records is not None and v > max_records:
-                raise ValueError("twap_lookback must be <= candles_config.max_records")
-        return v
 
 
 class CLMMLPBaseController(ControllerBase):
@@ -183,6 +159,9 @@ class CLMMLPBaseController(ControllerBase):
         self._last_balance_update_ts: float = 0.0
         self._last_balance_attempt_ts: float = 0.0
         self._wallet_update_task: Optional[asyncio.Task] = None
+        self._last_policy_update_ts: float = 0.0
+        self._policy_update_interval_sec: float = 600.0
+        self._policy_bootstrap_interval_sec: float = 30.0
 
         rate_connector = self.config.router_connector
         self.market_data_provider.initialize_rate_sources([
@@ -199,9 +178,15 @@ class CLMMLPBaseController(ControllerBase):
 
         snapshot = self._build_snapshot(now)
         self._latest_snapshot = snapshot
-        self._latest_twap_price = self._get_twap_price()
+        self._latest_twap_price = snapshot.current_price
         connector = self.market_data_provider.connectors.get(self.config.connector_name)
-        await self._policy.update(connector)
+        if connector is not None:
+            interval = self._policy_bootstrap_interval_sec
+            if self._policy.is_ready():
+                interval = self._policy_update_interval_sec
+            if (now - self._last_policy_update_ts) >= interval:
+                await self._policy.update(connector)
+                self._last_policy_update_ts = now
         self.processed_data.update({
             "current_price": snapshot.current_price,
             "twap_price": self._latest_twap_price,
@@ -401,21 +386,6 @@ class CLMMLPBaseController(ControllerBase):
         if price is None:
             return None
         return Decimal(str(price))
-
-    def _get_twap_price(self) -> Optional[Decimal]:
-        candles_config = self.config.candles_config[0]
-        candles = self.market_data_provider.get_candles_df(
-            connector_name=candles_config.connector,
-            trading_pair=candles_config.trading_pair,
-            interval=candles_config.interval,
-            max_records=candles_config.max_records,
-        )
-        if candles is None or len(candles) < self.config.twap_lookback:
-            return None
-        closes = candles["close"].tail(self.config.twap_lookback)
-        if closes.empty:
-            return None
-        return Decimal(str(closes.mean()))
 
     def _schedule_wallet_balance_refresh(self, now: float) -> None:
         if self._wallet_update_task is not None and not self._wallet_update_task.done():

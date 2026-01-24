@@ -1,9 +1,7 @@
 from decimal import Decimal
-from typing import List, Optional
+from typing import Optional
 
 from pydantic import Field, field_validator
-
-from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 
 from . import clmm_lp_base
 from .clmm_lp_domain.policies import MeteoraPolicy
@@ -11,8 +9,6 @@ from .clmm_lp_domain.policies import MeteoraPolicy
 
 class CLMMLPMeteoraConfig(clmm_lp_base.CLMMLPBaseConfig):
     controller_name: str = "clmm_lp_meteora"
-    candles_config: List[CandlesConfig] = []
-
     connector_name: str = "meteora/clmm"
     router_connector: str = "jupiter/router"
     trading_pair: str = "SOL-USDC"

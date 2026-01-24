@@ -21,6 +21,9 @@ class CLMMPolicyBase:
     def extra_lp_params(self) -> Optional[Dict]:
         return None
 
+    def is_ready(self) -> bool:
+        return True
+
 
 class UniswapV3Policy(CLMMPolicyBase):
     _tick_base = Decimal("1.0001")
@@ -47,6 +50,9 @@ class UniswapV3Policy(CLMMPolicyBase):
             return None
         if tick_spacing > 0:
             self._tick_spacing = tick_spacing
+
+    def is_ready(self) -> bool:
+        return self._tick_spacing is not None and self._tick_spacing > 0
 
     def range_plan(self, center_price: Decimal) -> Optional[RangePlan]:
         base_plan = RangeCalculator.geometric_plan(center_price, self._config.position_width_pct)
