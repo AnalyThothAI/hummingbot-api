@@ -61,12 +61,14 @@ class RebalanceEngine:
                     or open_lp.state in {LPPositionStates.IN_RANGE.value, LPPositionStates.OUT_OF_RANGE.value}
                 ):
                     ctx.swap.awaiting_balance_refresh = True
+                    ctx.swap.awaiting_balance_refresh_since = now
                     ctx.rebalance.plans.pop(executor_id, None)
                     continue
             elif plan.stage == RebalanceStage.STOP_REQUESTED:
                 old_lp = snapshot.lp.get(executor_id)
                 if old_lp is None or not old_lp.is_active:
                     ctx.swap.awaiting_balance_refresh = True
+                    ctx.swap.awaiting_balance_refresh_since = now
                     ctx.rebalance.plans[executor_id] = RebalancePlan(
                         stage=RebalanceStage.WAIT_REOPEN,
                         reopen_after_ts=plan.reopen_after_ts,
@@ -161,6 +163,7 @@ class RebalanceEngine:
         if not stop_actions:
             return None
         patch.swap.awaiting_balance_refresh = True
+        patch.swap.awaiting_balance_refresh_since = now
         return Decision(
             intent=Intent(flow=IntentFlow.REBALANCE, stage=IntentStage.STOP_LP, reason="out_of_range_rebalance"),
             actions=stop_actions,

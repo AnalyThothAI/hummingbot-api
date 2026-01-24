@@ -5,11 +5,11 @@ from pydantic import Field, field_validator
 
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 
-from .clmm_lp_base import CLMMLPBaseConfig, CLMMLPBaseController
+from . import clmm_lp_base
 from .clmm_lp_domain.policies import UniswapV3Policy
 
 
-class CLMMLPUniswapConfig(CLMMLPBaseConfig):
+class CLMMLPUniswapConfig(clmm_lp_base.CLMMLPBaseConfig):
     controller_name: str = "clmm_lp_uniswap"
     candles_config: List[CandlesConfig] = []
 
@@ -28,6 +28,6 @@ class CLMMLPUniswapConfig(CLMMLPBaseConfig):
         return v
 
 
-class CLMMLPUniswapController(CLMMLPBaseController):
+class CLMMLPUniswapController(clmm_lp_base.CLMMLPBaseController):
     def __init__(self, config: CLMMLPUniswapConfig, *args, **kwargs):
         super().__init__(config, UniswapV3Policy(config), *args, **kwargs)

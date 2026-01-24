@@ -1,4 +1,3 @@
-import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
@@ -12,11 +11,11 @@ initialize_st_page(icon="🦅", show_readme=False)
 # Initialize backend client
 backend_api_client = get_backend_api_client()
 
-# Initialize session state for auto-refresh and selections
-if "auto_refresh_enabled" not in st.session_state:
-    st.session_state.auto_refresh_enabled = True
+# Initialize session state for selections
 if "selected_instance" not in st.session_state:
     st.session_state.selected_instance = None
+if "instances_view" not in st.session_state:
+    st.session_state.instances_view = "Overview"
 
 REFRESH_INTERVAL = 10
 
@@ -119,8 +118,9 @@ def handle_action_response(
                     message = inner.get("message") or error_message
             st.error(message)
             return False
-        st.success(success_message)
-        st.session_state.auto_refresh_enabled = False
+        st.session_state.last_action_message = success_message
+        st.session_state.last_action_level = "success"
+        st.rerun()
         return True
 
     status_code = response.get("status_code")
@@ -145,7 +145,7 @@ def stop_bot(bot_name: str, skip_order_cancellation: bool = False):
         f"Failed to stop bot {bot_name}.",
         require_success_flag=True,
     ):
-        time.sleep(1)
+        return
 
 
 def start_bot(bot_name: str):
@@ -157,19 +157,19 @@ def start_bot(bot_name: str):
         f"Failed to start bot {bot_name}.",
         require_success_flag=True,
     ):
-        time.sleep(1)
+        return
 
 
 def stop_container(bot_name: str):
     response = backend_api_request("POST", f"/docker/stop-container/{bot_name}")
     if handle_action_response(response, f"Container {bot_name} stopping.", f"Failed to stop container {bot_name}."):
-        time.sleep(1)
+        return
 
 
 def start_container(bot_name: str):
     response = backend_api_request("POST", f"/docker/start-container/{bot_name}")
     if handle_action_response(response, f"Container {bot_name} starting.", f"Failed to start container {bot_name}."):
-        time.sleep(1)
+        return
 
 
 def archive_bot(bot_name: str, docker_status: str):
@@ -183,7 +183,7 @@ def archive_bot(bot_name: str, docker_status: str):
         error_message = f"Failed to archive bot {bot_name}."
 
     if handle_action_response(response, success_message, error_message):
-        time.sleep(1)
+        return
 
 
 def stop_controllers(bot_name: str, controllers: List[str]) -> bool:
@@ -200,8 +200,9 @@ def stop_controllers(bot_name: str, controllers: List[str]) -> bool:
             st.error(f"Failed to stop controller {controller}: {e}")
 
     if success_count > 0:
-        st.success(f"Successfully stopped {success_count} controller(s)")
-        st.session_state.auto_refresh_enabled = False
+        st.session_state.last_action_message = f"Successfully stopped {success_count} controller(s)"
+        st.session_state.last_action_level = "success"
+        st.rerun()
 
     return success_count > 0
 
@@ -220,8 +221,9 @@ def start_controllers(bot_name: str, controllers: List[str]) -> bool:
             st.error(f"Failed to start controller {controller}: {e}")
 
     if success_count > 0:
-        st.success(f"Successfully started {success_count} controller(s)")
-        st.session_state.auto_refresh_enabled = False
+        st.session_state.last_action_message = f"Successfully started {success_count} controller(s)"
+        st.session_state.last_action_level = "success"
+        st.rerun()
 
     return success_count > 0
 
@@ -451,18 +453,18 @@ def render_overview(instances: List[Dict[str, Any]]):
         last_seen_label = format_age(instance.get("mqtt_last_seen_age"))
 
         with st.container(border=True):
-            st.markdown(f"{format_label(health_state, HEALTH_LABELS)} **{bot_name}**")
+            st.markdown(f"**{bot_name}** · {format_label(health_state, HEALTH_LABELS)}")
             meta_parts = [
                 f"Docker: {format_label(docker_status, DOCKER_LABELS)}",
                 f"MQTT: {format_label(mqtt_status, MQTT_LABELS)}",
             ]
             if last_seen_label:
                 meta_parts.append(f"Last seen {last_seen_label} ago")
-            st.caption(" | ".join(meta_parts))
+            st.caption(" • ".join(meta_parts))
             if reason:
                 st.caption(f"Reason: {STATUS_REASON_MAP.get(reason, reason)}")
 
-            action_cols = st.columns([1, 1, 1])
+            action_cols = st.columns(3)
             primary_label = "—"
             primary_action = None
             if docker_status == "running":
@@ -497,12 +499,14 @@ def render_overview(instances: List[Dict[str, Any]]):
                     "📦 Archive",
                     key=f"archive_{bot_name}",
                     use_container_width=True,
-                    disabled=docker_status == "missing",
+                    disabled=docker_status in {"missing", "running"},
                 ):
                     archive_bot(bot_name, docker_status)
             with action_cols[2]:
                 if st.button("🔍 Inspect", key=f"inspect_{bot_name}", use_container_width=True):
                     st.session_state.selected_instance = bot_name
+                    st.session_state.instances_view = "Inspector"
+                    st.rerun()
 
 
 def render_controller_tables(bot_name: str, performance: Dict[str, Any], controller_configs: List[Dict[str, Any]]):
@@ -563,9 +567,8 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
                 key=f"stop_active_{bot_name}",
                 type="secondary",
             ):
-                with st.spinner(f"Stopping {len(selected_active)} controller(s)..."):
-                    stop_controllers(bot_name, selected_active)
-                    time.sleep(1)
+                                with st.spinner(f"Stopping {len(selected_active)} controller(s)..."):
+                                    stop_controllers(bot_name, selected_active)
 
     if stopped_controllers:
         st.warning("💤 Paused Controllers")
@@ -598,9 +601,8 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
                 key=f"start_stopped_{bot_name}",
                 type="primary",
             ):
-                with st.spinner(f"Starting {len(selected_stopped)} controller(s)..."):
-                    start_controllers(bot_name, selected_stopped)
-                    time.sleep(1)
+                                with st.spinner(f"Starting {len(selected_stopped)} controller(s)..."):
+                                    start_controllers(bot_name, selected_stopped)
 
     if error_controllers:
         st.error("💀 Controllers with Errors")
@@ -775,12 +777,9 @@ def render_inspector(instances: List[Dict[str, Any]]):
 
     if reason:
         st.caption(f"Reason: {STATUS_REASON_MAP.get(reason, reason)}")
-    if instance.get("image"):
-        st.caption(f"Image: {instance.get('image')}")
 
     with st.container(border=True):
-        st.subheader("Actions")
-        action_cols = st.columns([1, 1, 1])
+        action_cols = st.columns(3)
         bot_status_value = "unknown"
 
         try:
@@ -793,6 +792,10 @@ def render_inspector(instances: List[Dict[str, Any]]):
             bot_status_value = bot_data.get("status", "unknown")
         else:
             bot_data = {}
+
+        archive_disabled = docker_status == "missing" or (
+            docker_status == "running" and bot_status_value != "stopped"
+        )
 
         primary_label = "—"
         primary_action = None
@@ -832,7 +835,7 @@ def render_inspector(instances: List[Dict[str, Any]]):
                 "📦 Archive",
                 key=f"archive_inspect_{bot_name}",
                 use_container_width=True,
-                disabled=docker_status == "missing",
+                disabled=archive_disabled,
             ):
                 archive_bot(bot_name, docker_status)
 
@@ -842,17 +845,11 @@ def render_inspector(instances: List[Dict[str, Any]]):
                 st.switch_page("frontend/pages/orchestration/logs/app.py")
 
     if bot_status.get("status") != "success":
-        error_detail = bot_status.get("error")
-        if error_detail:
-            st.error(f"Failed to fetch bot status for {bot_name}: {error_detail}")
-        else:
-            st.error(f"Failed to fetch bot status for {bot_name}.")
+        st.caption("Bot status unavailable.")
         return
 
     bot_data = bot_status.get("data", {})
     bot_state = bot_data.get("status", "unknown")
-    st.caption(f"Bot status: {bot_state}")
-
     performance = bot_data.get("performance", {})
 
     controller_configs = []
@@ -866,8 +863,8 @@ def render_inspector(instances: List[Dict[str, Any]]):
 
     if performance:
         render_controller_tables(bot_name, performance, controller_configs)
-    else:
-        st.info("No controller performance data available yet.")
+    elif bot_state in {"running", "idle"}:
+        st.caption("No controller performance data available yet.")
 
     render_logs(bot_name, bot_data)
 
@@ -876,20 +873,20 @@ def render_inspector(instances: List[Dict[str, Any]]):
 st.title("🦅 Hummingbot Instances")
 st.caption("Manage container lifecycle, controller health, and logs in one place.")
 
-header_cols = st.columns([3, 1, 1])
-status_placeholder = header_cols[0].empty()
+status_placeholder = st.empty()
 
-with header_cols[1]:
-    auto_refresh_label = "⏸️ Pause Auto-refresh" if st.session_state.auto_refresh_enabled else "▶️ Start Auto-refresh"
-    if st.button(auto_refresh_label, use_container_width=True):
-        st.session_state.auto_refresh_enabled = not st.session_state.auto_refresh_enabled
+action_message = st.session_state.pop("last_action_message", None)
+action_level = st.session_state.pop("last_action_level", "success")
+if action_message:
+    if action_level == "success":
+        st.success(action_message)
+    elif action_level == "warning":
+        st.warning(action_message)
+    else:
+        st.error(action_message)
 
-with header_cols[2]:
-    if st.button("🔄 Refresh Now", use_container_width=True):
-        pass
 
-
-@st.fragment(run_every=REFRESH_INTERVAL if st.session_state.auto_refresh_enabled else None)
+@st.fragment(run_every=REFRESH_INTERVAL)
 def show_bot_instances():
     """Fragment to display bot instances with auto-refresh."""
     try:
@@ -916,21 +913,21 @@ def show_bot_instances():
             "orphaned": sum(1 for inst in instances if inst.get("health_state") == "orphaned"),
         }
 
-        if st.session_state.auto_refresh_enabled:
-            status_placeholder.info(
-                f"🔄 Auto-refreshing every {REFRESH_INTERVAL} seconds · "
-                f"Running {counts['running']} · Degraded {counts['degraded']} · "
-                f"Stopped {counts['stopped']} · Orphaned {counts['orphaned']}"
-            )
-        else:
-            status_placeholder.warning("⏸️ Auto-refresh paused. Use 'Refresh Now' to update.")
+        status_placeholder.info(
+            f"🔄 Auto-refreshing every {REFRESH_INTERVAL} seconds · "
+            f"Running {counts['running']} · Degraded {counts['degraded']} · "
+            f"Stopped {counts['stopped']} · Orphaned {counts['orphaned']}"
+        )
 
-        tabs = st.tabs(["Overview", "Inspector"])
-
-        with tabs[0]:
+        view = st.radio(
+            "View",
+            options=["Overview", "Inspector"],
+            horizontal=True,
+            key="instances_view",
+        )
+        if view == "Overview":
             render_overview(instances)
-
-        with tabs[1]:
+        else:
             render_inspector(instances)
 
     except Exception as e:

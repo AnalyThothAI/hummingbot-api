@@ -67,6 +67,7 @@ def plan_open(
 
     patch = DecisionPatch()
     patch.swap.awaiting_balance_refresh = True
+    patch.swap.awaiting_balance_refresh_since = snapshot.now
     if patch_mutator is not None:
         patch_mutator(patch, action)
 

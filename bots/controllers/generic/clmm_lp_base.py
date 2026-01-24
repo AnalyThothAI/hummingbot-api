@@ -100,6 +100,7 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     native_token_symbol: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
     min_native_balance: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     balance_refresh_interval_sec: int = Field(default=20, json_schema_extra={"is_updatable": True})
+    balance_refresh_timeout_sec: int = Field(default=30, json_schema_extra={"is_updatable": True})
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
         pool_pair = self.pool_trading_pair or self.trading_pair
@@ -445,8 +446,21 @@ class CLMMLPBaseController(ControllerBase):
             self._wallet_quote = Decimal(str(connector.get_available_balance(self._tokens.quote_token) or 0))
             self._last_balance_update_ts = self.market_data_provider.time()
             self._ctx.swap.awaiting_balance_refresh = False
+            self._ctx.swap.awaiting_balance_refresh_since = 0.0
         except Exception:
             self.logger().warning("update_balances failed")
+
+    def _clear_stale_balance_refresh(self, now: float) -> None:
+        if not self._ctx.swap.awaiting_balance_refresh:
+            return
+        if self._ctx.swap.awaiting_balance_refresh_since <= 0:
+            self._ctx.swap.awaiting_balance_refresh_since = now
+            return
+        if (now - self._ctx.swap.awaiting_balance_refresh_since) < self.config.balance_refresh_timeout_sec:
+            return
+        self.logger().warning("awaiting_balance_refresh timeout exceeded; clearing.")
+        self._ctx.swap.awaiting_balance_refresh = False
+        self._ctx.swap.awaiting_balance_refresh_since = 0.0
 
     def _ensure_anchors(self, snapshot: Snapshot):
         price = snapshot.current_price
@@ -564,6 +578,7 @@ class CLMMLPBaseController(ControllerBase):
         patch = DecisionPatch()
         if actions:
             patch.swap.awaiting_balance_refresh = True
+            patch.swap.awaiting_balance_refresh_since = snapshot.now
         return Decision(
             intent=Intent(flow=IntentFlow.MANUAL, stage=IntentStage.STOP_LP, reason="manual_kill_switch"),
             actions=actions,
@@ -602,6 +617,7 @@ class CLMMLPBaseController(ControllerBase):
         patch.stoploss.pending_liquidation = False
         if actions:
             patch.swap.awaiting_balance_refresh = True
+            patch.swap.awaiting_balance_refresh_since = snapshot.now
         self.logger().error("LP executor failure detected (%s). Manual intervention required.", reason)
         return Decision(
             intent=Intent(flow=IntentFlow.FAILURE, stage=IntentStage.STOP_LP, reason=reason),
@@ -760,6 +776,7 @@ class CLMMLPBaseController(ControllerBase):
         patch.stoploss.until_ts = snapshot.now + self.config.stop_loss_pause_sec
         if actions:
             patch.swap.awaiting_balance_refresh = True
+            patch.swap.awaiting_balance_refresh_since = snapshot.now
         if self._stop_loss_liquidation_mode == StopLossLiquidationMode.QUOTE:
             patch.stoploss.pending_liquidation = True
             patch.stoploss.last_liquidation_attempt_ts = 0.0
@@ -796,6 +813,7 @@ class CLMMLPBaseController(ControllerBase):
             if snapshot.wallet_base <= 0 and expected_base > 0:
                 patch = DecisionPatch()
                 patch.swap.awaiting_balance_refresh = True
+                patch.swap.awaiting_balance_refresh_since = now
                 return Decision(
                     intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="liquidation_wait_balance"),
                     patch=patch,
@@ -1069,6 +1087,7 @@ class CLMMLPBaseController(ControllerBase):
         return self._policy.range_plan(center_price)
 
     def _reconcile(self, snapshot: Snapshot) -> None:
+        self._clear_stale_balance_refresh(snapshot.now)
         self._reconcile_done_swaps(snapshot)
         self._rebalance_engine.reconcile(snapshot, self._ctx)
         self._ensure_anchors(snapshot)
@@ -1155,6 +1174,7 @@ class CLMMLPBaseController(ControllerBase):
                 self._ctx.stoploss.last_liquidation_attempt_ts = now
                 if swap.close_type == CloseType.COMPLETED:
                     self._ctx.swap.awaiting_balance_refresh = True
+                    self._ctx.swap.awaiting_balance_refresh_since = now
                     target = self._ctx.stoploss.liquidation_target_base
                     if target is None:
                         self._ctx.stoploss.pending_liquidation = True
@@ -1172,3 +1192,4 @@ class CLMMLPBaseController(ControllerBase):
             elif level_id == "inventory":
                 if swap.close_type == CloseType.COMPLETED:
                     self._ctx.swap.awaiting_balance_refresh = True
+                    self._ctx.swap.awaiting_balance_refresh_since = now

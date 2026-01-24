@@ -258,6 +258,7 @@ class SwapContext:
     settled_executor_ids: Set[str] = field(default_factory=set)
     last_inventory_swap_ts: float = 0.0
     awaiting_balance_refresh: bool = False
+    awaiting_balance_refresh_since: float = 0.0
 
 
 @dataclass
@@ -317,6 +318,10 @@ class ControllerContext:
             self.swap.last_inventory_swap_ts = patch.swap.last_inventory_swap_ts
         if patch.swap.awaiting_balance_refresh is not None:
             self.swap.awaiting_balance_refresh = patch.swap.awaiting_balance_refresh
+            if not self.swap.awaiting_balance_refresh:
+                self.swap.awaiting_balance_refresh_since = 0.0
+        if patch.swap.awaiting_balance_refresh_since is not None:
+            self.swap.awaiting_balance_refresh_since = patch.swap.awaiting_balance_refresh_since
 
 
 @dataclass
@@ -345,6 +350,7 @@ class StopLossPatch:
 class SwapPatch:
     awaiting_balance_refresh: Optional[bool] = None
     last_inventory_swap_ts: Optional[float] = None
+    awaiting_balance_refresh_since: Optional[float] = None
 
 
 @dataclass

@@ -5,11 +5,11 @@ from pydantic import Field, field_validator
 
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
 
-from .clmm_lp_base import CLMMLPBaseConfig, CLMMLPBaseController
+from . import clmm_lp_base
 from .clmm_lp_domain.policies import MeteoraPolicy
 
 
-class CLMMLPMeteoraConfig(CLMMLPBaseConfig):
+class CLMMLPMeteoraConfig(clmm_lp_base.CLMMLPBaseConfig):
     controller_name: str = "clmm_lp_meteora"
     candles_config: List[CandlesConfig] = []
 
@@ -39,6 +39,6 @@ class CLMMLPMeteoraConfig(CLMMLPBaseConfig):
         return v
 
 
-class CLMMLPMeteoraController(CLMMLPBaseController):
+class CLMMLPMeteoraController(clmm_lp_base.CLMMLPBaseController):
     def __init__(self, config: CLMMLPMeteoraConfig, *args, **kwargs):
         super().__init__(config, MeteoraPolicy(config), *args, **kwargs)
