@@ -5,6 +5,7 @@ import re
 
 import docker
 
+from config import settings
 from utils.mqtt_manager import MQTTManager
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,9 @@ class BotsOrchestrator:
                 docker_bots = await self.get_active_containers()
 
                 # Get bots from MQTT messages (auto-discovered)
-                mqtt_bots = self.mqtt_manager.get_discovered_bots(timeout_seconds=30)  # 30 second timeout
+                mqtt_bots = self.mqtt_manager.get_discovered_bots(
+                    timeout_seconds=settings.app.mqtt_activity_timeout_seconds
+                )
 
                 # Combine both sources
                 all_active_bots = set([bot for bot in docker_bots + mqtt_bots if not self.is_bot_stopping(bot)])
@@ -311,7 +314,9 @@ class BotsOrchestrator:
             general_logs = self.mqtt_manager.get_bot_logs(bot_name)
 
             # Check if bot has sent recent messages (within last 30 seconds)
-            discovered_bots = self.mqtt_manager.get_discovered_bots(timeout_seconds=30)
+            discovered_bots = self.mqtt_manager.get_discovered_bots(
+                timeout_seconds=settings.app.mqtt_activity_timeout_seconds
+            )
             recently_active = bot_name in discovered_bots
 
             # Determine status based on recent MQTT activity first, then performance data.

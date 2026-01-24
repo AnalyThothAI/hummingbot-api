@@ -3,6 +3,7 @@ import logging
 import os
 import re
 import secrets
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -28,6 +29,7 @@ from utils.bot_archiver import BotArchiver
 from database import AsyncDatabaseManager, BotRunRepository
 from services.accounts_service import AccountsService
 from services.gateway_client import GatewayClient
+from config import settings
 
 router = APIRouter(tags=["Bot Orchestration"], prefix="/bot-orchestration")
 
@@ -150,7 +152,9 @@ def get_mqtt_status(bots_manager: BotsOrchestrator = Depends(get_bots_orchestrat
         Dictionary with MQTT connection status, discovered bots, and broker information
     """
     mqtt_connected = bots_manager.mqtt_manager.is_connected
-    discovered_bots = bots_manager.mqtt_manager.get_discovered_bots()
+    discovered_bots = bots_manager.mqtt_manager.get_discovered_bots(
+        timeout_seconds=settings.app.mqtt_activity_timeout_seconds
+    )
     active_bots = list(bots_manager.active_bots.keys())
     
     # Check client state
@@ -209,8 +213,11 @@ def get_instances_summary(
     for container in running:
         add_container(container)
 
-    discovered = set(bots_manager.mqtt_manager.get_discovered_bots(timeout_seconds=30))
+    timeout_seconds = settings.app.mqtt_activity_timeout_seconds
+    last_seen_map = bots_manager.mqtt_manager.get_last_seen_map()
+    discovered = set(bots_manager.mqtt_manager.get_discovered_bots(timeout_seconds=timeout_seconds))
     active_bots = set(bots_manager.active_bots.keys())
+    now = time.time()
 
     for name, info in containers.items():
         if name in discovered:
@@ -225,7 +232,10 @@ def get_instances_summary(
         if docker_status == "running" and mqtt_status == "connected":
             health_state = "running"
             reason = None
-        elif docker_status == "running" and mqtt_status != "connected":
+        elif docker_status == "running" and mqtt_status == "stale":
+            health_state = "degraded"
+            reason = "mqtt_stale"
+        elif docker_status == "running" and mqtt_status == "disconnected":
             health_state = "degraded"
             reason = "mqtt_disconnected"
         elif docker_status in {"exited", "created", "dead"}:
@@ -235,21 +245,30 @@ def get_instances_summary(
             health_state = "unknown"
             reason = None
 
+        last_seen = last_seen_map.get(name)
+        last_seen_age = now - last_seen if last_seen else None
+
         info.update(
             mqtt_status=mqtt_status,
             recently_active=name in discovered,
+            mqtt_last_seen=last_seen,
+            mqtt_last_seen_age=last_seen_age,
             health_state=health_state,
             reason=reason,
         )
 
     for name in discovered:
         if name not in containers:
+            last_seen = last_seen_map.get(name)
+            last_seen_age = now - last_seen if last_seen else None
             containers[name] = {
                 "name": name,
                 "docker_status": "missing",
                 "image": "unknown",
                 "mqtt_status": "connected",
                 "recently_active": True,
+                "mqtt_last_seen": last_seen,
+                "mqtt_last_seen_age": last_seen_age,
                 "health_state": "orphaned",
                 "reason": "container_missing",
             }

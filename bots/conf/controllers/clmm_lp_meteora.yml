@@ -1,0 +1,45 @@
+controller_name: clmm_lp_meteora
+controller_type: generic
+id: clmm_lp_meteora
+
+connector_name: meteora/clmm
+router_connector: jupiter/router
+trading_pair: SOL-USDC
+pool_address: ""
+
+target_price: 0
+trigger_above: true
+
+position_value_quote: 20
+position_width_pct: 20
+
+twap_lookback: 60
+ratio_edge_buffer_pct: 0.02
+strategy_type: 0
+candles_config: meteora.SOL-USDC.1m.500
+
+rebalance_seconds: 60
+hysteresis_pct: 0.002
+cooldown_seconds: 30
+max_rebalances_per_hour: 20
+reopen_delay_sec: 5
+
+auto_swap_enabled: true
+swap_min_value_pct: 0.005
+swap_safety_buffer_pct: 0.02
+swap_slippage_pct: 0.01
+
+cost_filter_enabled: false
+cost_filter_fee_rate_bootstrap_quote_per_hour: 0
+cost_filter_fixed_cost_quote: 0
+cost_filter_max_payback_sec: 3600
+
+stop_loss_pnl_pct: 0.3
+stop_loss_pause_sec: 1800
+stop_loss_liquidation_mode: quote
+reenter_enabled: true
+
+budget_key: clmm_lp_meteora
+native_token_symbol: SOL
+min_native_balance: 0.01
+balance_refresh_interval_sec: 20

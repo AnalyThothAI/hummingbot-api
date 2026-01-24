@@ -452,7 +452,7 @@ class DockerService:
                 return {"success": False, "message": "Password not provided. We cannot start the bot without a password."}
 
         if config.headless:
-            environment["HEADLESS"] = "true"
+            environment["HEADLESS_MODE"] = "true"
 
         log_config = LogConfig(
             type="json-file",

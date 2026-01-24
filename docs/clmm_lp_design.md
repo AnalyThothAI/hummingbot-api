@@ -1,11 +1,11 @@
-# CLMM LP Controller 设计（`clmm_lp`）
+# CLMM LP Controller 设计（`clmm_lp_uniswap` / `clmm_lp_meteora`）
 
-本文描述当前 `bots/controllers/generic/clmm_lp.py` 版本的设计与边界，按 Hummingbot v2 Controller 实践组织：`update_processed_data()` 负责观测与视图，`determine_executor_actions()` 负责决策与状态推进。
+本文描述当前 CLMM LP 控制器的设计与边界，按 Hummingbot v2 Controller 实践组织：`update_processed_data()` 负责观测与视图，`determine_executor_actions()` 负责决策与状态推进。
 
 ## 1. 目标与原则（先定“改什么，不改什么”）
 
 **不改的部分（保持策略能力与框架契约）**
-- 仍然是 **单一 Controller orchestrator**（不拆多个 controller 并行跑，避免互相打架）。
+- 每个实例仍然是 **单一 Controller orchestrator**（不拆多个 controller 并行跑，避免互相打架）。
 - Controller 只输出 `CreateExecutorAction` / `StopExecutorAction`，不直接下单/改余额。
 - 执行仍由 Executors 完成：`LPPositionExecutor`（开/关仓）与 `GatewaySwapExecutor`（swap）。
 - 支持 **同一 controller 多个 active executors**，按 `executor_id` 维护独立上下文。
@@ -13,15 +13,17 @@
 **要改的部分（可读、可维护、契约清晰）**
 - 把 token 顺序/反转问题集中到 `TokenOrderMapper`（适配层）。
 - 把成本过滤独立成模块：`bots/controllers/generic/clmm_lp_domain/cost_filter.py`。
-- Controller 主流程固定为：`snapshot -> reconcile -> decide -> apply_patch -> actions`。
+- Controller 主流程固定为：`snapshot -> reconcile -> decide -> apply_patch -> actions`（实现在 `clmm_lp_base.py`）。
 - 日志只保留关键异常/告警，不做大量节流/Debug 采样逻辑（避免性能与维护负担）。
 
 ## 2. 文件入口
 
-- Controller：`bots/controllers/generic/clmm_lp.py`
+- Controller（共享逻辑）：`bots/controllers/generic/clmm_lp_base.py`
+- Controller（Uniswap）：`bots/controllers/generic/clmm_lp_uniswap.py`
+- Controller（Meteora）：`bots/controllers/generic/clmm_lp_meteora.py`
 - Types / Adapters / Context：`bots/controllers/generic/clmm_lp_domain/components.py`
 - Cost Filter：`bots/controllers/generic/clmm_lp_domain/cost_filter.py`
-- 配置示例：`bots/conf/controllers/clmm_lp.yml`
+- 配置示例：`bots/conf/controllers/clmm_lp_uniswap.yml` / `bots/conf/controllers/clmm_lp_meteora.yml`
 - 官方参考（对比用）：`hummingbot/controllers/generic/lp_manager.py`
 - LP Executor：`hummingbot/hummingbot/strategy_v2/executors/lp_position_executor/`
 - Swap Executor：`hummingbot/hummingbot/strategy_v2/executors/gateway_swap_executor/`
@@ -64,7 +66,7 @@ Controller 维护的钱包与派生数据：
 - `FeeEstimatorContext`：用于 cost filter 的 fee_rate EWMA（按 `position_address` 绑定）。
 
 ### 4.3 Flow（决策层）
-三个 flow（都在 `clmm_lp.py` 内，以 `Decision/Intent` 表达）：
+三个 flow（都在 `clmm_lp_base.py` 内，以 `Decision/Intent` 表达）：
 - Entry：入场前必要时做 inventory swap，然后开 LP。
 - Rebalance：出界 -> stop ->（延时）-> 必要时 inventory swap -> reopen。
 - StopLoss：触发后 stop 全部 LP，进入冷却；可选执行 liquidation swap（base->quote）。
@@ -105,7 +107,7 @@ Controller 维护的钱包与派生数据：
 - rebalance 只做：`OUT_OF_RANGE + elapsed >= rebalance_seconds -> StopExecutorAction`；下一 tick 没 executor 就直接 `CreateExecutorAction`。
 - 不做 inventory swap、不做预算锁、不做 stoploss、不做 cost filter、不处理 “action 只是建议、可能不被执行” 的情况。
 
-而 `clmm_lp` 的 rebalance 复杂，主要来自四类“必须处理的真实约束”：
+而 `clmm_lp_base` 的 rebalance 复杂，主要来自四类“必须处理的真实约束”：
 1) **多 executor**：每个 LP 都可能独立 out-of-range，需要按 `executor_id` 保存独立 plan（`RebalanceContext.plans`）。
 2) **动作互斥**：rebalance reopen 前可能需要 inventory swap，swap 期间必须全局暂停 LP 开/关仓。
 3) **频率/冷却/成本**：`hysteresis_pct`、`cooldown_seconds`、`max_rebalances_per_hour` 与 `cost_filter_*` 都会影响“是否 stop、何时 stop”。
@@ -165,9 +167,9 @@ Controller 维护的钱包与派生数据：
 - LP 按 `pool_trading_pair`（池子 token0-token1）理解；
 - 两者必须由 `pool_trading_pair` 明确桥接，不能靠猜。
 
-示例：`bots/conf/controllers/clmm_lp.yml`（已给出）。
+示例：`bots/conf/controllers/clmm_lp_uniswap.yml` / `bots/conf/controllers/clmm_lp_meteora.yml`（已给出）。
 
 ## 13. 验收（最小可验证标准）
 
-- 编译检查：`python -m py_compile bots/controllers/generic/clmm_lp.py bots/controllers/generic/clmm_lp_domain/components.py bots/controllers/generic/clmm_lp_domain/cost_filter.py`
+- 编译检查：`python -m py_compile bots/controllers/generic/clmm_lp_base.py bots/controllers/generic/clmm_lp_uniswap.py bots/controllers/generic/clmm_lp_meteora.py bots/controllers/generic/clmm_lp_domain/components.py bots/controllers/generic/clmm_lp_domain/cost_filter.py`
 - 运行观察：启动 bot 后 `processed_data` 中不再出现 `router_price` 字段；rebalance/stoploss/entry 的 intent 与 actions 能对应到实际 executors 状态变化。

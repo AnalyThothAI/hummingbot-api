@@ -18,7 +18,7 @@ from .components import (
     Snapshot,
 )
 from .cost_filter import CostFilter
-from .open_planner import BuildOpenLPAction, ComputeInventoryDelta, MaybePlanInventorySwap, plan_open
+from .open_planner import BuildOpenLPAction, BuildOpenProposal, MaybePlanInventorySwap, plan_open
 
 EstimatePositionValue = Callable[[LPView, Decimal], Decimal]
 OutOfRangeDeviationPct = Callable[[Decimal, Decimal, Decimal], Decimal]
@@ -36,7 +36,7 @@ class RebalanceEngine:
         out_of_range_deviation_pct: OutOfRangeDeviationPct,
         can_rebalance_now: CanRebalanceNow,
         swap_slippage_pct: SwapSlippagePct,
-        compute_inventory_delta: ComputeInventoryDelta,
+        build_open_proposal: BuildOpenProposal,
         maybe_plan_inventory_swap: MaybePlanInventorySwap,
         build_open_lp_action: BuildOpenLPAction,
     ) -> None:
@@ -46,7 +46,7 @@ class RebalanceEngine:
         self._out_of_range_deviation_pct = out_of_range_deviation_pct
         self._can_rebalance_now = can_rebalance_now
         self._swap_slippage_pct = swap_slippage_pct
-        self._compute_inventory_delta = compute_inventory_delta
+        self._build_open_proposal = build_open_proposal
         self._maybe_plan_inventory_swap = maybe_plan_inventory_swap
         self._build_open_lp_action = build_open_lp_action
 
@@ -211,7 +211,7 @@ class RebalanceEngine:
             ctx=ctx,
             flow=IntentFlow.REBALANCE,
             reason="rebalance_open",
-            compute_inventory_delta=self._compute_inventory_delta,
+            build_open_proposal=self._build_open_proposal,
             maybe_plan_inventory_swap=self._maybe_plan_inventory_swap,
             build_open_lp_action=self._build_open_lp_action,
             patch_mutator=_patch_reopen,

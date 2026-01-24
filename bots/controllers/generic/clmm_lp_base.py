@@ -4,7 +4,8 @@ from decimal import Decimal
 from enum import Enum
 from typing import Callable, Dict, List, Optional, Tuple
 
-from pydantic import Field
+from pydantic import Field, field_validator
+from pydantic_core.core_schema import ValidationInfo
 
 from hummingbot.core.data_type.common import MarketDict, TradeType
 from hummingbot.data_feed.candles_feed.data_types import CandlesConfig
@@ -31,15 +32,16 @@ from .clmm_lp_domain.components import (
     IntentStage,
     LPView,
     LpContext,
-    PositionBudget,
     Regions,
     RebalanceStage,
     Snapshot,
     SwapView,
     TokenOrderMapper,
 )
-from .clmm_lp_domain.open_planner import plan_open
+from .clmm_lp_domain.open_planner import OpenProposal, plan_open
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
+from .clmm_lp_domain.policies import CLMMPolicyBase
+from .clmm_lp_domain.v3_math import V3Math
 
 Rule = Callable[[Snapshot, ControllerContext, Regions], Optional[Decision]]
 
@@ -49,14 +51,14 @@ class StopLossLiquidationMode(str, Enum):
     QUOTE = "quote"
 
 
-class CLMMLPGuardedControllerConfig(ControllerConfigBase):
+class CLMMLPBaseConfig(ControllerConfigBase):
     controller_type: str = "generic"
-    controller_name: str = "clmm_lp"
+    controller_name: str = "clmm_lp_base"
     candles_config: List[CandlesConfig] = []
 
-    connector_name: str = "meteora/clmm"
-    router_connector: str = "jupiter/router"
-    trading_pair: str = "SOL-USDC"
+    connector_name: str = ""
+    router_connector: str = ""
+    trading_pair: str = ""
     pool_trading_pair: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
     pool_address: str = ""
 
@@ -66,6 +68,7 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
     position_value_quote: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
 
     position_width_pct: Decimal = Field(default=Decimal("12"), json_schema_extra={"is_updatable": True})
+    twap_lookback: Optional[int] = Field(default=None, json_schema_extra={"is_updatable": True})
     rebalance_seconds: int = Field(default=60, json_schema_extra={"is_updatable": True})
     hysteresis_pct: Decimal = Field(default=Decimal("0.002"), json_schema_extra={"is_updatable": True})
     cooldown_seconds: int = Field(default=30, json_schema_extra={"is_updatable": True})
@@ -73,7 +76,6 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
     reopen_delay_sec: int = Field(default=5, json_schema_extra={"is_updatable": True})
 
     auto_swap_enabled: bool = Field(default=True, json_schema_extra={"is_updatable": True})
-    target_base_value_pct: Decimal = Field(default=Decimal("0.5"), json_schema_extra={"is_updatable": True})
     swap_min_value_pct: Decimal = Field(default=Decimal("0.005"), json_schema_extra={"is_updatable": True})
     swap_safety_buffer_pct: Decimal = Field(default=Decimal("0.02"), json_schema_extra={"is_updatable": True})
     swap_slippage_pct: Decimal = Field(default=Decimal("0.01"), json_schema_extra={"is_updatable": True})
@@ -105,8 +107,27 @@ class CLMMLPGuardedControllerConfig(ControllerConfigBase):
         markets = markets.add_or_update(self.router_connector, self.trading_pair)
         return markets
 
+    @field_validator("candles_config", mode="after")
+    @classmethod
+    def validate_candles_config(cls, v):
+        if not v or len(v) != 1:
+            raise ValueError("candles_config must contain exactly one TWAP source")
+        return v
 
-class CLMMLPGuardedController(ControllerBase):
+    @field_validator("twap_lookback", mode="after")
+    @classmethod
+    def validate_twap_lookback(cls, v, validation_info: ValidationInfo):
+        if v is None or v <= 0:
+            raise ValueError("twap_lookback must be > 0")
+        candles_config = validation_info.data.get("candles_config")
+        if candles_config:
+            max_records = candles_config[0].max_records
+            if max_records is not None and v > max_records:
+                raise ValueError("twap_lookback must be <= candles_config.max_records")
+        return v
+
+
+class CLMMLPBaseController(ControllerBase):
     _logger: Optional[HummingbotLogger] = None
 
     @classmethod
@@ -115,9 +136,10 @@ class CLMMLPGuardedController(ControllerBase):
             cls._logger = logging.getLogger(__name__)
         return cls._logger
 
-    def __init__(self, config: CLMMLPGuardedControllerConfig, *args, **kwargs):
+    def __init__(self, config: CLMMLPBaseConfig, policy: CLMMPolicyBase, *args, **kwargs):
         super().__init__(config, *args, **kwargs)
-        self.config: CLMMLPGuardedControllerConfig = config
+        self.config: CLMMLPBaseConfig = config
+        self._policy = policy
 
         self._tokens = TokenOrderMapper.from_config(config.trading_pair, config.pool_trading_pair)
 
@@ -127,6 +149,7 @@ class CLMMLPGuardedController(ControllerBase):
 
         self._ctx = ControllerContext()
         self._latest_snapshot: Optional[Snapshot] = None
+        self._latest_twap_price: Optional[Decimal] = None
         self._rebalance_engine = RebalanceEngine(
             controller_id=self.config.id,
             config=self.config,
@@ -134,7 +157,7 @@ class CLMMLPGuardedController(ControllerBase):
             out_of_range_deviation_pct=self._out_of_range_deviation_pct,
             can_rebalance_now=self._can_rebalance_now,
             swap_slippage_pct=self._swap_slippage_pct,
-            compute_inventory_delta=self._compute_inventory_delta,
+            build_open_proposal=self._build_open_proposal,
             maybe_plan_inventory_swap=self._maybe_plan_inventory_swap,
             build_open_lp_action=self._build_open_lp_action,
         )
@@ -175,8 +198,12 @@ class CLMMLPGuardedController(ControllerBase):
 
         snapshot = self._build_snapshot(now)
         self._latest_snapshot = snapshot
+        self._latest_twap_price = self._get_twap_price()
+        connector = self.market_data_provider.connectors.get(self.config.connector_name)
+        await self._policy.update(connector)
         self.processed_data.update({
             "current_price": snapshot.current_price,
+            "twap_price": self._latest_twap_price,
             "wallet_base": snapshot.wallet_base,
             "wallet_quote": snapshot.wallet_quote,
             "active_lp": [
@@ -203,10 +230,7 @@ class CLMMLPGuardedController(ControllerBase):
             snapshot = self._build_snapshot(self.market_data_provider.time())
         self._latest_snapshot = None
 
-        self._reconcile_done_swaps(snapshot)
-        self._rebalance_engine.reconcile(snapshot, self._ctx)
-        self._ensure_anchors(snapshot)
-        self._update_fee_rate_estimates(snapshot)
+        self._reconcile(snapshot)
 
         decision = self._decide(snapshot)
         self._ctx.apply(decision.patch)
@@ -376,6 +400,21 @@ class CLMMLPGuardedController(ControllerBase):
         if price is None:
             return None
         return Decimal(str(price))
+
+    def _get_twap_price(self) -> Optional[Decimal]:
+        candles_config = self.config.candles_config[0]
+        candles = self.market_data_provider.get_candles_df(
+            connector_name=candles_config.connector,
+            trading_pair=candles_config.trading_pair,
+            interval=candles_config.interval,
+            max_records=candles_config.max_records,
+        )
+        if candles is None or len(candles) < self.config.twap_lookback:
+            return None
+        closes = candles["close"].tail(self.config.twap_lookback)
+        if closes.empty:
+            return None
+        return Decimal(str(closes.mean()))
 
     def _schedule_wallet_balance_refresh(self, now: float) -> None:
         if self._wallet_update_task is not None and not self._wallet_update_task.done():
@@ -800,7 +839,7 @@ class CLMMLPGuardedController(ControllerBase):
             ctx=ctx,
             flow=IntentFlow.ENTRY,
             reason="entry_open",
-            compute_inventory_delta=self._compute_inventory_delta,
+            build_open_proposal=self._build_open_proposal,
             maybe_plan_inventory_swap=self._maybe_plan_inventory_swap,
             build_open_lp_action=self._build_open_lp_action,
         )
@@ -814,63 +853,62 @@ class CLMMLPGuardedController(ControllerBase):
             return current_price >= self.config.target_price
         return current_price <= self.config.target_price
 
-    def _build_position_budget(self, current_price: Optional[Decimal]) -> Optional[PositionBudget]:
-        if current_price is None or current_price <= 0:
-            return None
-        total_value = max(Decimal("0"), self.config.position_value_quote)
-        if total_value <= 0:
-            return None
-        ratio = Decimal(str(self.config.target_base_value_pct))
-        base_value = total_value * ratio
-        quote_value = total_value - base_value
-        base_amount = base_value / current_price
-        return PositionBudget(
-            total_value_quote=total_value,
-            target_base=base_amount,
-            target_quote=quote_value,
-        )
-
-    def _compute_inventory_delta(
+    def _build_open_proposal(
         self,
         current_price: Optional[Decimal],
         wallet_base: Decimal,
         wallet_quote: Decimal,
-    ) -> Tuple[Optional[Tuple[Decimal, Decimal]], Optional[str], Optional[Tuple[Decimal, Decimal]]]:
+    ) -> Tuple[Optional[OpenProposal], Optional[str]]:
         if current_price is None or current_price <= 0:
-            return None, "price_unavailable", None
-        budget = self._build_position_budget(current_price)
-        if budget is None:
-            return None, "budget_unavailable", None
-        total_value = wallet_base * current_price + wallet_quote
-        if total_value < budget.total_value_quote:
-            return None, "insufficient_balance", None
+            return None, "price_unavailable"
+        total_value = max(Decimal("0"), self.config.position_value_quote)
+        if total_value <= 0:
+            return None, "budget_unavailable"
+        range_plan = self._build_range_plan()
+        if range_plan is None:
+            return None, "budget_unavailable"
+        ratio = self._policy.quote_per_base_ratio(current_price, range_plan.lower, range_plan.upper)
+        targets = None if ratio is None else V3Math.target_amounts_from_value(total_value, current_price, ratio)
+        if targets is None:
+            return None, "budget_unavailable"
+        target_base, target_quote = targets
+        total_wallet_value = wallet_base * current_price + wallet_quote
+        if total_wallet_value < total_value:
+            return None, "insufficient_balance"
 
-        base_amount = min(wallet_base, budget.target_base)
-        quote_amount = min(wallet_quote, budget.target_quote)
-        if base_amount <= 0 and quote_amount <= 0:
-            return None, "insufficient_balance", None
+        open_base = min(wallet_base, target_base)
+        open_quote = min(wallet_quote, target_quote)
+        if open_base <= 0 and open_quote <= 0:
+            return None, "insufficient_balance"
 
-        target_base = budget.target_base
-        target_quote = budget.target_quote
         base_deficit = max(Decimal("0"), target_base - wallet_base)
         quote_deficit = max(Decimal("0"), target_quote - wallet_quote)
         if base_deficit > 0 and quote_deficit > 0:
-            return None, "insufficient_balance", None
+            return None, "insufficient_balance"
 
         delta_base = Decimal("0")
         if base_deficit > 0:
             quote_surplus = max(Decimal("0"), wallet_quote - target_quote)
             if quote_surplus <= 0:
-                return None, "insufficient_balance", None
+                return None, "insufficient_balance"
             delta_base = min(base_deficit, quote_surplus / current_price)
         elif quote_deficit > 0:
             base_surplus = max(Decimal("0"), wallet_base - target_base)
             if base_surplus <= 0:
-                return None, "insufficient_balance", None
+                return None, "insufficient_balance"
             delta_base = -min(base_surplus, quote_deficit / current_price)
 
         delta_quote_value = abs(delta_base * current_price)
-        return (delta_base, delta_quote_value), None, (base_amount, quote_amount)
+        return OpenProposal(
+            lower=range_plan.lower,
+            upper=range_plan.upper,
+            target_base=target_base,
+            target_quote=target_quote,
+            delta_base=delta_base,
+            delta_quote_value=delta_quote_value,
+            open_base=open_base,
+            open_quote=open_quote,
+        ), None
 
     def _maybe_plan_inventory_swap(
         self,
@@ -983,30 +1021,20 @@ class CLMMLPGuardedController(ControllerBase):
     def _swap_slippage_pct(self) -> Decimal:
         return max(Decimal("0"), self.config.swap_slippage_pct) * Decimal("100")
 
-    def _build_open_lp_action(
-        self,
-        current_price: Optional[Decimal],
-        base_amt: Decimal,
-        quote_amt: Decimal,
-    ) -> Optional[CreateExecutorAction]:
-        executor_config = self._create_lp_executor_config(base_amt, quote_amt, current_price)
+    def _build_open_lp_action(self, proposal: OpenProposal) -> Optional[CreateExecutorAction]:
+        executor_config = self._create_lp_executor_config(proposal)
         if executor_config is None:
             return None
         return CreateExecutorAction(controller_id=self.config.id, executor_config=executor_config)
 
-    def _create_lp_executor_config(
-        self,
-        base_amt: Decimal,
-        quote_amt: Decimal,
-        current_price: Optional[Decimal],
-    ) -> Optional[LPPositionExecutorConfig]:
-        if current_price is None or current_price <= 0:
+    def _create_lp_executor_config(self, proposal: OpenProposal) -> Optional[LPPositionExecutorConfig]:
+        if proposal.open_base <= 0 or proposal.open_quote <= 0:
             return None
-        if base_amt <= 0 and quote_amt <= 0:
-            return None
-
-        lower_price, upper_price = self._calculate_price_bounds(current_price, base_amt, quote_amt)
-        lp_base_amt, lp_quote_amt = self._tokens.strategy_amounts_to_lp(base_amt, quote_amt)
+        lower_price, upper_price = proposal.lower, proposal.upper
+        lp_base_amt, lp_quote_amt = self._tokens.strategy_amounts_to_lp(
+            proposal.open_base,
+            proposal.open_quote,
+        )
         lp_lower_price, lp_upper_price = self._tokens.strategy_bounds_to_lp(lower_price, upper_price)
 
         side = self._get_side_from_amounts(lp_base_amt, lp_quote_amt)
@@ -1025,34 +1053,26 @@ class CLMMLPGuardedController(ControllerBase):
             keep_position=False,
             budget_key=self._budget_key,
         )
-        reservation_id = self._reserve_budget(base_amt, quote_amt)
+        extra_params = self._policy.extra_lp_params()
+        if extra_params:
+            executor_config.extra_params = extra_params
+        reservation_id = self._reserve_budget(proposal.open_base, proposal.open_quote)
         if reservation_id is None:
             return None
         executor_config.budget_reservation_id = reservation_id
         return executor_config
 
-    def _calculate_price_bounds(
-        self,
-        current_price: Decimal,
-        base_amt: Decimal,
-        quote_amt: Decimal,
-    ) -> Tuple[Decimal, Decimal]:
-        total_width = self.config.position_width_pct / Decimal("100")
-        if base_amt > 0 and quote_amt > 0:
-            factor = (Decimal("1") + total_width).sqrt()
-            lower_price = current_price / factor
-            upper_price = current_price * factor
-        elif base_amt > 0:
-            lower_price = current_price
-            upper_price = current_price * (Decimal("1") + total_width)
-        elif quote_amt > 0:
-            lower_price = current_price * (Decimal("1") - total_width)
-            upper_price = current_price
-        else:
-            half_width = total_width / Decimal("2")
-            lower_price = current_price * (Decimal("1") - half_width)
-            upper_price = current_price * (Decimal("1") + half_width)
-        return lower_price, upper_price
+    def _build_range_plan(self):
+        center_price = self._latest_twap_price
+        if center_price is None or center_price <= 0:
+            return None
+        return self._policy.range_plan(center_price)
+
+    def _reconcile(self, snapshot: Snapshot) -> None:
+        self._reconcile_done_swaps(snapshot)
+        self._rebalance_engine.reconcile(snapshot, self._ctx)
+        self._ensure_anchors(snapshot)
+        self._update_fee_rate_estimates(snapshot)
 
     @staticmethod
     def _get_side_from_amounts(base_amt: Decimal, quote_amt: Decimal) -> int:

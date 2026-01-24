@@ -1,14 +1,11 @@
-controller_name: clmm_lp
+controller_name: clmm_lp_uniswap
 controller_type: generic
-id: clmm_lp
+id: clmm_lp_uniswap
 
 connector_name: uniswap/clmm
 router_connector: uniswap/router
-# trading_pair: 策略侧 BASE-QUOTE（router 报价、钱包余额与 budget 计算都按这个方向）
 trading_pair: MEMES-USDT
-# pool_trading_pair: 池子侧 token0-token1 顺序（Uniswap V3 按地址排序）；用于处理“池子方向与策略方向相反”
 pool_trading_pair: USDT-MEMES
-# pool_address: CLMM 池子的合约地址（不是 token address）
 pool_address: "0x7231d17Fa843e5516Bf1d7d6f6c87147d279C2bA"
 
 target_price: 0
@@ -17,6 +14,10 @@ trigger_above: true
 position_value_quote: 20
 position_width_pct: 20
 
+twap_lookback: 60
+ratio_clamp_tick_multiplier: 2
+candles_config: uniswap.MEMES-USDT.1m.500
+
 rebalance_seconds: 60
 hysteresis_pct: 0.002
 cooldown_seconds: 30
@@ -24,7 +25,6 @@ max_rebalances_per_hour: 20
 reopen_delay_sec: 5
 
 auto_swap_enabled: true
-target_base_value_pct: 0.5
 swap_min_value_pct: 0.005
 swap_safety_buffer_pct: 0.02
 swap_slippage_pct: 0.01
@@ -36,12 +36,10 @@ cost_filter_max_payback_sec: 3600
 
 stop_loss_pnl_pct: 0.3
 stop_loss_pause_sec: 1800
-
-# 止损后清仓换位quote
 stop_loss_liquidation_mode: quote
 reenter_enabled: true
 
-budget_key: clmm_lp
-native_token_symbol: BNB
-min_native_balance: 0.0005
+budget_key: clmm_lp_uniswap
+native_token_symbol: ETH
+min_native_balance: 0.01
 balance_refresh_interval_sec: 20

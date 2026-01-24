@@ -127,6 +127,10 @@ class AppSettings(BaseSettings):
         default=5,
         description="How often to update account states in minutes"
     )
+    mqtt_activity_timeout_seconds: int = Field(
+        default=120,
+        description="Seconds without MQTT activity before a bot is treated as inactive"
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -510,6 +510,10 @@ class MQTTManager:
         """Check if connected to MQTT broker."""
         return self._connected
 
+    def get_last_seen_map(self) -> Dict[str, float]:
+        """Return a copy of the last-seen timestamp map for discovered bots."""
+        return dict(self._discovered_bots)
+
     def get_discovered_bots(self, timeout_seconds: int = 300) -> list:
         """Get list of auto-discovered bots.
 

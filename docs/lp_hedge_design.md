@@ -10,7 +10,7 @@
 
 - Controller 实现：`bots/controllers/generic/lp_hedge.py`
 - Controller 配置：`bots/conf/controllers/lp_hedge.yml`
-- LP Controller（基础）：`bots/controllers/generic/clmm_lp.py`
+- LP Controller（基础）：`bots/controllers/generic/clmm_lp_base.py`
 - LP Executor：`hummingbot/hummingbot/strategy_v2/executors/lp_position_executor/`
 - 对冲 Executor：
   - `hummingbot/hummingbot/strategy_v2/executors/order_executor/`
