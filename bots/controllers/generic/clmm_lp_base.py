@@ -143,17 +143,14 @@ class SnapshotBuilder:
                 amount_in = self._to_decimal(custom.get("amount_in"))
                 amount_out = self._to_decimal(custom.get("amount_out"))
                 amount_in_is_quote = custom.get("amount_in_is_quote")
-                if not isinstance(amount_in_is_quote, bool):
-                    amount_in_is_quote = getattr(executor.config, "amount_in_is_quote", None)
-                    if not isinstance(amount_in_is_quote, bool):
-                        amount_in_is_quote = None
+                level_id = getattr(executor.config, "level_id", None)
                 swaps[executor.id] = SwapView(
                     executor_id=executor.id,
                     is_active=executor.is_active,
                     is_done=executor.is_done,
                     close_type=executor.close_type,
-                    level_id=getattr(executor.config, "level_id", None),
-                    purpose=self._swap_purpose(getattr(executor.config, "level_id", None)),
+                    level_id=level_id,
+                    purpose=self._swap_purpose(level_id),
                     amount=Decimal(str(getattr(executor.config, "amount", 0))),
                     executed_amount_base=executed_amount_base,
                     executed_amount_quote=executed_amount_quote,
@@ -206,9 +203,9 @@ class SnapshotBuilder:
             is_active=executor.is_active,
             is_done=executor.is_done,
             close_type=executor.close_type,
-            state=(custom.get("state") if isinstance(custom.get("state"), str) else None),
-            position_address=(custom.get("position_address") if isinstance(custom.get("position_address"), str) else None),
-            side=(custom.get("side") if isinstance(custom.get("side"), str) else None),
+            state=custom.get("state"),
+            position_address=custom.get("position_address"),
+            side=custom.get("side"),
             base_amount=base_amount,
             quote_amount=quote_amount,
             base_fee=base_fee,
@@ -349,50 +346,6 @@ class ActionFactory:
         self._market_data_provider = market_data_provider
         self._extra_lp_params = extra_lp_params
 
-    def build_inventory_swap_action(
-        self,
-        *,
-        now: float,
-        current_price: Optional[Decimal],
-        delta_base: Decimal,
-    ) -> Optional[CreateExecutorAction]:
-        if current_price is None or current_price <= 0:
-            return None
-
-        if delta_base > 0:
-            amount = abs(delta_base * current_price)
-            return self._build_swap_action(
-                level_id="inventory",
-                now=now,
-                side=TradeType.BUY,
-                amount=amount,
-                amount_in_is_quote=True,
-                apply_buffer=False,
-            )
-        if delta_base < 0:
-            amount = abs(delta_base)
-            return self._build_swap_action(
-                level_id="inventory",
-                now=now,
-                side=TradeType.SELL,
-                amount=amount,
-                amount_in_is_quote=False,
-                apply_buffer=True,
-            )
-        return None
-
-    def build_liquidation_action(self, *, now: float, base_amount: Decimal) -> Optional[CreateExecutorAction]:
-        if base_amount <= 0:
-            return None
-        return self._build_swap_action(
-            level_id="liquidate",
-            now=now,
-            side=TradeType.SELL,
-            amount=base_amount,
-            amount_in_is_quote=False,
-            apply_buffer=False,
-        )
-
     def build_open_lp_action(self, proposal: OpenProposal, now: float) -> Optional[CreateExecutorAction]:
         executor_config = self._create_lp_executor_config(proposal, now)
         if executor_config is None:
@@ -402,7 +355,7 @@ class ActionFactory:
     def swap_slippage_pct(self) -> Decimal:
         return max(Decimal("0"), self._config.swap_slippage_pct) * Decimal("100")
 
-    def _build_swap_action(
+    def build_swap_action(
         self,
         *,
         level_id: str,
@@ -554,10 +507,10 @@ class CLMMLPBaseController(ControllerBase):
             estimate_position_value=self._estimate_position_value,
             out_of_range_deviation_pct=self._out_of_range_deviation_pct,
             can_rebalance_now=self._can_rebalance_now,
-            swap_slippage_pct=self._swap_slippage_pct,
+            swap_slippage_pct=self._action_factory.swap_slippage_pct,
             build_open_proposal=self._build_open_proposal,
             maybe_plan_inventory_swap=self._maybe_plan_inventory_swap,
-            build_open_lp_action=self._build_open_lp_action,
+            build_open_lp_action=self._action_factory.build_open_lp_action,
         )
         self._rules: List[Rule] = [
             self._rule_manual_kill_switch,
@@ -593,7 +546,7 @@ class CLMMLPBaseController(ControllerBase):
     async def update_processed_data(self):
         now = self.market_data_provider.time()
 
-        self._schedule_wallet_balance_refresh(now)
+        self._balance_manager.schedule_refresh(now)
 
         snapshot = self._build_snapshot(now)
         self._latest_snapshot = snapshot
@@ -743,13 +696,6 @@ class CLMMLPBaseController(ControllerBase):
             unallocated_value = max(Decimal("0"), budget_value - lp_value)
             nav_value = lp_value + min(wallet_value, unallocated_value)
         return nav_value, lp_value, wallet_value, budget_value
-
-    # Balances
-    def _schedule_wallet_balance_refresh(self, now: float) -> None:
-        self._balance_manager.schedule_refresh(now)
-
-    def _clear_stale_balance_refresh(self, now: float) -> None:
-        self._balance_manager.clear_stale_refresh(now)
 
     def _ensure_anchors(self, snapshot: Snapshot):
         price = snapshot.current_price
@@ -1044,7 +990,7 @@ class CLMMLPBaseController(ControllerBase):
         regions: Regions,
     ) -> Optional[Decision]:
         if not regions.entry_triggered:
-            return Decision(intent=Intent(flow=IntentFlow.NONE, stage=IntentStage.NONE, reason="idle"))
+            return None
         return self._decide_entry(snapshot, ctx)
 
     def _detect_lp_failure(self, snapshot: Snapshot) -> Optional[Tuple[str, str]]:
@@ -1156,7 +1102,14 @@ class CLMMLPBaseController(ControllerBase):
                 patch=patch,
             )
 
-        swap_action = self._build_liquidation_action(now=now, base_amount=base_to_liquidate)
+        swap_action = self._action_factory.build_swap_action(
+            level_id="liquidate",
+            now=now,
+            side=TradeType.SELL,
+            amount=base_to_liquidate,
+            amount_in_is_quote=False,
+            apply_buffer=False,
+        )
         if swap_action is None:
             return Decision(intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="liquidation_wait_balance"))
 
@@ -1190,7 +1143,7 @@ class CLMMLPBaseController(ControllerBase):
             reason="entry_open",
             build_open_proposal=self._build_open_proposal,
             maybe_plan_inventory_swap=self._maybe_plan_inventory_swap,
-            build_open_lp_action=self._build_open_lp_action,
+            build_open_lp_action=self._action_factory.build_open_lp_action,
         )
 
     def _is_entry_triggered(self, current_price: Optional[Decimal]) -> bool:
@@ -1213,7 +1166,7 @@ class CLMMLPBaseController(ControllerBase):
         total_value = max(Decimal("0"), self.config.position_value_quote)
         if total_value <= 0:
             return None, "budget_unavailable"
-        range_plan = self._build_range_plan(current_price)
+        range_plan = self._policy.range_plan(current_price)
         if range_plan is None:
             return None, "range_unavailable"
         ratio = self._policy.quote_per_base_ratio(current_price, range_plan.lower, range_plan.upper)
@@ -1296,7 +1249,29 @@ class CLMMLPBaseController(ControllerBase):
         if self.config.cooldown_seconds > 0 and (now - ctx.swap.last_inventory_swap_ts) < self.config.cooldown_seconds:
             return Decision(intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="swap_cooldown"))
 
-        swap_action = self._build_inventory_swap_action(now=now, current_price=current_price, delta_base=delta_base)
+        swap_action = None
+        if current_price is not None and current_price > 0:
+            if delta_base > 0:
+                side = TradeType.BUY
+                amount = abs(delta_base * current_price)
+                amount_in_is_quote = True
+                apply_buffer = False
+            elif delta_base < 0:
+                side = TradeType.SELL
+                amount = abs(delta_base)
+                amount_in_is_quote = False
+                apply_buffer = True
+            else:
+                side = None
+            if side is not None:
+                swap_action = self._action_factory.build_swap_action(
+                    level_id="inventory",
+                    now=now,
+                    side=side,
+                    amount=amount,
+                    amount_in_is_quote=amount_in_is_quote,
+                    apply_buffer=apply_buffer,
+                )
         if swap_action is None:
             return Decision(intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="swap_required"))
 
@@ -1320,37 +1295,9 @@ class CLMMLPBaseController(ControllerBase):
         min_base = min_quote / current_price if min_quote > 0 else Decimal("0")
         return max(min_base, Decimal("0.00000001"))
 
-    # Action builders
-    def _build_inventory_swap_action(
-        self,
-        *,
-        now: float,
-        current_price: Optional[Decimal],
-        delta_base: Decimal,
-    ) -> Optional[CreateExecutorAction]:
-        return self._action_factory.build_inventory_swap_action(
-            now=now,
-            current_price=current_price,
-            delta_base=delta_base,
-        )
-
-    def _build_liquidation_action(self, *, now: float, base_amount: Decimal) -> Optional[CreateExecutorAction]:
-        return self._action_factory.build_liquidation_action(now=now, base_amount=base_amount)
-
-    def _swap_slippage_pct(self) -> Decimal:
-        return self._action_factory.swap_slippage_pct()
-
-    def _build_open_lp_action(self, proposal: OpenProposal, now: float) -> Optional[CreateExecutorAction]:
-        return self._action_factory.build_open_lp_action(proposal, now)
-
-    def _build_range_plan(self, center_price: Optional[Decimal]):
-        if center_price is None or center_price <= 0:
-            return None
-        return self._policy.range_plan(center_price)
-
     # Reconcile & cleanup
     def _reconcile(self, snapshot: Snapshot) -> None:
-        self._clear_stale_balance_refresh(snapshot.now)
+        self._balance_manager.clear_stale_refresh(snapshot.now)
         self._reconcile_done_swaps(snapshot)
         self._rebalance_engine.reconcile(snapshot, self._ctx)
         self._ensure_anchors(snapshot)
@@ -1383,14 +1330,14 @@ class CLMMLPBaseController(ControllerBase):
     def _handle_inventory_swap(self, swap: SwapView, now: float) -> None:
         if swap.close_type != CloseType.COMPLETED:
             return
-        self._mark_balance_refresh(now)
+        self._balance_manager.mark_refresh(now)
 
     def _handle_liquidation_swap(self, swap: SwapView, now: float) -> None:
         self._ctx.stoploss.last_liquidation_attempt_ts = now
         if swap.close_type != CloseType.COMPLETED:
             self._ctx.stoploss.pending_liquidation = True
             return
-        self._mark_balance_refresh(now)
+        self._balance_manager.mark_refresh(now)
         target = self._ctx.stoploss.liquidation_target_base
         if target is None:
             self._ctx.stoploss.pending_liquidation = True
@@ -1416,6 +1363,3 @@ class CLMMLPBaseController(ControllerBase):
         if swap.amount > 0:
             sold = min(sold, swap.amount)
         return sold
-
-    def _mark_balance_refresh(self, now: float) -> None:
-        self._balance_manager.mark_refresh(now)
