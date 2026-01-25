@@ -28,7 +28,6 @@ from .clmm_lp_domain.components import (
     LPView,
     LpContext,
     Regions,
-    RebalanceStage,
     Snapshot,
     SwapView,
     SwapPurpose,
@@ -348,7 +347,6 @@ class CLMMLPBaseController(ControllerBase):
                     self._last_policy_update_ts = now
                     self._policy_update_task = safe_ensure_future(self._safe_policy_update(connector))
                     self._policy_update_task.add_done_callback(self._clear_policy_update_task)
-        return
 
     def _clear_policy_update_task(self, task: asyncio.Task) -> None:
         if self._policy_update_task is task:

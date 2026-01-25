@@ -286,8 +286,8 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
         quote_str = format_number(quote, 4) if quote is not None else "-"
         signals.append(f"Wallet: {base_str}/{quote_str}")
 
-    stop_loss_active = False
-    rebalance_pending = None
+    stop_loss_active = mode == "STOPLOSS"
+    rebalance_pending = mode == "REBALANCE"
     flags = custom_info.get("flags")
     if isinstance(flags, dict):
         stop_loss_active = bool(flags.get("stop_loss_active"))
@@ -310,7 +310,10 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
     if stop_loss_active:
         signals.append("StopLoss: on")
     if rebalance_pending:
-        signals.append(f"Rebalance: {rebalance_pending}")
+        if isinstance(rebalance_pending, (int, float)) and rebalance_pending is not True:
+            signals.append(f"Rebalance: {rebalance_pending}")
+        else:
+            signals.append("Rebalance: on")
 
     state_reason = custom_info.get("state_reason") or custom_info.get("intent_reason")
     if state_reason:
@@ -471,6 +474,10 @@ def build_lp_position_rows(performance: Dict[str, Any], config_map: Dict[str, An
                     "Base": "-",
                     "Quote": "-",
                     "Value ($)": format_number(pos.get("position_value_quote"), 2),
+                    "Anchor ($)": format_number(pos.get("anchor_value_quote"), 2),
+                    "StopLoss ($)": format_number(pos.get("stoploss_trigger_quote"), 2),
+                    "Fee/hr ($)": format_number(pos.get("fee_rate_ewma_quote_per_hour"), 4),
+                    "OOR Since": format_number(pos.get("out_of_range_since"), 0),
                 })
                 continue
             rows.append({
@@ -483,6 +490,10 @@ def build_lp_position_rows(performance: Dict[str, Any], config_map: Dict[str, An
                 "Base": format_number(pos.get("base"), 4),
                 "Quote": format_number(pos.get("quote"), 4),
                 "Value ($)": format_number(pos.get("value_quote"), 2),
+                "Anchor ($)": "-",
+                "StopLoss ($)": "-",
+                "Fee/hr ($)": "-",
+                "OOR Since": "-",
             })
 
     return rows
