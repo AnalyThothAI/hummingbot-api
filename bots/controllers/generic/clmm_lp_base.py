@@ -272,11 +272,6 @@ class CLMMLPBaseController(ControllerBase):
         # Order matters: balance sync/settlement before plan transitions and cleanup.
         self._reconcile_steps: List[ReconcileStep] = [
             ReconcileStep(
-                name="clear_stale_refresh",
-                handler=self._reconcile_clear_stale_refresh,
-                description="expire balance sync barrier",
-            ),
-            ReconcileStep(
                 name="done_swaps",
                 handler=self._reconcile_done_swaps,
                 description="apply swap settlement",
@@ -1279,9 +1274,6 @@ class CLMMLPBaseController(ControllerBase):
         if swap.amount > 0:
             sold = min(sold, swap.amount)
         return sold
-
-    def _reconcile_clear_stale_refresh(self, snapshot: Snapshot) -> None:
-        self._balance_manager.clear_stale_refresh(snapshot.now)
 
     def _reconcile_rebalance_plans(self, snapshot: Snapshot) -> None:
         patch = self._rebalance_engine.reconcile(snapshot, self._ctx)

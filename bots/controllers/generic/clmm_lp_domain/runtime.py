@@ -244,26 +244,6 @@ class BalanceManager:
         self._wallet_update_task = safe_ensure_future(self._update_wallet_balances(connector))
         self._wallet_update_task.add_done_callback(self._clear_wallet_update_task)
 
-    def clear_stale_refresh(self, now: float) -> None:
-        barrier = self._ctx.swap.balance_barrier
-        if barrier is None:
-            return
-        if barrier.deadline_ts <= 0:
-            barrier.deadline_ts = now + self._config.balance_refresh_timeout_sec
-            return
-        if now < barrier.deadline_ts:
-            return
-        if not self._ctx.failure.blocked:
-            self._logger().error(
-                "balance_sync_timeout | reason=%s age=%.0f attempts=%s",
-                barrier.reason or "unknown",
-                now - barrier.created_ts,
-                barrier.attempts,
-            )
-            patch = DecisionPatch()
-            patch.failure.set_reason = "balance_sync_timeout"
-            self._ctx.apply(patch)
-
     def request_balance_sync(
         self,
         *,
@@ -282,7 +262,6 @@ class BalanceManager:
                 baseline_base=self._wallet_base,
                 baseline_quote=self._wallet_quote,
                 created_ts=now,
-                deadline_ts=now + self._config.balance_refresh_timeout_sec,
                 reason=reason,
             )
             self._ctx.swap.balance_barrier = barrier
@@ -294,7 +273,6 @@ class BalanceManager:
             )
         barrier.expected_delta_base += delta_base
         barrier.expected_delta_quote += delta_quote
-        barrier.deadline_ts = max(barrier.deadline_ts, now + self._config.balance_refresh_timeout_sec)
         self._ctx.swap.awaiting_balance_refresh = True
         if self._ctx.swap.awaiting_balance_refresh_since <= 0:
             self._ctx.swap.awaiting_balance_refresh_since = now
@@ -328,16 +306,22 @@ class BalanceManager:
                 self._ctx.swap.awaiting_balance_refresh = False
                 self._ctx.swap.awaiting_balance_refresh_since = 0.0
                 return
-            if self._is_balance_synced(barrier):
+            observed_base = self._wallet_base - barrier.baseline_base
+            observed_quote = self._wallet_quote - barrier.baseline_quote
+            if self._is_balance_directionally_synced(barrier, observed_base, observed_quote):
                 self._logger().info(
-                    "balance_sync_done | reason=%s observed_base=%s observed_quote=%s",
+                    "balance_sync_done | reason=%s observed_base=%s observed_quote=%s "
+                    "expected_base=%s expected_quote=%s",
                     barrier.reason or "unknown",
-                    self._wallet_base - barrier.baseline_base,
-                    self._wallet_quote - barrier.baseline_quote,
+                    observed_base,
+                    observed_quote,
+                    barrier.expected_delta_base,
+                    barrier.expected_delta_quote,
                 )
                 self._ctx.swap.balance_barrier = None
                 self._ctx.swap.awaiting_balance_refresh = False
                 self._ctx.swap.awaiting_balance_refresh_since = 0.0
+                return
         except Exception:
             self._logger().exception(
                 "update_balances failed | connector=%s base=%s quote=%s last_update_ts=%.0f last_attempt_ts=%.0f",
@@ -354,17 +338,27 @@ class BalanceManager:
             return 3.0
         return min(20.0, 3.0 * (2 ** min(attempts, 3)))
 
-    def _is_balance_synced(self, barrier: BalanceSyncBarrier) -> bool:
-        observed_base = self._wallet_base - barrier.baseline_base
-        observed_quote = self._wallet_quote - barrier.baseline_quote
+    def _is_balance_directionally_synced(
+        self,
+        barrier: BalanceSyncBarrier,
+        observed_base: Decimal,
+        observed_quote: Decimal,
+    ) -> bool:
         expected_base = barrier.expected_delta_base
         expected_quote = barrier.expected_delta_quote
-        tol_base = self._sync_tolerance(expected_base)
-        tol_quote = self._sync_tolerance(expected_quote)
         return (
-            abs(observed_base - expected_base) <= tol_base
-            and abs(observed_quote - expected_quote) <= tol_quote
+            self._directional_match(observed_base, expected_base)
+            and self._directional_match(observed_quote, expected_quote)
         )
+
+    def _directional_match(self, observed: Decimal, expected: Decimal) -> bool:
+        if expected == 0:
+            return True
+        if observed == 0:
+            return False
+        if not self._delta_sign_matches(observed, expected):
+            return False
+        return True
 
     @staticmethod
     def _sync_tolerance(expected: Decimal) -> Decimal:
