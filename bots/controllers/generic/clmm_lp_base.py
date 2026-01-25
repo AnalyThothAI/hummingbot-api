@@ -831,7 +831,17 @@ class CLMMLPBaseController(ControllerBase):
     ) -> Optional[Decision]:
         if not regions.entry_triggered:
             return None
-        return self._decide_entry(snapshot, ctx)
+        if not self._balance_manager.has_snapshot:
+            return Decision(intent=Intent(flow=IntentFlow.ENTRY, stage=IntentStage.WAIT, reason="balance_bootstrap"))
+        return plan_open(
+            snapshot=snapshot,
+            ctx=ctx,
+            flow=IntentFlow.ENTRY,
+            reason="entry_open",
+            build_open_proposal=self._build_open_proposal,
+            maybe_plan_inventory_swap=self._maybe_plan_inventory_swap,
+            build_open_lp_action=self._action_factory.build_open_lp_action,
+        )
 
     def _detect_lp_failure(self, snapshot: Snapshot) -> Optional[Tuple[str, str]]:
         for executor_id, lp_view in snapshot.lp.items():
@@ -976,16 +986,6 @@ class CLMMLPBaseController(ControllerBase):
             ctx.rebalance.timestamps.popleft()
         return len(ctx.rebalance.timestamps) < self.config.max_rebalances_per_hour
 
-    def _decide_entry(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
-        return plan_open(
-            snapshot=snapshot,
-            ctx=ctx,
-            flow=IntentFlow.ENTRY,
-            reason="entry_open",
-            build_open_proposal=self._build_open_proposal,
-            maybe_plan_inventory_swap=self._maybe_plan_inventory_swap,
-            build_open_lp_action=self._action_factory.build_open_lp_action,
-        )
 
     def _is_entry_triggered(self, current_price: Optional[Decimal]) -> bool:
         if self.config.target_price <= 0:

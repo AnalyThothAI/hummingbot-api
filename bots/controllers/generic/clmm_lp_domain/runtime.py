@@ -202,6 +202,7 @@ class BalanceManager:
         self._last_balance_attempt_ts: float = 0.0
         self._wallet_update_task: Optional[asyncio.Task] = None
         self._has_balance_snapshot: bool = False
+        self._logged_balance_snapshot: bool = False
         self._unassigned_delta_base: Decimal = Decimal("0")
         self._unassigned_delta_quote: Decimal = Decimal("0")
 
@@ -212,6 +213,10 @@ class BalanceManager:
     @property
     def wallet_quote(self) -> Decimal:
         return self._wallet_quote
+
+    @property
+    def has_snapshot(self) -> bool:
+        return self._has_balance_snapshot
 
     def schedule_refresh(self, now: float) -> None:
         if self._wallet_update_task is not None and not self._wallet_update_task.done():
@@ -312,6 +317,13 @@ class BalanceManager:
                 self._unassigned_delta_base += self._wallet_base - prev_base
                 self._unassigned_delta_quote += self._wallet_quote - prev_quote
             self._has_balance_snapshot = True
+            if not self._logged_balance_snapshot:
+                self._logger().info(
+                    "balance_snapshot_ready | base=%s quote=%s",
+                    self._wallet_base,
+                    self._wallet_quote,
+                )
+                self._logged_balance_snapshot = True
             if barrier is None:
                 self._ctx.swap.awaiting_balance_refresh = False
                 self._ctx.swap.awaiting_balance_refresh_since = 0.0
