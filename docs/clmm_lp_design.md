@@ -127,10 +127,10 @@ Controller 维护的钱包与派生数据：
 - `_can_rebalance_now()` 通过（`max_rebalances_per_hour`）
 - 若启用 cost filter：`CostFilter.allow_rebalance(...)` 通过；否则可能被 `should_force_rebalance()` 强制放行
 
-### 8.2 Plan 阶段（`RebalanceStage`）
-- `STOP_REQUESTED`：对该 `executor_id` 幂等发 stop，直到观测到 LP 不再 active。
-- `WAIT_REOPEN`：等待 `reopen_delay_sec`，到期后进入 reopen（必要时 inventory swap）。
-- `OPEN_REQUESTED`：已发 open action，等待新 executor 出现；超时则回退到 `WAIT_REOPEN`。
+### 8.2 阶段（显式 FSM）
+- `REBALANCE_STOP`：对 LP 幂等发 stop，直到观测到 LP 已关闭。
+- `REBALANCE_SWAP`：若需要 inventory swap，则执行并等待完成。
+- `REBALANCE_OPEN`：发送 open action，若超时则回退到 `IDLE`。
 
 ## 9. Cost Filter（独立模块）
 
@@ -141,13 +141,11 @@ Controller 维护的钱包与派生数据：
 
 ## 10. StopLoss 与 liquidation
 
-- StopLoss 基于每个 LP 的 `BudgetAnchor`（quote 计价）：
-  - equity = deployed_value（含 fees） + wallet_slice_value
-  - 低于阈值则触发：stop 全部 LP，进入 `stop_loss_pause_sec` 冷却。
-- 若 `stop_loss_liquidation_mode: quote`：
-  - 触发 liquidation swap（base -> quote）。
-  - `liquidation_target_base` 取触发时 LPView 的 `base_amount + base_fee` 累加值，避免依赖开仓缓存。
-  - `liquidation_target_base` 会在每次 liquidation swap 完成后递减，直到归零（或 wallet_base 为 0）。
+- StopLoss 基于 anchor equity（quote 计价）：
+  - equity = deployed_value（含 fees） + wallet_value
+  - 低于阈值则触发：stop LP，进入 `stop_loss_pause_sec` 冷却。
+- LP stop 完成后，触发一次全额 base -> quote 清算（按钱包快照）。
+- Take-profit（`take_profit_pnl_pct`）仅发信号，不改变 LP 状态。
 
 ## 11. `processed_data`（对外观测字段）
 

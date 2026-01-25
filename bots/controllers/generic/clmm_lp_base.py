@@ -1,7 +1,6 @@
 import asyncio
 import logging
 from decimal import Decimal
-from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
 from pydantic import Field
@@ -20,12 +19,8 @@ from .clmm_lp_domain.cost_filter import CostFilter
 from .clmm_lp_domain.clmm_fsm import CLMMFSM
 from .clmm_lp_domain.policies import CLMMPolicyBase
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
+from .clmm_lp_domain.exit_policy import ExitPolicy
 from .clmm_lp_domain.io import ActionFactory, BalanceManager, SnapshotBuilder
-
-
-class StopLossLiquidationMode(str, Enum):
-    NONE = "none"
-    QUOTE = "quote"
 
 
 class CLMMLPBaseConfig(ControllerConfigBase):
@@ -47,7 +42,6 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     hysteresis_pct: Decimal = Field(default=Decimal("0.002"), json_schema_extra={"is_updatable": True})
     cooldown_seconds: int = Field(default=30, json_schema_extra={"is_updatable": True})
     max_rebalances_per_hour: int = Field(default=20, json_schema_extra={"is_updatable": True})
-    reopen_delay_sec: int = Field(default=5, json_schema_extra={"is_updatable": True})
     rebalance_open_timeout_sec: int = Field(default=120, json_schema_extra={"is_updatable": True})
 
     auto_swap_enabled: bool = Field(default=True, json_schema_extra={"is_updatable": True})
@@ -66,11 +60,8 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     cost_filter_max_payback_sec: int = Field(default=3600, json_schema_extra={"is_updatable": True})
 
     stop_loss_pnl_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
+    take_profit_pnl_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     stop_loss_pause_sec: int = Field(default=1800, json_schema_extra={"is_updatable": True})
-    stop_loss_liquidation_mode: StopLossLiquidationMode = Field(
-        default=StopLossLiquidationMode.QUOTE,
-        json_schema_extra={"is_updatable": True},
-    )
     reenter_enabled: bool = Field(default=True, json_schema_extra={"is_updatable": True})
 
     budget_key: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
@@ -130,12 +121,14 @@ class CLMMLPBaseController(ControllerBase):
             config=self.config,
             estimate_position_value=self._estimate_position_value,
         )
+        self._exit_policy = ExitPolicy(config=self.config)
         self._fsm = CLMMFSM(
             config=self.config,
             action_factory=self._action_factory,
             build_open_proposal=self._build_open_proposal,
             estimate_position_value=self._estimate_position_value,
             rebalance_engine=self._rebalance_engine,
+            exit_policy=self._exit_policy,
         )
         self._latest_snapshot: Optional[Snapshot] = None
 

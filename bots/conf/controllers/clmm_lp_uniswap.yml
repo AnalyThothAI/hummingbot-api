@@ -19,7 +19,6 @@ rebalance_seconds: 60
 hysteresis_pct: 0.002
 cooldown_seconds: 30
 max_rebalances_per_hour: 20
-reopen_delay_sec: 5
 
 auto_swap_enabled: true
 swap_min_value_pct: 0.005
@@ -33,7 +32,6 @@ cost_filter_max_payback_sec: 3600
 
 stop_loss_pnl_pct: 0.3
 stop_loss_pause_sec: 1800
-stop_loss_liquidation_mode: quote
 reenter_enabled: true
 
 budget_key: clmm_lp_uniswap

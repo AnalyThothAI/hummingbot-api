@@ -908,7 +908,6 @@ def _scenario_rebalance_loop(args) -> Scenario:
         config_overrides={
             "rebalance_seconds": 0,
             "cooldown_seconds": 0,
-            "reopen_delay_sec": 0,
         },
     )
     steps = _build_rebalance_loop_scenario(

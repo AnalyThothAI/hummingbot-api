@@ -7,6 +7,7 @@ from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executor_actions import StopExecutorAction
 
 from .components import ControllerContext, ControllerState, Decision, LPView, OpenProposal, Snapshot, SwapPurpose, SwapView
+from .exit_policy import ExitPolicy
 from .rebalance_engine import RebalanceEngine
 
 BuildOpenProposal = Callable[[Optional[Decimal], Decimal, Decimal], Tuple[Optional[OpenProposal], Optional[str]]]
@@ -22,12 +23,14 @@ class CLMMFSM:
         build_open_proposal: BuildOpenProposal,
         estimate_position_value: EstimatePositionValue,
         rebalance_engine: RebalanceEngine,
+        exit_policy: ExitPolicy,
     ) -> None:
         self._config = config
         self._action_factory = action_factory
         self._build_open_proposal = build_open_proposal
         self._estimate_position_value = estimate_position_value
         self._rebalance_engine = rebalance_engine
+        self._exit_policy = exit_policy
 
     def step(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
         now = snapshot.now
@@ -57,7 +60,7 @@ class CLMMFSM:
         if state == ControllerState.STOPLOSS_STOP:
             return self._handle_stoploss_stop(snapshot, ctx)
         if state == ControllerState.STOPLOSS_SWAP:
-            return self._handle_stoploss_swap(snapshot, ctx)
+            return self._handle_stoploss_swap(snapshot, ctx, balance_fresh)
         if state == ControllerState.COOLDOWN:
             return self._handle_cooldown(snapshot, ctx)
         ctx.state = ControllerState.IDLE
@@ -158,7 +161,10 @@ class CLMMFSM:
         if self._is_lp_in_transition(lp_view):
             return self._stay(ctx, reason="lp_in_transition")
         self._set_anchor_if_ready(snapshot, ctx)
-        if self._should_stoploss(snapshot, ctx, lp_view):
+        equity = None
+        if snapshot.current_price is not None and snapshot.current_price > 0:
+            equity = self._compute_equity(snapshot, lp_view, snapshot.current_price)
+        if self._exit_policy.should_stoploss(ctx.anchor_value_quote, equity):
             ctx.last_exit_reason = "stop_loss"
             ctx.cooldown_until_ts = now + self._config.stop_loss_pause_sec
             ctx.pending_lp_id = lp_view.executor_id
@@ -184,6 +190,8 @@ class CLMMFSM:
                 reason=signal.reason,
                 actions=[stop_action],
             )
+        if self._exit_policy.should_take_profit(ctx.anchor_value_quote, equity):
+            return self._stay(ctx, reason="take_profit_signal")
         return self._stay(ctx, reason="active")
 
     def _handle_rebalance_stop(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
@@ -258,11 +266,13 @@ class CLMMFSM:
         ctx.pending_lp_id = lp_view.executor_id
         return self._stay(ctx, reason="stoploss_stop", actions=[stop_action])
 
-    def _handle_stoploss_swap(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
+    def _handle_stoploss_swap(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
         if self._resolve_pending_swap(snapshot, ctx, is_stoploss=True):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="stoploss_swap_done")
         if self._stoploss_attempts_exhausted(ctx, self._config.max_stoploss_liquidation_attempts):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="stoploss_swap_failed")
+        if not balance_fresh:
+            return self._stay(ctx, reason="balance_stale")
         if self._swap_cooldown_active(ctx.last_stoploss_swap_ts, snapshot.now):
             return self._stay(ctx, reason="swap_cooldown")
         if any(snapshot.active_swaps):
@@ -410,21 +420,6 @@ class CLMMFSM:
             unallocated = max(Decimal("0"), budget_value - lp_value)
             return lp_value + min(wallet_value, unallocated)
         return lp_value + wallet_value
-
-    def _should_stoploss(self, snapshot: Snapshot, ctx: ControllerContext, lp_view: LPView) -> bool:
-        if self._config.stop_loss_pnl_pct <= 0:
-            return False
-        current_price = snapshot.current_price
-        if current_price is None or current_price <= 0:
-            return False
-        anchor = ctx.anchor_value_quote
-        if anchor is None or anchor <= 0:
-            return False
-        equity = self._compute_equity(snapshot, lp_view, current_price)
-        if equity is None:
-            return False
-        trigger_level = anchor - (anchor * self._config.stop_loss_pnl_pct)
-        return equity <= trigger_level
 
     def _select_lp(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[LPView]:
         if ctx.pending_lp_id and ctx.pending_lp_id in snapshot.lp:

@@ -21,9 +21,7 @@ position_width_pct: 28
 ratio_edge_buffer_pct: 0.02
 rebalance_seconds: 60
 reenter_enabled: true
-reopen_delay_sec: 5
 router_connector: jupiter/router
-stop_loss_liquidation_mode: quote
 stop_loss_pause_sec: 1800
 stop_loss_pnl_pct: 0.3
 strategy_type: 0
