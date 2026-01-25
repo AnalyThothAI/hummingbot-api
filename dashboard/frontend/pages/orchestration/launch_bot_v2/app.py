@@ -153,6 +153,14 @@ def connector_base_name(connector_name: str) -> str:
     return connector_name.split("/", 1)[0]
 
 
+def connector_pool_type(connector_name: str) -> str | None:
+    if not connector_name or "/" not in connector_name:
+        return None
+    _, suffix = connector_name.split("/", 1)
+    suffix = suffix.strip().lower()
+    return suffix if suffix in {"clmm", "amm"} else None
+
+
 def extract_network_value(network_id: str):
     if not network_id:
         return None
@@ -175,38 +183,25 @@ def load_gateway_pools(
     if not connector_base:
         return [], "Missing connector name"
 
-    is_meteora = connector_base.lower() == "meteora"
-    network_value = None if is_meteora else extract_network_value(gateway_network_id or "")
-    cache_key = f"{connector_base}:{network_value}:{search_term}:{limit}"
+    network_value = extract_network_value(gateway_network_id or "") if gateway_network_id else None
+    pool_type = connector_pool_type(connector_name)
+    cache_key = f"{connector_base}:{network_value}:{pool_type}:{search_term}:{limit}"
 
     if not force_refresh and cache_key in cache:
         return cache[cache_key], None
 
-    if not is_meteora and not network_value:
-        return [], "Select a Gateway network to load pools."
-
-    if is_meteora:
-        params = {"connector": connector_base, "page": 0, "limit": limit}
-        if search_term:
-            params["search_term"] = search_term
-        response = backend_api_request("GET", "/gateway/clmm/pools", params=params, timeout=30)
-        if response.get("ok"):
-            pools = response.get("data", {}).get("pools", []) or []
-            cache[cache_key] = pools
-            return pools, None
-        return [], response.get("error", "Failed to fetch CLMM pools.")
-
-    params = {"connector_name": connector_base, "network": network_value}
+    params = {"connector_name": connector_base}
+    if network_value:
+        params["network"] = network_value
+    if pool_type:
+        params["pool_type"] = pool_type
+    if search_term:
+        params["search"] = search_term
     response = backend_api_request("GET", "/gateway/pools", params=params, timeout=30)
     if response.get("ok"):
         pools = response.get("data", []) or []
-        if search_term:
-            search_lower = search_term.lower()
-            pools = [
-                pool for pool in pools
-                if search_lower in str(pool.get("trading_pair", "")).lower()
-                or search_lower in str(pool.get("address", "")).lower()
-            ]
+        if limit and len(pools) > limit:
+            pools = pools[:limit]
         cache[cache_key] = pools
         return pools, None
     return [], response.get("error", "Failed to fetch Gateway pools.")

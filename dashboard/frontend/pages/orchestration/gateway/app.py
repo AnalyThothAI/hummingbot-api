@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 import streamlit as st
 from eth_utils import is_address, is_checksum_address, to_checksum_address
@@ -248,6 +250,10 @@ def normalize_evm_address(address: str):
     return checksum, None
 
 
+def is_valid_solana_address(address: str) -> bool:
+    return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", address))
+
+
 def format_api_error(response, fallback: str):
     data = response.get("data", {})
     if isinstance(data, dict):
@@ -256,6 +262,12 @@ def format_api_error(response, fallback: str):
             return detail
     error = response.get("error")
     return error or fallback
+
+
+def update_session_state(updates: dict):
+    for key, value in updates.items():
+        if value is not None:
+            st.session_state[key] = value
 
 
 def networks_for_connector(connector_name: str, fallback: list[str]):
@@ -381,53 +393,101 @@ with tabs[0]:
 
     st.markdown("**Add Token**")
     st.caption("EVM chains require checksum addresses (mixed-case).")
-    with st.form("gateway_add_token"):
-        network_id = select_network("Network", "token_network", network_options)
-        token_address = st.text_input("Token Address")
-        symbol = st.text_input("Symbol")
-        name = st.text_input("Name (optional)")
-        decimals = st.number_input("Decimals", min_value=0, max_value=36, step=1, value=6)
-        submit_add_token = st.form_submit_button("Add Token")
+    network_id = select_network("Network", "token_network", network_options)
+    token_address = st.text_input("Token Address", key="token_address")
+    symbol = st.text_input("Symbol", key="token_symbol")
+    name = st.text_input("Name (optional)", key="token_name")
+    decimals_value = st.session_state.get("token_decimals", 6)
+    decimals = st.number_input("Decimals", min_value=0, max_value=36, step=1, value=decimals_value, key="token_decimals")
 
-        if submit_add_token:
-            if not network_id or not token_address or not symbol:
-                st.error("Network, token address, and symbol are required.")
+    lookup_address = None
+    checksum_notice = None
+    if network_id and "-" in network_id and token_address:
+        chain, _ = split_network_id(network_id)
+        if token_address.startswith("0x") and len(token_address) == 42:
+            checksum_address, checksum_notice = normalize_evm_address(token_address)
+            if checksum_address is None:
+                st.error("Invalid EVM address. Check the address format.")
             else:
-                checksum_notice = None
-                if token_address.startswith("0x"):
-                    checksum_address, checksum_notice = normalize_evm_address(token_address)
-                    if checksum_address is None:
-                        st.error("Invalid EVM address. Check the address format.")
-                    else:
-                        token_address = checksum_address
+                lookup_address = checksum_address
+                if checksum_address != token_address:
+                    st.session_state["token_address"] = checksum_address
+        elif chain == "solana" and is_valid_solana_address(token_address):
+            lookup_address = token_address
 
-                if token_address:
-                    payload = {
-                        "address": token_address,
-                        "symbol": symbol,
-                        "decimals": int(decimals),
-                    }
-                    if name:
-                        payload["name"] = name
-                    response = backend_api_request(
-                        "POST",
-                        f"/gateway/networks/{network_id}/tokens",
-                        json_body=payload,
+    lookup_key = f"{network_id}:{lookup_address}" if lookup_address else None
+    if lookup_key and st.session_state.get("token_lookup_key") != lookup_key:
+        st.session_state["token_lookup_key"] = lookup_key
+        response = backend_api_request(
+            "GET",
+            "/metadata/token",
+            params={
+                "network_id": network_id,
+                "address": lookup_address,
+            },
+        )
+        if response.get("ok"):
+            payload = response.get("data", {})
+            token = payload.get("token", {})
+            update_session_state({
+                "token_symbol": token.get("symbol"),
+                "token_name": token.get("name"),
+                "token_decimals": token.get("decimals"),
+            })
+            st.success("Token metadata loaded.")
+            warnings = payload.get("warnings", [])
+            if warnings:
+                st.info(f"Metadata warnings: {', '.join(warnings)}")
+            if checksum_notice:
+                st.info(checksum_notice)
+            st.rerun()
+        else:
+            status_code = response.get("status_code")
+            if status_code == 401:
+                st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+            else:
+                st.error(format_api_error(response, "Failed to fetch token metadata."))
+
+    submit_add_token = st.button("Add Token", key="token_add_submit")
+    if submit_add_token:
+        if not network_id or not token_address or not symbol:
+            st.error("Network, token address, and symbol are required.")
+        else:
+            checksum_notice = None
+            if token_address.startswith("0x"):
+                checksum_address, checksum_notice = normalize_evm_address(token_address)
+                if checksum_address is None:
+                    st.error("Invalid EVM address. Check the address format.")
+                else:
+                    token_address = checksum_address
+
+            if token_address:
+                payload = {
+                    "address": token_address,
+                    "symbol": symbol,
+                    "decimals": int(decimals),
+                }
+                if name:
+                    payload["name"] = name
+                response = backend_api_request(
+                    "POST",
+                    f"/gateway/networks/{network_id}/tokens",
+                    json_body=payload,
+                )
+                if response.get("ok"):
+                    message = response.get("data", {}).get(
+                        "message",
+                        "Token added. Restart Gateway for changes to take effect.",
                     )
-                    if response.get("ok"):
-                        message = response.get("data", {}).get(
-                            "message",
-                            "Token added. Restart Gateway for changes to take effect.",
-                        )
-                        st.success(message)
-                        if checksum_notice:
-                            st.info(checksum_notice)
+                    st.success(message)
+                    if checksum_notice:
+                        st.info(checksum_notice)
+                else:
+                    status_code = response.get("status_code")
+                    if status_code == 401:
+                        st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
                     else:
-                        status_code = response.get("status_code")
-                        if status_code == 401:
-                            st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
-                        else:
-                            st.error(format_api_error(response, "Failed to add token."))
+                        st.error(format_api_error(response, "Failed to add token."))
 
     st.divider()
     st.markdown("**Tokens by Network**")
@@ -483,28 +543,169 @@ with tabs[1]:
     network_id = select_network("Network", "pool_network", pool_network_options)
     pool_type = st.selectbox("Pool Type", ["clmm", "amm"], key="pool_type")
 
+    pool_search_context = f"{connector_name}|{network_id}|{pool_type}"
+    if st.session_state.get("pool_search_context") != pool_search_context:
+        st.session_state["pool_search_context"] = pool_search_context
+        st.session_state.pop("pool_search_results", None)
+        st.session_state.pop("pool_search_choice", None)
+
+    st.markdown("**Search Pools**")
+    search_cols = st.columns(2)
+    with search_cols[0]:
+        token_a = st.text_input("Token A (symbol or address)", key="pool_search_token_a")
+    with search_cols[1]:
+        token_b = st.text_input("Token B (symbol or address)", key="pool_search_token_b")
+
+    search_term = st.text_input(
+        "Search (optional)",
+        key="pool_search_term",
+        help="Used when Token A/B are empty (e.g., SOL or SOL-USDC).",
+    )
+
+    options_cols = st.columns(2)
+    with options_cols[0]:
+        pages = st.number_input("Pages", min_value=1, max_value=10, value=1, step=1, key="pool_search_pages")
+    with options_cols[1]:
+        limit = st.number_input("Limit", min_value=1, max_value=200, value=50, step=1, key="pool_search_limit")
+
+    def is_search_value_ready(value: str | None) -> bool:
+        if not value:
+            return False
+        trimmed = value.strip()
+        if not trimmed:
+            return False
+        if trimmed.startswith("0x"):
+            return len(trimmed) == 42 and is_address(trimmed)
+        if is_valid_solana_address(trimmed):
+            return True
+        return len(trimmed) >= 2
+
+    def is_search_term_ready(value: str | None) -> bool:
+        if not value:
+            return False
+        trimmed = value.strip()
+        if not trimmed:
+            return False
+        if "-" in trimmed:
+            return True
+        return len(trimmed) >= 2
+
+    should_search = (
+        is_search_value_ready(token_a)
+        or is_search_value_ready(token_b)
+        or is_search_term_ready(search_term)
+    )
+
+    if should_search:
+        if connector_name and network_id and "-" in network_id:
+            search_key = "|".join([
+                connector_name or "",
+                network_id or "",
+                pool_type or "",
+                token_a.strip() if token_a else "",
+                token_b.strip() if token_b else "",
+                search_term.strip() if search_term else "",
+                str(int(pages)),
+                str(int(limit)),
+            ])
+            if st.session_state.get("pool_search_key") != search_key:
+                st.session_state["pool_search_key"] = search_key
+                response = backend_api_request(
+                    "GET",
+                    "/metadata/pools",
+                    params={
+                        "connector": connector_name,
+                        "network_id": network_id,
+                        "pool_type": pool_type,
+                        "token_a": token_a or None,
+                        "token_b": token_b or None,
+                        "search": search_term or None,
+                        "pages": int(pages),
+                        "limit": int(limit),
+                    },
+                )
+                if response.get("ok"):
+                    payload = response.get("data", {})
+                    pools_results = payload.get("pools", [])
+                    st.session_state["pool_search_results"] = pools_results
+                else:
+                    status_code = response.get("status_code")
+                    if status_code == 401:
+                        st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+                    else:
+                        st.error(format_api_error(response, "Failed to fetch pools."))
+    else:
+        st.session_state.pop("pool_search_results", None)
+        st.session_state.pop("pool_search_key", None)
+
+    pools_results = st.session_state.get("pool_search_results", [])
+    if pools_results:
+        display_rows = []
+        for pool in pools_results:
+            display_rows.append({
+                "Pair": pool.get("trading_pair"),
+                "Fee %": pool.get("fee_tier"),
+                "Bin Step": pool.get("bin_step"),
+                "Volume 24h": pool.get("volume_24h"),
+                "TVL (USD)": pool.get("tvl_usd"),
+                "APR %": pool.get("apr"),
+                "APY %": pool.get("apy"),
+                "Address": pool.get("address"),
+            })
+
+        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+
+        options = {}
+        for pool in pools_results:
+            address = pool.get("address", "")
+            address_suffix = f"{address[:6]}...{address[-4:]}" if address else "unknown"
+            label = f"{pool.get('trading_pair', 'unknown')} | {address_suffix}"
+            options[label] = pool
+
+        selected_label = st.selectbox("Select Pool to Fill Form", list(options.keys()), key="pool_search_choice")
+        if st.button("Use Selected Pool", key="pool_search_apply"):
+            selected_pool = options.get(selected_label, {})
+            updates = {
+                "pool_base_symbol": selected_pool.get("base_symbol"),
+                "pool_quote_symbol": selected_pool.get("quote_symbol"),
+                "pool_base_address": selected_pool.get("base_address"),
+                "pool_quote_address": selected_pool.get("quote_address"),
+                "pool_address": selected_pool.get("address"),
+            }
+            fee_tier = selected_pool.get("fee_tier")
+            if fee_tier is not None:
+                try:
+                    updates["pool_fee_pct"] = float(fee_tier)
+                except (TypeError, ValueError):
+                    pass
+            update_session_state(updates)
+            st.success("Pool details loaded.")
+            st.rerun()
+
     with st.form("gateway_add_pool"):
         col1a, col2a, col3a = st.columns(3)
         with col1a:
-            base_symbol = st.text_input("Base Symbol")
+            base_symbol = st.text_input("Base Symbol", key="pool_base_symbol")
         with col2a:
-            quote_symbol = st.text_input("Quote Symbol")
+            quote_symbol = st.text_input("Quote Symbol", key="pool_quote_symbol")
         with col3a:
+            fee_pct_value = st.session_state.get("pool_fee_pct", 0.0)
             fee_pct = st.number_input(
                 "Fee Pct (optional)",
                 min_value=0.0,
                 step=0.01,
                 format="%.4f",
-                value=0.0,
+                value=fee_pct_value,
+                key="pool_fee_pct",
             )
 
         col1b, col2b = st.columns(2)
         with col1b:
-            base_address = st.text_input("Base Token Address")
+            base_address = st.text_input("Base Token Address", key="pool_base_address")
         with col2b:
-            quote_address = st.text_input("Quote Token Address")
+            quote_address = st.text_input("Quote Token Address", key="pool_quote_address")
 
-        pool_address = st.text_input("Pool Address")
+        pool_address = st.text_input("Pool Address", key="pool_address")
         submit_add_pool = st.form_submit_button("Add Pool")
 
         if submit_add_pool:

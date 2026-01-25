@@ -315,6 +315,8 @@ class CLMMLPBaseController(ControllerBase):
         self._policy_update_task: Optional[asyncio.Task] = None
         self._last_mode: ControllerMode = ControllerMode.IDLE
         self._last_rule: str = "idle"
+        self._last_lp_snapshot: List[Dict] = []
+        self._last_lp_snapshot_ts: float = 0.0
 
         rate_connector = self.config.router_connector
         self.market_data_provider.initialize_rate_sources([
@@ -438,7 +440,13 @@ class CLMMLPBaseController(ControllerBase):
         info["rebalance_plan_count"] = len(self._ctx.rebalance.plans)
 
         if snapshot.active_lp:
-            info["active_lp"] = [_build_lp_item(lp_view) for lp_view in snapshot.active_lp]
+            active_lp_items = [_build_lp_item(lp_view) for lp_view in snapshot.active_lp]
+            info["active_lp"] = active_lp_items
+            self._last_lp_snapshot = active_lp_items
+            self._last_lp_snapshot_ts = snapshot.now
+        elif self._ctx.rebalance.plans and self._last_lp_snapshot:
+            info["last_lp_snapshot"] = self._last_lp_snapshot
+            info["last_lp_snapshot_ts"] = self._last_lp_snapshot_ts
 
         if self._ctx.rebalance.plans:
             info["rebalance_plans"] = [
@@ -1193,12 +1201,19 @@ class CLMMLPBaseController(ControllerBase):
                 continue
             delta_base = event.delta_base
             delta_quote = event.delta_quote
-            self._balance_manager.request_balance_sync(
+            reason = f"lp_{event.event_type or 'event'}"
+            if not self._balance_manager.apply_balance_event_delta(
                 now=snapshot.now,
                 delta_base=delta_base,
                 delta_quote=delta_quote,
-                reason=f"lp_{event.event_type or 'event'}",
-            )
+                reason=reason,
+            ):
+                self._balance_manager.request_balance_sync(
+                    now=snapshot.now,
+                    delta_base=delta_base,
+                    delta_quote=delta_quote,
+                    reason=reason,
+                )
             if self._ctx.stoploss.pending_liquidation and event.event_type == "close":
                 if delta_base > 0:
                     liquidation_delta += delta_base
@@ -1264,12 +1279,18 @@ class CLMMLPBaseController(ControllerBase):
             patch.failure.set_reason = "swap_balance_event_missing"
             self._ctx.apply(patch)
             return
-        self._balance_manager.request_balance_sync(
+        if not self._balance_manager.apply_balance_event_delta(
             now=now,
             delta_base=swap.delta_base,
             delta_quote=swap.delta_quote,
             reason=reason,
-        )
+        ):
+            self._balance_manager.request_balance_sync(
+                now=now,
+                delta_base=swap.delta_base,
+                delta_quote=swap.delta_quote,
+                reason=reason,
+            )
 
     def _resolve_liquidation_sold_base(self, swap: SwapView) -> Decimal:
         sold = None

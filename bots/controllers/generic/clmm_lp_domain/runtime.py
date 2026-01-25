@@ -236,6 +236,20 @@ class BalanceManager:
             return
         barrier = self._ctx.swap.balance_barrier
         if barrier is not None:
+            timeout = max(0, self._config.balance_refresh_timeout_sec)
+            if timeout > 0 and barrier.created_ts > 0 and (now - barrier.created_ts) >= timeout:
+                self._logger().warning(
+                    "balance_sync_timeout | reason=%s expected_base=%s expected_quote=%s elapsed=%.1f",
+                    barrier.reason or "unknown",
+                    barrier.expected_delta_base,
+                    barrier.expected_delta_quote,
+                    now - barrier.created_ts,
+                )
+                self._ctx.swap.balance_barrier = None
+                self._ctx.swap.awaiting_balance_refresh = False
+                self._ctx.swap.awaiting_balance_refresh_since = 0.0
+                barrier = None
+        if barrier is not None:
             min_interval = self._balance_refresh_backoff(barrier.attempts)
             if (now - barrier.last_attempt_ts) < min_interval:
                 return
@@ -289,6 +303,33 @@ class BalanceManager:
         self._ctx.swap.awaiting_balance_refresh = True
         if self._ctx.swap.awaiting_balance_refresh_since <= 0:
             self._ctx.swap.awaiting_balance_refresh_since = now
+
+    def apply_balance_event_delta(
+        self,
+        *,
+        now: float,
+        delta_base: Decimal,
+        delta_quote: Decimal,
+        reason: str,
+    ) -> bool:
+        if delta_base == 0 and delta_quote == 0:
+            return True
+        if not self._has_balance_snapshot:
+            return False
+        self._wallet_base += delta_base
+        self._wallet_quote += delta_quote
+        self._logger().info(
+            "balance_sync_optimistic | reason=%s delta_base=%s delta_quote=%s wallet_base=%s wallet_quote=%s",
+            reason,
+            delta_base,
+            delta_quote,
+            self._wallet_base,
+            self._wallet_quote,
+        )
+        self._ctx.swap.balance_barrier = None
+        self._ctx.swap.awaiting_balance_refresh = False
+        self._ctx.swap.awaiting_balance_refresh_since = 0.0
+        return True
 
     def _clear_wallet_update_task(self, task: asyncio.Task) -> None:
         if self._wallet_update_task is task:

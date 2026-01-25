@@ -313,12 +313,69 @@ class GatewayClient:
             "value": value
         })
 
-    async def get_pools(self, connector: str, network: str) -> List[Dict]:
-        """Get pools for a connector and network"""
-        return await self._request("GET", "pools", params={
-            "connector": connector,
-            "network": network
+    async def get_pools(
+        self,
+        connector: str,
+        network: Optional[str] = None,
+        pool_type: Optional[str] = None,
+        search: Optional[str] = None,
+    ) -> List[Dict]:
+        """Get pools for a connector with optional network/type/search filters"""
+        params = {"connector": connector}
+        if network:
+            params["network"] = network
+        if pool_type:
+            params["type"] = pool_type.lower()
+        if search:
+            params["search"] = search
+        return await self._request("GET", "pools", params=params)
+
+    async def find_token(self, chain_network: str, address: str) -> Optional[Dict]:
+        """Find token metadata from Gateway (GeckoTerminal-backed)."""
+        return await self._request("GET", f"tokens/find/{address}", params={
+            "chainNetwork": chain_network
         })
+
+    async def find_pools(
+        self,
+        chain_network: str,
+        connector: Optional[str] = None,
+        pool_type: Optional[str] = None,
+        token_a: Optional[str] = None,
+        token_b: Optional[str] = None,
+        pages: Optional[int] = None,
+    ) -> Optional[List[Dict]]:
+        """Find pools from Gateway (GeckoTerminal-backed)."""
+        params: Dict[str, object] = {"chainNetwork": chain_network}
+        if connector:
+            params["connector"] = connector
+        if pool_type:
+            params["type"] = pool_type.lower()
+        if token_a:
+            params["tokenA"] = token_a
+        if token_b:
+            params["tokenB"] = token_b
+        if pages:
+            params["pages"] = pages
+        return await self._request("GET", "pools/find", params=params)
+
+    async def fetch_clmm_pools(
+        self,
+        connector: str,
+        network: str,
+        limit: Optional[int] = None,
+        token_a: Optional[str] = None,
+        token_b: Optional[str] = None,
+    ) -> Optional[List[Dict]]:
+        """Fetch CLMM pool list from Gateway connector-specific route."""
+        params: Dict[str, object] = {"network": network}
+        if limit:
+            params["limit"] = limit
+        if token_a:
+            params["tokenA"] = token_a
+        if token_b:
+            params["tokenB"] = token_b
+        return await self._request("GET", f"connectors/{connector}/clmm/fetch-pools", params=params)
 
     async def add_pool(
         self,

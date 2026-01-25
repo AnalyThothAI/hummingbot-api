@@ -404,12 +404,39 @@ async def approve_token(
 
 @router.get("/pools")
 async def list_pools(
-    connector_name: str = Query(description="DEX connector (e.g., 'meteora', 'raydium')"),
-    network: str = Query(description="Network (e.g., 'mainnet-beta')"),
+    connector_name: Optional[str] = Query(
+        default=None,
+        description="DEX connector (e.g., 'meteora', 'raydium')",
+    ),
+    connector: Optional[str] = Query(
+        default=None,
+        description="DEX connector (alias for connector_name)",
+    ),
+    network: Optional[str] = Query(
+        default=None,
+        description="Optional network (e.g., 'mainnet-beta')",
+    ),
+    pool_type: Optional[str] = Query(
+        default=None,
+        description="Optional pool type (e.g., 'clmm', 'amm')",
+    ),
+    type_: Optional[str] = Query(
+        default=None,
+        alias="type",
+        description="Optional pool type (alias for pool_type)",
+    ),
+    search: Optional[str] = Query(
+        default=None,
+        description="Optional search term (token symbol or address)",
+    ),
+    search_term: Optional[str] = Query(
+        default=None,
+        description="Optional search term (alias for search)",
+    ),
     accounts_service: AccountsService = Depends(get_accounts_service)
 ) -> List[Dict]:
     """
-    List all liquidity pools for a connector and network.
+    List all liquidity pools for a connector with optional network/type/search filters.
 
     Returns normalized data with snake_case fields and trading_pair.
     """
@@ -417,14 +444,26 @@ async def list_pools(
         if not await accounts_service.gateway_client.ping():
             raise HTTPException(status_code=503, detail="Gateway service is not available")
 
-        pools = await accounts_service.gateway_client.get_pools(connector_name, network)
+        connector_value = connector_name or connector
+        if not connector_value:
+            raise HTTPException(status_code=422, detail="connector_name is required")
+
+        pool_type_value = pool_type or type_
+        search_value = search or search_term
+
+        pools = await accounts_service.gateway_client.get_pools(
+            connector_value,
+            network,
+            pool_type=pool_type_value,
+            search=search_value,
+        )
 
         if isinstance(pools, dict) and "error" in pools:
             status = pools.get("status", 500)
             raise HTTPException(status_code=status, detail=f"Gateway error: {pools.get('error')}")
 
         if not pools:
-            raise HTTPException(status_code=400, detail=f"No pools found for {connector_name}/{network}")
+            return []
 
         if not isinstance(pools, list):
             raise HTTPException(status_code=502, detail="Unexpected Gateway response for pools.")

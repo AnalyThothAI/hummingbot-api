@@ -515,6 +515,11 @@ LP_POSITION_CSS = """
   border-color: rgba(217, 119, 6, 0.4);
   background: rgba(217, 119, 6, 0.12);
 }
+.lp-state[data-state="REBALANCE"] {
+  color: #1d4ed8;
+  border-color: rgba(29, 78, 216, 0.35);
+  background: rgba(29, 78, 216, 0.12);
+}
 .lp-card-body {
   display: grid;
   grid-template-columns: minmax(240px, 1fr) minmax(280px, 1.2fr);
@@ -646,6 +651,12 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
         if not isinstance(positions, list) or not positions:
             positions = custom_info.get("active_lp")
             source = "active_lp"
+        rebalance_pending = custom_info.get("rebalance_plan_count", 0) > 0
+        last_snapshot = custom_info.get("last_lp_snapshot")
+        if (not isinstance(positions, list) or not positions) and rebalance_pending:
+            if isinstance(last_snapshot, list) and last_snapshot:
+                positions = last_snapshot
+                source = "last_lp_snapshot"
         if not isinstance(positions, list) or not positions:
             continue
 
@@ -654,13 +665,16 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
         trading_pair = controller_config.get("trading_pair")
         _, quote_symbol = split_trading_pair(trading_pair)
         current_price = custom_info.get("price")
+        snapshot_ts = custom_info.get("last_lp_snapshot_ts") if source == "last_lp_snapshot" else None
 
         for pos in positions:
             if not isinstance(pos, dict):
                 continue
-            if source == "active_lp":
+            if source in {"active_lp", "last_lp_snapshot"}:
                 in_range = pos.get("in_range")
-                if in_range is True:
+                if source == "last_lp_snapshot":
+                    state = "REBALANCE"
+                elif in_range is True:
                     state = "IN_RANGE"
                 elif in_range is False:
                     state = "OUT_OF_RANGE"
@@ -682,6 +696,8 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
                     "stoploss_quote": pos.get("stoploss_trigger_quote"),
                     "fee_quote_per_hour": pos.get("fee_rate_ewma_quote_per_hour"),
                     "out_of_range_since": pos.get("out_of_range_since"),
+                    "snapshot_source": "rebalance" if source == "last_lp_snapshot" else None,
+                    "snapshot_ts": snapshot_ts,
                 })
                 continue
             rows.append({
@@ -700,6 +716,8 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
                 "stoploss_quote": None,
                 "fee_quote_per_hour": None,
                 "out_of_range_since": None,
+                "snapshot_source": None,
+                "snapshot_ts": None,
             })
 
     return rows
@@ -782,15 +800,24 @@ def render_lp_positions(positions: List[Dict[str, Any]]) -> None:
             for metric in metrics
         )
 
-        oor_age = format_timestamp_age(pos.get("out_of_range_since"))
-        if out_of_range is None:
-            status_text = "Range unknown"
-            meta_right = f"Price {format_number(pos.get('price'), 6)}"
-        else:
-            status_text = "Out of range" if out_of_range else "In range"
+        snapshot_source = pos.get("snapshot_source")
+        snapshot_ts = pos.get("snapshot_ts")
+        if snapshot_source == "rebalance":
+            status_text = "Rebalance pending"
+            snapshot_age = format_timestamp_age(snapshot_ts)
             meta_right = (
-                f"OOR age {oor_age}" if out_of_range and oor_age != "-" else f"Price {format_number(pos.get('price'), 6)}"
+                f"Last active {snapshot_age}" if snapshot_age != "-" else f"Price {format_number(pos.get('price'), 6)}"
             )
+        else:
+            oor_age = format_timestamp_age(pos.get("out_of_range_since"))
+            if out_of_range is None:
+                status_text = "Range unknown"
+                meta_right = f"Price {format_number(pos.get('price'), 6)}"
+            else:
+                status_text = "Out of range" if out_of_range else "In range"
+                meta_right = (
+                    f"OOR age {oor_age}" if out_of_range and oor_age != "-" else f"Price {format_number(pos.get('price'), 6)}"
+                )
         meta_html = (
             "<div class='lp-meta'>"
             f"<span><strong>{status_text}</strong></span>"

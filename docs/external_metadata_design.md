@@ -1,32 +1,30 @@
-# 外部元数据集成设计（GeckoTerminal + Meteora）
+# 外部元数据集成设计（复用 Gateway）
 
 ## 0. 修改前说明
 
-- 问题：Dashboard 的 Add Token / Add Pool 需要手填，无法自动补全 decimals/name/symbol，也缺少 CLMM 池子检索能力。
-- 本质：缺少与 Gateway 解耦的外部元数据聚合层（Token + CLMM Pools）与限流/缓存。
-- 影响范围：新增后端 `metadata` 路由与服务、Dashboard 交互增强；Gateway 逻辑不变。
-- 验收方式：BSC/Solana 合约可回填 token 信息；CLMM pools 返回 volume/APR/APY；无 API key 时可用且不过频。
+- 问题：Dashboard 的 Add Token / Add Pool 需要手填，缺少自动补全与搜索能力。
+- 本质：复用 Gateway 已有的 GeckoTerminal / Meteora 查询能力，避免新增独立 Provider 与缓存。
+- 影响范围：新增后端 `metadata` 路由、Dashboard 交互增强；Gateway 逻辑不变。
+- 验收方式：BSC/Solana 可回填 token 信息；CLMM pools 可搜索并回填地址/币对/费率；手填流程不受影响。
 
 ## 1. 目标与原则
 
-- **解耦**：元数据查询独立于 Gateway，不依赖 connector 或交易逻辑。
-- **KISS/YAGNI**：仅覆盖当前需求（token 元数据 + CLMM pools）；不做 AMM、不做自动刷新任务。
-- **DRY**：统一 Provider 接口与字段映射；缓存/限流共享。
-- **免费优先**：不要求 API key；控制调用频率，优先命中缓存。
-- **稳定优先**：外部服务失败时可退回手填，避免阻塞主流程。
+- **解耦**：Dashboard 只依赖 `/metadata/*`，不直接调用 Gateway 或外部 API。
+- **KISS/YAGNI**：不新增 provider/cache/定时任务。
+- **DRY**：字段映射集中在 metadata 路由。
+- **稳定优先**：失败时 UI 允许手填，不阻断主流程。
 
 ## 2. 范围与不做
 
 **范围**
 - Token：`decimals` / `name` / `symbol` / `address`（按 network+address 查询）
-- Pools：CLMM 池子列表（交易对、地址、费率、TVL、Volume、APR/APY）
-- 目标链：BSC（主要）、Solana；其他链若 GeckoTerminal 支持则自动兼容
+- Pools：CLMM/AMM 列表（交易对、地址、费率、TVL、Volume、APR/APY 可估算）
+- 目标链：由 Gateway 配置支持的网络
 
 **不做**
-- AMM 池子列表
-- 持久化存储（仅内存缓存）
+- 新增外部数据直连（全部经 Gateway）
+- 新增缓存与限流
 - 后台定时抓取
-- 交易决策或与 Gateway 状态耦合
 
 ## 3. 架构与职责
 
@@ -36,17 +34,20 @@ Dashboard (Streamlit)
    -> /metadata/pools
           |
           v
-routers/metadata.py  (请求校验、返回标准化响应)
-services/external_data/
-  - providers/*.py   (GeckoTerminal, Meteora)
-  - cache.py         (TTL/LRU, 负缓存)
-  - limiter.py       (简单限流)
+routers/metadata.py  (请求校验、字段映射、轻量计算)
+          |
+          v
+Gateway REST
+  - /tokens/find
+  - /pools/find
+          |
+          v
+GeckoTerminal / Meteora (由 Gateway 内部调用)
 ```
 
 **职责分离**
-- Router：协议与错误码统一
-- Provider：对外 API 调用与字段映射
-- Cache/Limiter：共用基础能力
+- Router：参数校验 + 统一响应
+- Gateway：对外 API 调用与数据聚合
 
 ## 4. API 设计（对 Dashboard）
 
@@ -57,9 +58,7 @@ services/external_data/
 ```json
 {
   "ok": true,
-  "source": "geckoterminal",
-  "cached": true,
-  "rate_limited": false,
+  "source": "gateway",
   "token": {
     "network_id": "bsc-mainnet",
     "address": "0x...",
@@ -71,29 +70,31 @@ services/external_data/
 }
 ```
 
-### 4.2 Pools 列表（CLMM）
-`GET /metadata/pools?connector=...&network_id=...&page=0&limit=50&search=...`
+### 4.2 Pools 列表
+`GET /metadata/pools?network_id=...&connector=...&pool_type=clmm&token_a=...&token_b=...&search=...&pages=1&limit=50`
 
 响应示例：
 ```json
 {
   "ok": true,
-  "source": "meteora",
-  "cached": false,
-  "rate_limited": false,
-  "total": 1234,
+  "source": "gateway",
+  "total": 2,
   "pools": [
     {
       "address": "...",
       "trading_pair": "SOL-USDC",
+      "base_symbol": "SOL",
+      "quote_symbol": "USDC",
       "base_address": "...",
       "quote_address": "...",
       "fee_tier": "0.30",
+      "bin_step": 10,
       "volume_24h": "123456.78",
       "tvl_usd": "987654.32",
-      "apr": "0.28",
-      "apy": "0.32",
+      "apr": "12.34",
+      "apy": "13.15",
       "pool_type": "clmm",
+      "connector": "meteora",
       "network_id": "solana-mainnet-beta"
     }
   ],
@@ -101,107 +102,62 @@ services/external_data/
 }
 ```
 
-**通用错误返回**
-```json
-{
-  "ok": false,
-  "error": "rate_limited",
-  "message": "Upstream rate limited",
-  "retry_after": 30
-}
-```
+**错误返回**
+- 使用 HTTP 状态码（400/502/503），`detail` 提示错误原因。
 
-## 5. Provider 与数据源
+## 5. 数据源与 Gateway 端接口
 
-### 5.1 GeckoTerminal（无 key）
-- **Token**：`/api/v2/networks/{network}/tokens/{address}`
-  - 取 `attributes.name/symbol/decimals`
-- **Pools（CLMM）**：`/api/v2/networks/{network}/dexes/{dex}/pools`
-  - `dex`: `uniswap-v3`、`pancakeswap-v3`
-  - 取 `attributes.volume_usd.h24` / `attributes.fees_usd.h24` / `attributes.reserve_in_usd`
-  - 若 `apr/apy` 未提供：使用 `fees_24h / tvl_usd` 估算
+**Gateway 接口（metadata 直接调用）**
+- `GET /tokens/find/:address?chainNetwork=...`
+- `GET /pools/find?chainNetwork=...&connector=...&type=...&tokenA=...&tokenB=...&pages=...`
 
-**注意**
-- 统一返回 `volume_24h`, `tvl_usd`, `apr`, `apy`（字符串形式，便于 Decimal）
-- 没有数据时返回空列表，避免抛错阻断 UI
+**上游官方 API（由 Gateway 内部调用）**
+- GeckoTerminal：`/api/v2/networks/{network}/tokens/{address}`、`/api/v2/networks/{network}/pools` 等
+- Meteora DLMM：`https://dlmm-api.meteora.ag/pair/all_by_groups`
 
-### 5.2 Meteora（Solana CLMM）
-- 使用官方 API：`https://dlmm-api.meteora.ag/pair/all_by_groups`
-- 取 `trade_volume_24h`、`apr/apy`、`liquidity` 等
-- 直接转换为统一字段（`pool_type=clmm`）
+> metadata 层不直连外部 API，统一经 Gateway。
 
 ## 6. 网络映射
 
-| network_id | GeckoTerminal network |
-| --- | --- |
-| bsc-mainnet / binance-smart-chain-mainnet | bsc |
-| solana-mainnet-beta | solana |
-| ethereum-mainnet | ethereum |
-| arbitrum-mainnet | arbitrum |
-| base-mainnet | base |
-| polygon-mainnet | polygon |
-
-> 非映射网络直接返回 `not_supported`，UI 提示手填。
+- network_id 与 GeckoTerminal 的映射由 Gateway 的 `geckoId` 配置决定。
+- 未配置的 network_id 会在 Gateway 层报错，metadata 返回 HTTP 错误提示。
 
 ## 7. 缓存与限流
 
-**缓存（内存 LRU + TTL）**
-- token：TTL=24h，负缓存=10min，LRU=5000
-- pools：TTL=2-5min，LRU=1000
-
-**限流（按 provider）**
-- 默认 1 req/sec
-- 429 时读取 `Retry-After`
-- 若命中缓存则返回 `rate_limited=true` 并给出缓存数据
+- metadata 层不做缓存/限流。
+- 依赖 Gateway 与上游服务自身限制策略。
 
 ## 8. Dashboard 交互变更
 
-- Add Token：新增“查询 Token 信息”按钮，成功则回填 `symbol/name/decimals`
-- Add Pool：新增“搜索 CLMM Pools”表格，选择后回填地址/币对/费率
-- 手填永远可用，不依赖外部 API
+- Add Token：填写 network + address 后自动回填 `symbol/name/decimals`。
+- Add Pool：输入 token/search 后自动搜索并展示池列表，选择后回填地址/币对/费率；若为 Meteora，展示 `bin_step`。
+- 手填流程不受影响。
 
 ## 9. 实现细节（建议模块）
 
 ```
 routers/metadata.py
-services/external_data/
-  __init__.py
-  cache.py
-  limiter.py
-  providers/
-    geckoterminal.py
-    meteora.py
-  mapper.py
-models/metadata.py
+services/gateway_client.py   (find_token / find_pools)
+main.py                      (注册 metadata router)
+Dashboard gateway 页面        (查询与回填)
 ```
-
-**核心流程**
-1) Router 校验参数 -> 映射 network
-2) Cache hit 直接返回
-3) Limiter 通过后调用 provider
-4) 规范化字段 -> cache -> return
 
 ## 10. 风险与回滚
 
 **风险**
-- 外部 API 变更/限流导致数据缺失
-- 无 key 限额较低
+- Gateway 或上游 API 变更导致字段缺失
 
 **回滚**
 - 关闭 metadata 路由或隐藏 Dashboard 查询按钮
-- 不影响 Gateway 现有 add token/pool 能力
 
 ## 11. 验收标准（最小可验证）
 
-- `GET /metadata/token` 在 BSC/Solana 上返回 decimals/name/symbol
-- `GET /metadata/pools` 返回 CLMM pools，包含 volume/apr/apy
-- 429 时返回 `rate_limited`，缓存可用
+- `GET /metadata/token` 返回 decimals/name/symbol
+- `GET /metadata/pools` 返回 pools 列表（含交易对/地址/费率，APR/APY 可估算）
 - Dashboard 可一键填充，手填流程不受影响
 
 ## 12. 原子任务拆分
 
-1) 新增 `routers/metadata.py` + `services/external_data/*` 基础结构与模型
-2) 实现 GeckoTerminal token + pools
-3) 迁移/复用 Meteora pools 逻辑
-4) Dashboard 增加查询/填充交互
-5) 文档/配置说明补充
+1) 新增 `routers/metadata.py` 与 `GatewayClient` 方法
+2) Dashboard 增加查询与回填交互
+3) 文档更新
