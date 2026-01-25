@@ -269,6 +269,7 @@ class BalanceSyncBarrier:
 class SwapContext:
     settled_executor_ids: Set[str] = field(default_factory=set)
     last_inventory_swap_ts: float = 0.0
+    inventory_swap_attempts: int = 0
     awaiting_balance_refresh: bool = False
     awaiting_balance_refresh_since: float = 0.0
     balance_barrier: Optional[BalanceSyncBarrier] = None
@@ -282,6 +283,7 @@ class StopLossContext:
     pending_liquidation: bool = False  # True when additional base must be sold to complete stoploss liquidation.
     liquidation_target_base: Optional[Decimal] = None  # Remaining base amount to liquidate.
     last_liquidation_attempt_ts: float = 0.0
+    liquidation_attempts: int = 0
     last_exit_reason: Optional[str] = None
 
 
@@ -329,12 +331,17 @@ class ControllerContext:
             self.stoploss.liquidation_target_base = patch.stoploss.liquidation_target_base
         if patch.stoploss.last_liquidation_attempt_ts is not None:
             self.stoploss.last_liquidation_attempt_ts = patch.stoploss.last_liquidation_attempt_ts
+        if patch.stoploss.liquidation_attempts is not None:
+            self.stoploss.liquidation_attempts = patch.stoploss.liquidation_attempts
 
         if patch.stoploss.pending_liquidation is False:
             self.stoploss.liquidation_target_base = None
+            self.stoploss.liquidation_attempts = 0
 
         if patch.swap.last_inventory_swap_ts is not None:
             self.swap.last_inventory_swap_ts = patch.swap.last_inventory_swap_ts
+        if patch.swap.inventory_swap_attempts is not None:
+            self.swap.inventory_swap_attempts = patch.swap.inventory_swap_attempts
         if patch.swap.awaiting_balance_refresh is not None:
             self.swap.awaiting_balance_refresh = patch.swap.awaiting_balance_refresh
             if not self.swap.awaiting_balance_refresh:
@@ -365,6 +372,7 @@ class StopLossPatch:
     pending_liquidation: Optional[bool] = None
     liquidation_target_base: Optional[Decimal] = None
     last_liquidation_attempt_ts: Optional[float] = None
+    liquidation_attempts: Optional[int] = None
 
 
 @dataclass
@@ -372,6 +380,7 @@ class SwapPatch:
     awaiting_balance_refresh: Optional[bool] = None
     last_inventory_swap_ts: Optional[float] = None
     awaiting_balance_refresh_since: Optional[float] = None
+    inventory_swap_attempts: Optional[int] = None
 
 
 @dataclass

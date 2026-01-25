@@ -50,8 +50,9 @@ class RebalanceEngine:
         self._maybe_plan_inventory_swap = maybe_plan_inventory_swap
         self._build_open_lp_action = build_open_lp_action
 
-    def reconcile(self, snapshot: Snapshot, ctx: ControllerContext) -> None:
+    def reconcile(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[DecisionPatch]:
         now = snapshot.now
+        patch = DecisionPatch()
         for executor_id, plan in list(ctx.rebalance.plans.items()):
             if plan.stage == RebalanceStage.OPEN_REQUESTED:
                 open_id = plan.open_executor_id
@@ -60,12 +61,19 @@ class RebalanceEngine:
                     open_lp.position_address
                     or open_lp.state in {LPPositionStates.IN_RANGE.value, LPPositionStates.OUT_OF_RANGE.value}
                 ):
-                    ctx.rebalance.plans.pop(executor_id, None)
+                    patch.rebalance.clear_plans.add(executor_id)
                     continue
+                timeout = max(0, self._config.rebalance_open_timeout_sec)
+                if timeout > 0 and plan.requested_at_ts > 0 and (now - plan.requested_at_ts) >= timeout:
+                    patch.rebalance.add_plans[executor_id] = RebalancePlan(
+                        stage=RebalanceStage.WAIT_REOPEN,
+                        reopen_after_ts=now + self._config.reopen_delay_sec,
+                        requested_at_ts=plan.requested_at_ts,
+                    )
             elif plan.stage == RebalanceStage.STOP_REQUESTED:
                 old_lp = snapshot.lp.get(executor_id)
                 if old_lp is None or not old_lp.is_active:
-                    ctx.rebalance.plans[executor_id] = RebalancePlan(
+                    patch.rebalance.add_plans[executor_id] = RebalancePlan(
                         stage=RebalanceStage.WAIT_REOPEN,
                         reopen_after_ts=plan.reopen_after_ts,
                         requested_at_ts=plan.requested_at_ts,
@@ -75,7 +83,7 @@ class RebalanceEngine:
                     continue
                 if ctx.swap.awaiting_balance_refresh:
                     continue
-                ctx.rebalance.plans[executor_id] = RebalancePlan(
+                patch.rebalance.add_plans[executor_id] = RebalancePlan(
                     stage=RebalanceStage.WAIT_REOPEN,
                     reopen_after_ts=plan.reopen_after_ts,
                     requested_at_ts=plan.requested_at_ts,
@@ -83,11 +91,14 @@ class RebalanceEngine:
             elif plan.stage == RebalanceStage.WAIT_REOPEN:
                 old_lp = snapshot.lp.get(executor_id)
                 if old_lp is not None and old_lp.is_active:
-                    ctx.rebalance.plans[executor_id] = RebalancePlan(
+                    patch.rebalance.add_plans[executor_id] = RebalancePlan(
                         stage=RebalanceStage.STOP_REQUESTED,
                         reopen_after_ts=plan.reopen_after_ts,
                         requested_at_ts=plan.requested_at_ts if plan.requested_at_ts > 0 else now,
                     )
+        if patch.rebalance.add_plans or patch.rebalance.clear_plans:
+            return patch
+        return None
 
     def decide_stop(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[Decision]:
         current_price = snapshot.current_price

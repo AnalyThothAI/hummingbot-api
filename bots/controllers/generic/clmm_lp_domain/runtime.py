@@ -354,7 +354,9 @@ class BalanceManager:
 
     @staticmethod
     def _sync_tolerance(expected: Decimal) -> Decimal:
-        return abs(expected) * Decimal("0.001")
+        rel_tol = abs(expected) * Decimal("0.001")
+        abs_tol = Decimal("0.00000001")
+        return max(rel_tol, abs_tol)
 
     @staticmethod
     def _delta_sign_matches(observed: Decimal, expected: Decimal) -> bool:
