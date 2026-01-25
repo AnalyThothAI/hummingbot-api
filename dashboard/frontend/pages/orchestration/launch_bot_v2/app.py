@@ -2,6 +2,7 @@ import re
 import secrets
 import time
 from decimal import Decimal
+from typing import Dict
 
 import pandas as pd
 import streamlit as st
@@ -142,6 +143,160 @@ def resolve_default_wallet(wallets, chain: str):
     return None
 
 
+def mark_gateway_network_overridden():
+    st.session_state["gateway_network_overridden"] = True
+
+
+def connector_base_name(connector_name: str) -> str:
+    if not connector_name:
+        return ""
+    return connector_name.split("/", 1)[0]
+
+
+def extract_network_value(network_id: str):
+    if not network_id:
+        return None
+    _, network_value = split_network_id(network_id)
+    return network_value or network_id
+
+
+def load_gateway_pools(
+    connector_name: str,
+    gateway_network_id: str,
+    search_term: str,
+    limit: int = 50,
+    force_refresh: bool = False,
+):
+    if "pool_cache" not in st.session_state:
+        st.session_state["pool_cache"] = {}
+    cache = st.session_state["pool_cache"]
+
+    connector_base = connector_base_name(connector_name)
+    if not connector_base:
+        return [], "Missing connector name"
+
+    is_meteora = connector_base.lower() == "meteora"
+    network_value = None if is_meteora else extract_network_value(gateway_network_id or "")
+    cache_key = f"{connector_base}:{network_value}:{search_term}:{limit}"
+
+    if not force_refresh and cache_key in cache:
+        return cache[cache_key], None
+
+    if not is_meteora and not network_value:
+        return [], "Select a Gateway network to load pools."
+
+    if is_meteora:
+        params = {"connector": connector_base, "page": 0, "limit": limit}
+        if search_term:
+            params["search_term"] = search_term
+        response = backend_api_request("GET", "/gateway/clmm/pools", params=params, timeout=30)
+        if response.get("ok"):
+            pools = response.get("data", {}).get("pools", []) or []
+            cache[cache_key] = pools
+            return pools, None
+        return [], response.get("error", "Failed to fetch CLMM pools.")
+
+    params = {"connector_name": connector_base, "network": network_value}
+    response = backend_api_request("GET", "/gateway/pools", params=params, timeout=30)
+    if response.get("ok"):
+        pools = response.get("data", []) or []
+        if search_term:
+            search_lower = search_term.lower()
+            pools = [
+                pool for pool in pools
+                if search_lower in str(pool.get("trading_pair", "")).lower()
+                or search_lower in str(pool.get("address", "")).lower()
+            ]
+        cache[cache_key] = pools
+        return pools, None
+    return [], response.get("error", "Failed to fetch Gateway pools.")
+
+
+def build_pool_options(pools):
+    options = []
+    pool_map = {}
+    for idx, pool in enumerate(pools):
+        trading_pair = pool.get("trading_pair")
+        if not trading_pair:
+            base = pool.get("base")
+            quote = pool.get("quote")
+            if base and quote:
+                trading_pair = f"{base}-{quote}"
+        trading_pair = trading_pair or "Unknown"
+        address = pool.get("address") or pool.get("pool_address") or pool.get("id") or ""
+        label = f"{trading_pair} · {shorten_address(address)}" if address else trading_pair
+        if label in pool_map:
+            label = f"{label} #{idx + 1}"
+        pool_map[label] = {
+            "trading_pair": trading_pair,
+            "pool_trading_pair": trading_pair,
+            "pool_address": address,
+        }
+        options.append(label)
+    return options, pool_map
+
+
+def apply_config_overrides(config_map, overrides):
+    if not overrides:
+        return config_map
+    updated = {}
+    for config_id, config in config_map.items():
+        updated[config_id] = dict(config) if isinstance(config, dict) else config
+    for config_id, override in overrides.items():
+        if not override or config_id not in updated:
+            continue
+        config = dict(updated[config_id])
+        for key, value in override.items():
+            if value:
+                config[key] = value
+        updated[config_id] = config
+    return updated
+
+
+def infer_gateway_chain(selected_controllers, controller_configs, config_overrides=None):
+    controller_config_map = build_controller_config_map(controller_configs)
+    controller_config_map = apply_config_overrides(controller_config_map, config_overrides or {})
+    gateway_bases = set()
+    for config_id in selected_controllers:
+        config = controller_config_map.get(config_id)
+        if not isinstance(config, dict):
+            continue
+        connector = config.get("connector_name", "")
+        if is_gateway_connector(connector):
+            gateway_bases.add(connector_base_name(connector).lower())
+    if not gateway_bases:
+        return None
+    solana_connectors = {"meteora", "raydium", "orca", "pancakeswap-sol"}
+    if gateway_bases.issubset(solana_connectors):
+        return "solana"
+    return "evm"
+
+
+def choose_network_for_chain(networks, chain: str):
+    for item in networks:
+        if item.get("chain") == chain and item.get("network_id"):
+            return item.get("network_id")
+    for item in networks:
+        network_id = item.get("network_id", "")
+        if network_id.startswith(f"{chain}-"):
+            return network_id
+    return None
+
+
+def maybe_autoset_gateway_network(selected_controllers, controller_configs, config_overrides=None):
+    if st.session_state.get("gateway_network_overridden"):
+        return
+    networks = st.session_state.get("gateway_networks", [])
+    if not networks:
+        return
+    chain = infer_gateway_chain(selected_controllers, controller_configs, config_overrides)
+    if chain != "solana":
+        return
+    target_network = choose_network_for_chain(networks, "solana")
+    if target_network:
+        st.session_state["gateway_network_select"] = target_network
+
+
 def build_controller_config_map(controller_configs):
     config_map = {}
     if not isinstance(controller_configs, list):
@@ -248,11 +403,12 @@ def evaluate_controller_config(config_id, config, gateway_network_id):
     return issues
 
 
-def render_config_health(selected_controllers, controller_configs, gateway_network_id):
+def render_config_health(selected_controllers, controller_configs, gateway_network_id, config_overrides=None):
     if not selected_controllers:
         return
 
     controller_config_map = build_controller_config_map(controller_configs)
+    controller_config_map = apply_config_overrides(controller_config_map, config_overrides or {})
     issues = []
     gateway_configs = 0
 
@@ -282,6 +438,161 @@ def render_config_health(selected_controllers, controller_configs, gateway_netwo
             st.dataframe(pd.DataFrame(issues), use_container_width=True, hide_index=True)
         else:
             st.success("No config issues detected.")
+
+
+def render_controller_overrides(selected_controllers, controller_configs, gateway_network_id):
+    overrides = {}
+    if not selected_controllers:
+        return overrides
+
+    controller_config_map = build_controller_config_map(controller_configs)
+    with st.container(border=True):
+        st.info("🧭 **Trading Pair Overrides:** Select pools and adjust trading pairs before deploy")
+        st.caption("Pick a Gateway pool to auto-fill trading_pair and pool_trading_pair. Manual edits override.")
+        st.caption("Overrides are saved as temporary configs at deploy time; originals stay unchanged.")
+
+        for config_id in selected_controllers:
+            config = controller_config_map.get(config_id, {})
+            if not isinstance(config, dict):
+                continue
+            connector_name = config.get("connector_name", "")
+            controller_name = config.get("controller_name", config_id)
+            trading_pair_default = config.get("trading_pair", "")
+            pool_pair_default = config.get("pool_trading_pair", trading_pair_default)
+            pool_address_default = config.get("pool_address", "")
+
+            with st.expander(f"{controller_name} · {config_id}", expanded=False):
+                enabled_key = f"override_enabled_{config_id}"
+                enabled = st.checkbox("Override trading pair and pool settings", key=enabled_key)
+                if not enabled:
+                    continue
+
+                st.caption(f"Connector: {connector_name or 'N/A'}")
+
+                if not is_gateway_connector(connector_name):
+                    st.caption("Pool lookup is available only for Gateway connectors.")
+                else:
+                    search_key = f"pool_search_{config_id}"
+                    load_key = f"pool_load_{config_id}"
+                    selection_key = f"pool_select_{config_id}"
+                    last_selection_key = f"pool_select_last_{config_id}"
+
+                    if search_key not in st.session_state:
+                        st.session_state[search_key] = ""
+
+                    search_term = st.text_input("Pool search (optional)", key=search_key)
+                    force_refresh = st.button("Load pools", key=load_key, use_container_width=True)
+
+                    pools, pool_error = load_gateway_pools(
+                        connector_name=connector_name,
+                        gateway_network_id=gateway_network_id or "",
+                        search_term=search_term,
+                        force_refresh=force_refresh,
+                    )
+
+                    if pool_error:
+                        st.caption(pool_error)
+
+                    pool_options, pool_map = build_pool_options(pools)
+                    if pool_options:
+                        selected_pool = st.selectbox(
+                            "Gateway Pool",
+                            options=["(manual input)"] + pool_options,
+                            index=0,
+                            key=selection_key,
+                        )
+                        if selected_pool != "(manual input)" and selected_pool in pool_map:
+                            if st.session_state.get(last_selection_key) != selected_pool:
+                                pool_defaults = pool_map[selected_pool]
+                                st.session_state[f"override_trading_pair_{config_id}"] = pool_defaults.get("trading_pair", "")
+                                st.session_state[f"override_pool_trading_pair_{config_id}"] = pool_defaults.get(
+                                    "pool_trading_pair", ""
+                                )
+                                st.session_state[f"override_pool_address_{config_id}"] = pool_defaults.get(
+                                    "pool_address", ""
+                                )
+                                st.session_state[last_selection_key] = selected_pool
+
+                trading_pair_key = f"override_trading_pair_{config_id}"
+                pool_pair_key = f"override_pool_trading_pair_{config_id}"
+                pool_address_key = f"override_pool_address_{config_id}"
+
+                if trading_pair_key not in st.session_state:
+                    st.session_state[trading_pair_key] = trading_pair_default
+                if pool_pair_key not in st.session_state:
+                    st.session_state[pool_pair_key] = pool_pair_default
+                if pool_address_key not in st.session_state:
+                    st.session_state[pool_address_key] = pool_address_default
+
+                trading_pair_value = st.text_input("Trading Pair (strategy)", key=trading_pair_key)
+                pool_pair_value = None
+                if "pool_trading_pair" in config or "/clmm" in connector_name:
+                    pool_pair_value = st.text_input("Pool Trading Pair (pool order)", key=pool_pair_key)
+                pool_address_value = None
+                if "pool_address" in config:
+                    pool_address_value = st.text_input("Pool Address", key=pool_address_key)
+
+                overrides[config_id] = {
+                    "trading_pair": trading_pair_value.strip() if trading_pair_value else None,
+                    "pool_trading_pair": pool_pair_value.strip() if pool_pair_value else None,
+                    "pool_address": pool_address_value.strip() if pool_address_value else None,
+                }
+
+    return overrides
+
+
+def build_override_config_payload(config: Dict, overrides: Dict) -> Dict:
+    payload = dict(config)
+    for key in ("trading_pair", "pool_trading_pair", "pool_address"):
+        value = overrides.get(key)
+        if value:
+            payload[key] = value
+    return payload
+
+
+def generate_override_config_name(config_id: str) -> str:
+    timestamp = time.strftime("%Y%m%d-%H%M%S")
+    suffix = secrets.token_hex(2)
+    return f"{config_id}-deploy-{timestamp}-{suffix}"
+
+
+def prepare_deploy_controllers(selected_controllers, controller_configs, overrides):
+    if not overrides:
+        return selected_controllers
+
+    controller_config_map = build_controller_config_map(controller_configs)
+    deploy_configs = []
+
+    for config_id in selected_controllers:
+        override = overrides.get(config_id)
+        if not override:
+            deploy_configs.append(config_id)
+            continue
+
+        config = controller_config_map.get(config_id)
+        if not isinstance(config, dict):
+            st.error(f"Missing controller config for {config_id}.")
+            return None
+
+        override_payload = build_override_config_payload(config, override)
+        if override_payload == config:
+            deploy_configs.append(config_id)
+            continue
+
+        new_config_id = generate_override_config_name(config_id)
+        override_payload["id"] = new_config_id
+        response = backend_api_request(
+            "POST",
+            f"/controllers/configs/{new_config_id}",
+            json_body=override_payload,
+        )
+        if not response.get("ok"):
+            st.error(response.get("error", f"Failed to save override config for {config_id}."))
+            return None
+
+        deploy_configs.append(new_config_id)
+
+    return deploy_configs
 
 
 def generate_instance_name(script_name: str) -> str:
@@ -373,17 +684,26 @@ def render_gateway_overrides():
         st.info("🔌 **Gateway Overrides:** Select network and wallet for Gateway connectors")
 
         networks = get_gateway_networks()
+        st.session_state["gateway_networks"] = networks
         network_map = {item["network_id"]: item for item in networks}
         network_options = ["(select network)"] + sorted(network_map.keys())
         preferred_network = "ethereum-bsc"
         if preferred_network not in network_options:
             network_options.insert(1, preferred_network)
 
-        default_network_index = network_options.index(preferred_network) if preferred_network in network_options else 0
+        if "gateway_network_overridden" not in st.session_state:
+            st.session_state["gateway_network_overridden"] = False
+        preset_network = st.session_state.get("gateway_network_select")
+        if preset_network in network_options:
+            default_network_index = network_options.index(preset_network)
+        else:
+            default_network_index = network_options.index(preferred_network) if preferred_network in network_options else 0
         selected_network_id = st.selectbox(
             "Gateway Network (chain-network)",
             options=network_options,
             index=default_network_index,
+            key="gateway_network_select",
+            on_change=mark_gateway_network_overridden,
         )
 
         selected_chain = None
@@ -418,14 +738,21 @@ def render_approval_gate(
     controller_configs,
     gateway_network_id,
     gateway_wallet_address,
+    config_overrides=None,
 ):
     if not selected_controllers:
         return True
 
     controller_config_map = build_controller_config_map(controller_configs)
+    controller_config_map = apply_config_overrides(controller_config_map, config_overrides or {})
     plan = build_approval_plan(selected_controllers, controller_config_map)
     if not plan:
         st.info("No Gateway approvals required for the selected controllers.")
+        return True
+
+    inferred_chain = infer_gateway_chain(selected_controllers, controller_configs, config_overrides)
+    if inferred_chain == "solana":
+        st.info("Selected connectors are on Solana. Allowances are not required.")
         return True
 
     if not gateway_network_id:
@@ -930,11 +1257,25 @@ else:
             if selected_controllers:
                 st.success(f"✅ {len(selected_controllers)} controller(s) selected for deployment")
 
+            controller_overrides = {}
+            if selected_controllers:
+                controller_overrides = render_controller_overrides(
+                    selected_controllers,
+                    all_controllers_config,
+                    gateway_network_id,
+                )
+                maybe_autoset_gateway_network(
+                    selected_controllers,
+                    all_controllers_config,
+                    controller_overrides,
+                )
+
             if selected_controllers:
                 render_config_health(
                     selected_controllers,
                     all_controllers_config,
                     gateway_network_id,
+                    controller_overrides,
                 )
 
             approval_ready = True
@@ -944,6 +1285,7 @@ else:
                     all_controllers_config,
                     gateway_network_id,
                     gateway_wallet_address,
+                    controller_overrides,
                 )
 
             # Display action buttons
@@ -969,11 +1311,18 @@ else:
                 ):
                     if selected_controllers:
                         with st.spinner('🚀 Starting Bot... This process may take a few seconds'):
+                            deploy_controllers = prepare_deploy_controllers(
+                                selected_controllers,
+                                all_controllers_config,
+                                controller_overrides,
+                            )
+                            if deploy_controllers is None:
+                                st.stop()
                             if launch_new_bot(
                                 bot_name,
                                 image_name,
                                 credentials,
-                                selected_controllers,
+                                deploy_controllers,
                                 max_global_drawdown,
                                 max_controller_drawdown,
                                 gateway_network_id,
