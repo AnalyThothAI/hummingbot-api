@@ -10,21 +10,11 @@ from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPP
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
-from .components import (
-    BalanceSyncBarrier,
-    ControllerContext,
-    DecisionPatch,
-    LPBalanceEvent,
-    LPView,
-    PoolDomainAdapter,
-    Snapshot,
-    SwapPurpose,
-    SwapView,
-)
+from .components import LPView, PoolDomainAdapter, Snapshot, SwapPurpose, SwapView
 
 if TYPE_CHECKING:
     from ..clmm_lp_base import CLMMLPBaseConfig
-    from .open_planner import OpenProposal
+    from .components import OpenProposal
 
 
 class SnapshotBuilder:
@@ -59,14 +49,6 @@ class SnapshotBuilder:
             if executor.type == "lp_position_executor":
                 lp[executor.id] = self._parse_lp_view(executor)
             elif executor.type == "gateway_swap_executor":
-                custom = executor.custom_info or {}
-                executed_amount_base = self._to_decimal(custom.get("executed_amount_base"))
-                executed_amount_quote = self._to_decimal(custom.get("executed_amount_quote"))
-                amount_in = self._to_decimal(custom.get("amount_in"))
-                amount_out = self._to_decimal(custom.get("amount_out"))
-                amount_in_is_quote = custom.get("amount_in_is_quote")
-                delta_base = self._to_decimal(custom.get("delta_base"))
-                delta_quote = self._to_decimal(custom.get("delta_quote"))
                 level_id = getattr(executor.config, "level_id", None)
                 swaps[executor.id] = SwapView(
                     executor_id=executor.id,
@@ -76,13 +58,6 @@ class SnapshotBuilder:
                     level_id=level_id,
                     purpose=self._swap_purpose(level_id),
                     amount=Decimal(str(getattr(executor.config, "amount", 0))),
-                    executed_amount_base=executed_amount_base,
-                    executed_amount_quote=executed_amount_quote,
-                    amount_in=amount_in,
-                    amount_out=amount_out,
-                    amount_in_is_quote=amount_in_is_quote,
-                    delta_base=delta_base,
-                    delta_quote=delta_quote,
                 )
 
         active_lp = [v for v in lp.values() if v.is_active]
@@ -123,32 +98,6 @@ class SnapshotBuilder:
             price = self._domain.pool_price_to_strategy(price, inverted)
         out_of_range_since = custom.get("out_of_range_since")
         out_of_range_since = float(out_of_range_since) if out_of_range_since is not None else None
-        balance_event = None
-        event_payload = custom.get("balance_event")
-        if isinstance(event_payload, dict):
-            event_seq = event_payload.get("seq")
-            try:
-                event_seq = int(event_seq) if event_seq is not None else 0
-            except (TypeError, ValueError):
-                event_seq = 0
-            event_type = event_payload.get("type")
-            delta_payload = event_payload.get("delta")
-            if not isinstance(delta_payload, dict):
-                delta_payload = {}
-            event_base_delta = self._to_decimal(delta_payload.get("base"))
-            event_quote_delta = self._to_decimal(delta_payload.get("quote"))
-            if event_base_delta is not None and event_quote_delta is not None:
-                event_base_delta, event_quote_delta = self._domain.pool_amounts_to_strategy(
-                    event_base_delta,
-                    event_quote_delta,
-                    inverted,
-                )
-            balance_event = LPBalanceEvent(
-                seq=event_seq,
-                event_type=event_type,
-                delta_base=event_base_delta,
-                delta_quote=event_quote_delta,
-            )
 
         return LPView(
             executor_id=executor.id,
@@ -157,7 +106,6 @@ class SnapshotBuilder:
             close_type=executor.close_type,
             state=custom.get("state"),
             position_address=custom.get("position_address"),
-            side=custom.get("side"),
             base_amount=base_amount,
             quote_amount=quote_amount,
             base_fee=base_fee,
@@ -166,7 +114,6 @@ class SnapshotBuilder:
             upper_price=upper,
             current_price=price,
             out_of_range_since=out_of_range_since,
-            balance_event=balance_event,
         )
 
     def _get_current_price(self) -> Optional[Decimal]:
@@ -200,13 +147,11 @@ class BalanceManager:
         config: "CLMMLPBaseConfig",
         domain: PoolDomainAdapter,
         market_data_provider,
-        ctx: ControllerContext,
         logger: Callable[[], HummingbotLogger],
     ) -> None:
         self._config = config
         self._domain = domain
         self._market_data_provider = market_data_provider
-        self._ctx = ctx
         self._logger = logger
 
         self._wallet_base: Decimal = Decimal("0")
@@ -216,8 +161,6 @@ class BalanceManager:
         self._wallet_update_task: Optional[asyncio.Task] = None
         self._has_balance_snapshot: bool = False
         self._logged_balance_snapshot: bool = False
-        self._unassigned_delta_base: Decimal = Decimal("0")
-        self._unassigned_delta_quote: Decimal = Decimal("0")
 
     @property
     def wallet_base(self) -> Decimal:
@@ -234,29 +177,10 @@ class BalanceManager:
     def schedule_refresh(self, now: float) -> None:
         if self._wallet_update_task is not None and not self._wallet_update_task.done():
             return
-        barrier = self._ctx.swap.balance_barrier
-        if barrier is not None:
-            timeout = max(0, self._config.balance_refresh_timeout_sec)
-            if timeout > 0 and barrier.created_ts > 0 and (now - barrier.created_ts) >= timeout:
-                self._logger().warning(
-                    "balance_sync_timeout | reason=%s expected_base=%s expected_quote=%s elapsed=%.1f",
-                    barrier.reason or "unknown",
-                    barrier.expected_delta_base,
-                    barrier.expected_delta_quote,
-                    now - barrier.created_ts,
-                )
-                self._ctx.swap.balance_barrier = None
-                self._ctx.swap.awaiting_balance_refresh = False
-                self._ctx.swap.awaiting_balance_refresh_since = 0.0
-                barrier = None
-        if barrier is not None:
-            min_interval = self._balance_refresh_backoff(barrier.attempts)
-            if (now - barrier.last_attempt_ts) < min_interval:
-                return
         if (now - self._last_balance_attempt_ts) < 1.0:
             return
         if self._config.balance_refresh_interval_sec > 0:
-            if barrier is None and not self._ctx.swap.awaiting_balance_refresh and (
+            if self._has_balance_snapshot and (
                 (now - self._last_balance_update_ts) < self._config.balance_refresh_interval_sec
             ):
                 return
@@ -265,71 +189,16 @@ class BalanceManager:
         if connector is None:
             return
         self._last_balance_attempt_ts = now
-        if barrier is not None:
-            barrier.last_attempt_ts = now
-            barrier.attempts += 1
         self._wallet_update_task = safe_ensure_future(self._update_wallet_balances(connector))
         self._wallet_update_task.add_done_callback(self._clear_wallet_update_task)
 
-    def request_balance_sync(
-        self,
-        *,
-        now: float,
-        delta_base: Decimal,
-        delta_quote: Decimal,
-        reason: str,
-    ) -> None:
-        if delta_base == 0 and delta_quote == 0:
-            return
-        barrier = self._ctx.swap.balance_barrier
-        if barrier is None and self._consume_unassigned_delta(delta_base, delta_quote):
-            return
-        if barrier is None:
-            barrier = BalanceSyncBarrier(
-                baseline_base=self._wallet_base,
-                baseline_quote=self._wallet_quote,
-                created_ts=now,
-                reason=reason,
-            )
-            self._ctx.swap.balance_barrier = barrier
-            self._logger().info(
-                "balance_sync_start | reason=%s baseline_base=%s baseline_quote=%s",
-                reason,
-                self._wallet_base,
-                self._wallet_quote,
-            )
-        barrier.expected_delta_base += delta_base
-        barrier.expected_delta_quote += delta_quote
-        self._ctx.swap.awaiting_balance_refresh = True
-        if self._ctx.swap.awaiting_balance_refresh_since <= 0:
-            self._ctx.swap.awaiting_balance_refresh_since = now
-
-    def apply_balance_event_delta(
-        self,
-        *,
-        now: float,
-        delta_base: Decimal,
-        delta_quote: Decimal,
-        reason: str,
-    ) -> bool:
-        if delta_base == 0 and delta_quote == 0:
-            return True
+    def is_fresh(self, now: float) -> bool:
         if not self._has_balance_snapshot:
             return False
-        self._wallet_base += delta_base
-        self._wallet_quote += delta_quote
-        self._logger().info(
-            "balance_sync_optimistic | reason=%s delta_base=%s delta_quote=%s wallet_base=%s wallet_quote=%s",
-            reason,
-            delta_base,
-            delta_quote,
-            self._wallet_base,
-            self._wallet_quote,
-        )
-        self._ctx.swap.balance_barrier = None
-        self._ctx.swap.awaiting_balance_refresh = False
-        self._ctx.swap.awaiting_balance_refresh_since = 0.0
-        return True
+        timeout = max(0, self._config.balance_refresh_timeout_sec)
+        if timeout <= 0:
+            return True
+        return (now - self._last_balance_update_ts) <= timeout
 
     def _clear_wallet_update_task(self, task: asyncio.Task) -> None:
         if self._wallet_update_task is task:
@@ -339,15 +208,9 @@ class BalanceManager:
         try:
             timeout = float(max(1, self._config.balance_update_timeout_sec))
             await asyncio.wait_for(connector.update_balances(), timeout=timeout)
-            prev_base = self._wallet_base
-            prev_quote = self._wallet_quote
             self._wallet_base = Decimal(str(connector.get_available_balance(self._domain.base_token) or 0))
             self._wallet_quote = Decimal(str(connector.get_available_balance(self._domain.quote_token) or 0))
             self._last_balance_update_ts = self._market_data_provider.time()
-            barrier = self._ctx.swap.balance_barrier
-            if self._has_balance_snapshot and barrier is None:
-                self._unassigned_delta_base += self._wallet_base - prev_base
-                self._unassigned_delta_quote += self._wallet_quote - prev_quote
             self._has_balance_snapshot = True
             if not self._logged_balance_snapshot:
                 self._logger().info(
@@ -356,26 +219,6 @@ class BalanceManager:
                     self._wallet_quote,
                 )
                 self._logged_balance_snapshot = True
-            if barrier is None:
-                self._ctx.swap.awaiting_balance_refresh = False
-                self._ctx.swap.awaiting_balance_refresh_since = 0.0
-                return
-            observed_base = self._wallet_base - barrier.baseline_base
-            observed_quote = self._wallet_quote - barrier.baseline_quote
-            if self._is_balance_directionally_synced(barrier, observed_base, observed_quote):
-                self._logger().info(
-                    "balance_sync_done | reason=%s observed_base=%s observed_quote=%s "
-                    "expected_base=%s expected_quote=%s",
-                    barrier.reason or "unknown",
-                    observed_base,
-                    observed_quote,
-                    barrier.expected_delta_base,
-                    barrier.expected_delta_quote,
-                )
-                self._ctx.swap.balance_barrier = None
-                self._ctx.swap.awaiting_balance_refresh = False
-                self._ctx.swap.awaiting_balance_refresh_since = 0.0
-                return
         except Exception:
             self._logger().exception(
                 "update_balances failed | connector=%s base=%s quote=%s last_update_ts=%.0f last_attempt_ts=%.0f",
@@ -385,63 +228,6 @@ class BalanceManager:
                 self._last_balance_update_ts,
                 self._last_balance_attempt_ts,
             )
-
-    @staticmethod
-    def _balance_refresh_backoff(attempts: int) -> float:
-        if attempts <= 0:
-            return 3.0
-        return min(20.0, 3.0 * (2 ** min(attempts, 3)))
-
-    def _is_balance_directionally_synced(
-        self,
-        barrier: BalanceSyncBarrier,
-        observed_base: Decimal,
-        observed_quote: Decimal,
-    ) -> bool:
-        expected_base = barrier.expected_delta_base
-        expected_quote = barrier.expected_delta_quote
-        return (
-            self._directional_match(observed_base, expected_base)
-            and self._directional_match(observed_quote, expected_quote)
-        )
-
-    def _directional_match(self, observed: Decimal, expected: Decimal) -> bool:
-        if expected == 0:
-            return True
-        if observed == 0:
-            return False
-        if not self._delta_sign_matches(observed, expected):
-            return False
-        return True
-
-    @staticmethod
-    def _sync_tolerance(expected: Decimal) -> Decimal:
-        rel_tol = abs(expected) * Decimal("0.001")
-        abs_tol = Decimal("0.00000001")
-        return max(rel_tol, abs_tol)
-
-    @staticmethod
-    def _delta_sign_matches(observed: Decimal, expected: Decimal) -> bool:
-        if expected == 0:
-            return True
-        if observed == 0:
-            return False
-        return (observed > 0 and expected > 0) or (observed < 0 and expected < 0)
-
-    def _consume_unassigned_delta(self, delta_base: Decimal, delta_quote: Decimal) -> bool:
-        if not self._has_balance_snapshot:
-            return False
-        if not self._delta_sign_matches(self._unassigned_delta_base, delta_base):
-            return False
-        if not self._delta_sign_matches(self._unassigned_delta_quote, delta_quote):
-            return False
-        if abs(delta_base) > abs(self._unassigned_delta_base) + self._sync_tolerance(delta_base):
-            return False
-        if abs(delta_quote) > abs(self._unassigned_delta_quote) + self._sync_tolerance(delta_quote):
-            return False
-        self._unassigned_delta_base -= delta_base
-        self._unassigned_delta_quote -= delta_quote
-        return True
 
 
 class ActionFactory:

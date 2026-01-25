@@ -2,29 +2,23 @@ from collections import deque
 from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum
-from typing import Deque, Dict, List, Optional, Set, Tuple
+from typing import Deque, Dict, List, Optional, Tuple
 
-from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionStates
 from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
-from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
 
-class IntentFlow(str, Enum):
-    NONE = "NONE"
-    ENTRY = "ENTRY"
-    REBALANCE = "REBALANCE"
-    STOPLOSS = "STOPLOSS"
-    MANUAL = "MANUAL"
-    FAILURE = "FAILURE"
-
-
-class IntentStage(str, Enum):
-    NONE = "NONE"
-    WAIT = "WAIT"
-    SUBMIT_SWAP = "SUBMIT_SWAP"
-    SUBMIT_LP = "SUBMIT_LP"
-    STOP_LP = "STOP_LP"
+class ControllerState(str, Enum):
+    IDLE = "IDLE"
+    ENTRY_OPEN = "ENTRY_OPEN"
+    ENTRY_SWAP = "ENTRY_SWAP"
+    ACTIVE = "ACTIVE"
+    REBALANCE_STOP = "REBALANCE_STOP"
+    REBALANCE_SWAP = "REBALANCE_SWAP"
+    REBALANCE_OPEN = "REBALANCE_OPEN"
+    STOPLOSS_STOP = "STOPLOSS_STOP"
+    STOPLOSS_SWAP = "STOPLOSS_SWAP"
+    COOLDOWN = "COOLDOWN"
 
 
 class SwapPurpose(str, Enum):
@@ -62,7 +56,7 @@ class PoolDomainAdapter:
             pool_order_inverted=inverted,
         )
 
-    def executor_token_order_inverted(self, executor: ExecutorInfo) -> Optional[bool]:
+    def executor_token_order_inverted(self, executor) -> Optional[bool]:
         config = getattr(executor, "config", None)
         base_token = getattr(config, "base_token", None)
         quote_token = getattr(config, "quote_token", None)
@@ -129,14 +123,6 @@ class PoolDomainAdapter:
 
 
 @dataclass(frozen=True)
-class LPBalanceEvent:
-    seq: int
-    event_type: Optional[str]
-    delta_base: Optional[Decimal]
-    delta_quote: Optional[Decimal]
-
-
-@dataclass(frozen=True)
 class LPView:
     executor_id: str
     is_active: bool
@@ -144,7 +130,6 @@ class LPView:
     close_type: Optional[CloseType]
     state: Optional[str]
     position_address: Optional[str]
-    side: Optional[str]
     base_amount: Decimal
     quote_amount: Decimal
     base_fee: Decimal
@@ -153,11 +138,6 @@ class LPView:
     upper_price: Optional[Decimal]
     current_price: Optional[Decimal]
     out_of_range_since: Optional[float]
-    balance_event: Optional[LPBalanceEvent] = None
-
-    @property
-    def in_transition(self) -> bool:
-        return self.state in {LPPositionStates.OPENING.value, LPPositionStates.CLOSING.value}
 
 
 @dataclass(frozen=True)
@@ -169,13 +149,6 @@ class SwapView:
     level_id: Optional[str]
     purpose: Optional[SwapPurpose]
     amount: Decimal
-    executed_amount_base: Optional[Decimal] = None
-    executed_amount_quote: Optional[Decimal] = None
-    amount_in: Optional[Decimal] = None
-    amount_out: Optional[Decimal] = None
-    amount_in_is_quote: Optional[bool] = None
-    delta_base: Optional[Decimal] = None
-    delta_quote: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -191,33 +164,16 @@ class Snapshot:
 
 
 @dataclass(frozen=True)
-class Regions:
-    manual_stop: bool
-    failure_blocked: bool
-    has_active_swaps: bool
-    active_swap_label: Optional[str]
-    has_active_lp: bool
-    awaiting_balance_refresh: bool
-    stoploss_cooldown_active: bool
-    stoploss_pending_liquidation: bool
-    rebalance_pending: bool
-    entry_triggered: bool
-    reenter_blocked: bool
-    gate_flow: IntentFlow
-
-
-@dataclass(frozen=True)
-class BudgetAnchor:
-    value_quote: Decimal
-    wallet_base_amount: Decimal
-    wallet_quote_amount: Decimal
-
-
-@dataclass(frozen=True)
-class Intent:
-    flow: IntentFlow
-    stage: IntentStage = IntentStage.NONE
-    reason: Optional[str] = None
+class OpenProposal:
+    lower: Decimal
+    upper: Decimal
+    target_base: Decimal
+    target_quote: Decimal
+    delta_base: Decimal
+    delta_quote_value: Decimal
+    open_base: Decimal
+    open_quote: Decimal
+    min_swap_value_quote: Decimal
 
 
 @dataclass
@@ -230,174 +186,26 @@ class FeeEstimatorContext:
 
 
 @dataclass
-class LpContext:
-    anchor: Optional[BudgetAnchor] = None
+class ControllerContext:
+    state: ControllerState = ControllerState.IDLE
+    state_since_ts: float = 0.0
+    cooldown_until_ts: float = 0.0
+    anchor_value_quote: Optional[Decimal] = None
+    last_rebalance_ts: float = 0.0
+    rebalance_timestamps: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
+    pending_lp_id: Optional[str] = None
+    pending_swap_id: Optional[str] = None
+    inventory_swap_attempts: int = 0
+    last_inventory_swap_ts: float = 0.0
+    stoploss_swap_attempts: int = 0
+    last_stoploss_swap_ts: float = 0.0
+    last_exit_reason: Optional[str] = None
+    last_decision_reason: Optional[str] = None
     fee: FeeEstimatorContext = field(default_factory=FeeEstimatorContext)
-    last_balance_event_seq: int = 0
-
-
-class RebalanceStage(str, Enum):
-    STOP_REQUESTED = "STOP_REQUESTED"
-    WAIT_REOPEN = "WAIT_REOPEN"
-    WAIT_SWAP = "WAIT_SWAP"
-    OPEN_REQUESTED = "OPEN_REQUESTED"
 
 
 @dataclass(frozen=True)
-class RebalancePlan:
-    stage: RebalanceStage
-    reopen_after_ts: float = 0.0
-    open_executor_id: Optional[str] = None
-    requested_at_ts: float = 0.0
-
-
-@dataclass
-class RebalanceContext:
-    plans: Dict[str, RebalancePlan] = field(default_factory=dict)
-    last_rebalance_ts: float = 0.0
-    timestamps: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
-
-
-@dataclass
-class BalanceSyncBarrier:
-    baseline_base: Decimal
-    baseline_quote: Decimal
-    expected_delta_base: Decimal = Decimal("0")
-    expected_delta_quote: Decimal = Decimal("0")
-    created_ts: float = 0.0
-    deadline_ts: float = 0.0
-    last_attempt_ts: float = 0.0
-    attempts: int = 0
-    reason: str = ""
-
-
-@dataclass
-class SwapContext:
-    settled_executor_ids: Set[str] = field(default_factory=set)
-    last_inventory_swap_ts: float = 0.0
-    inventory_swap_attempts: int = 0
-    awaiting_balance_refresh: bool = False
-    awaiting_balance_refresh_since: float = 0.0
-    balance_barrier: Optional[BalanceSyncBarrier] = None
-
-
-@dataclass
-class StopLossContext:
-    until_ts: float = 0.0
-    triggered: bool = False
-    triggered_ts: float = 0.0
-    pending_liquidation: bool = False  # True when additional base must be sold to complete stoploss liquidation.
-    liquidation_target_base: Optional[Decimal] = None  # Remaining base amount to liquidate.
-    last_liquidation_attempt_ts: float = 0.0
-    liquidation_attempts: int = 0
-    last_exit_reason: Optional[str] = None
-
-
-@dataclass
-class FailureContext:
-    blocked: bool = False
-    reason: Optional[str] = None
-
-
-@dataclass
-class ControllerContext:
-    lp: Dict[str, LpContext] = field(default_factory=dict)
-    rebalance: RebalanceContext = field(default_factory=RebalanceContext)
-    swap: SwapContext = field(default_factory=SwapContext)
-    stoploss: StopLossContext = field(default_factory=StopLossContext)
-    failure: FailureContext = field(default_factory=FailureContext)
-
-    def apply(self, patch: "DecisionPatch") -> None:
-        if patch.failure.set_reason is not None:
-            self.failure.blocked = True
-            self.failure.reason = patch.failure.set_reason
-
-        if patch.rebalance.clear_all:
-            self.rebalance.plans.clear()
-        if patch.rebalance.add_plans:
-            self.rebalance.plans.update(patch.rebalance.add_plans)
-        for executor_id in patch.rebalance.clear_plans:
-            self.rebalance.plans.pop(executor_id, None)
-        if patch.rebalance.record_rebalance_ts is not None:
-            ts = patch.rebalance.record_rebalance_ts
-            self.rebalance.last_rebalance_ts = ts
-            self.rebalance.timestamps.append(ts)
-
-        if patch.stoploss.until_ts is not None:
-            self.stoploss.until_ts = patch.stoploss.until_ts
-        if patch.stoploss.triggered is not None:
-            self.stoploss.triggered = patch.stoploss.triggered
-        if patch.stoploss.triggered_ts is not None:
-            self.stoploss.triggered_ts = patch.stoploss.triggered_ts
-        if patch.stoploss.last_exit_reason is not None:
-            self.stoploss.last_exit_reason = patch.stoploss.last_exit_reason
-        if patch.stoploss.pending_liquidation is not None:
-            self.stoploss.pending_liquidation = patch.stoploss.pending_liquidation
-        if patch.stoploss.liquidation_target_base is not None:
-            self.stoploss.liquidation_target_base = patch.stoploss.liquidation_target_base
-        if patch.stoploss.last_liquidation_attempt_ts is not None:
-            self.stoploss.last_liquidation_attempt_ts = patch.stoploss.last_liquidation_attempt_ts
-        if patch.stoploss.liquidation_attempts is not None:
-            self.stoploss.liquidation_attempts = patch.stoploss.liquidation_attempts
-
-        if patch.stoploss.pending_liquidation is False:
-            self.stoploss.liquidation_target_base = None
-            self.stoploss.liquidation_attempts = 0
-
-        if patch.swap.last_inventory_swap_ts is not None:
-            self.swap.last_inventory_swap_ts = patch.swap.last_inventory_swap_ts
-        if patch.swap.inventory_swap_attempts is not None:
-            self.swap.inventory_swap_attempts = patch.swap.inventory_swap_attempts
-        if patch.swap.awaiting_balance_refresh is not None:
-            self.swap.awaiting_balance_refresh = patch.swap.awaiting_balance_refresh
-            if not self.swap.awaiting_balance_refresh:
-                self.swap.awaiting_balance_refresh_since = 0.0
-        if patch.swap.awaiting_balance_refresh_since is not None:
-            self.swap.awaiting_balance_refresh_since = patch.swap.awaiting_balance_refresh_since
-
-
-@dataclass
-class FailurePatch:
-    set_reason: Optional[str] = None
-
-
-@dataclass
-class RebalancePatch:
-    clear_all: bool = False
-    add_plans: Dict[str, RebalancePlan] = field(default_factory=dict)
-    clear_plans: Set[str] = field(default_factory=set)
-    record_rebalance_ts: Optional[float] = None
-
-
-@dataclass
-class StopLossPatch:
-    until_ts: Optional[float] = None
-    triggered: Optional[bool] = None
-    triggered_ts: Optional[float] = None
-    last_exit_reason: Optional[str] = None
-    pending_liquidation: Optional[bool] = None
-    liquidation_target_base: Optional[Decimal] = None
-    last_liquidation_attempt_ts: Optional[float] = None
-    liquidation_attempts: Optional[int] = None
-
-
-@dataclass
-class SwapPatch:
-    awaiting_balance_refresh: Optional[bool] = None
-    last_inventory_swap_ts: Optional[float] = None
-    awaiting_balance_refresh_since: Optional[float] = None
-    inventory_swap_attempts: Optional[int] = None
-
-
-@dataclass
-class DecisionPatch:
-    failure: FailurePatch = field(default_factory=FailurePatch)
-    rebalance: RebalancePatch = field(default_factory=RebalancePatch)
-    stoploss: StopLossPatch = field(default_factory=StopLossPatch)
-    swap: SwapPatch = field(default_factory=SwapPatch)
-
-@dataclass
 class Decision:
-    intent: Intent
     actions: List[ExecutorAction] = field(default_factory=list)
-    patch: DecisionPatch = field(default_factory=DecisionPatch)
+    next_state: Optional[ControllerState] = None
+    reason: str = ""
