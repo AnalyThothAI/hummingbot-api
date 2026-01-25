@@ -194,6 +194,34 @@ class CLMMLPBaseController(ControllerBase):
                 description="manual kill switch",
             ),
             RuleSpec(
+                name="stoploss_trigger",
+                handler=self._rule_stoploss_trigger,
+                mode=ControllerMode.STOPLOSS,
+                description="stoploss trigger",
+            ),
+            RuleSpec(
+                name="swap_concurrency_guard",
+                handler=self._rule_swap_concurrency_guard,
+                description="ensure single active swap",
+            ),
+            RuleSpec(
+                name="swap_in_progress_gate",
+                handler=self._rule_swap_in_progress_gate,
+                description="gate while swap active",
+            ),
+            RuleSpec(
+                name="stoploss_liquidation",
+                handler=self._rule_stoploss_liquidation,
+                mode=ControllerMode.STOPLOSS,
+                description="stoploss liquidation",
+            ),
+            RuleSpec(
+                name="stoploss_cooldown",
+                handler=self._rule_stoploss_cooldown,
+                mode=ControllerMode.STOPLOSS,
+                description="stoploss cooldown",
+            ),
+            RuleSpec(
                 name="failure_blocked",
                 handler=self._rule_failure_blocked,
                 mode=ControllerMode.FAILURE,
@@ -204,22 +232,6 @@ class CLMMLPBaseController(ControllerBase):
                 handler=self._rule_detect_lp_failure,
                 mode=ControllerMode.FAILURE,
                 description="lp executor failure",
-            ),
-            RuleSpec(
-                name="swap_concurrency_guard",
-                handler=self._rule_swap_concurrency_guard,
-                description="ensure single active swap",
-            ),
-            RuleSpec(
-                name="stoploss_trigger",
-                handler=self._rule_stoploss_trigger,
-                mode=ControllerMode.STOPLOSS,
-                description="stoploss trigger",
-            ),
-            RuleSpec(
-                name="swap_in_progress_gate",
-                handler=self._rule_swap_in_progress_gate,
-                description="gate while swap active",
             ),
             RuleSpec(
                 name="rebalance_stop",
@@ -237,18 +249,6 @@ class CLMMLPBaseController(ControllerBase):
                 name="wait_balance_refresh",
                 handler=self._rule_wait_balance_refresh,
                 description="wait balance refresh",
-            ),
-            RuleSpec(
-                name="stoploss_liquidation",
-                handler=self._rule_stoploss_liquidation,
-                mode=ControllerMode.STOPLOSS,
-                description="stoploss liquidation",
-            ),
-            RuleSpec(
-                name="stoploss_cooldown",
-                handler=self._rule_stoploss_cooldown,
-                mode=ControllerMode.STOPLOSS,
-                description="stoploss cooldown",
             ),
             RuleSpec(
                 name="rebalance_reopen_or_wait",

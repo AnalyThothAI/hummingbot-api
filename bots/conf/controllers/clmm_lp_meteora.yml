@@ -25,7 +25,7 @@ reopen_delay_sec: 5
 auto_swap_enabled: true
 swap_min_value_pct: 0.005
 swap_safety_buffer_pct: 0.02
-swap_slippage_pct: 0.01
+swap_slippage_pct: 0.03
 
 cost_filter_enabled: false
 cost_filter_fee_rate_bootstrap_quote_per_hour: 0
