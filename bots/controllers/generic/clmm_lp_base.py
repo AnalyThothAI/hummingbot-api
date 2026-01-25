@@ -20,6 +20,7 @@ from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
 from .clmm_lp_domain.cost_filter import CostFilter
 from .clmm_lp_domain.components import (
+    BalanceSyncBarrier,
     BudgetAnchor,
     ControllerContext,
     Decision,
@@ -143,6 +144,8 @@ class SnapshotBuilder:
                 amount_in = self._to_decimal(custom.get("amount_in"))
                 amount_out = self._to_decimal(custom.get("amount_out"))
                 amount_in_is_quote = custom.get("amount_in_is_quote")
+                delta_base = self._to_decimal(custom.get("delta_base"))
+                delta_quote = self._to_decimal(custom.get("delta_quote"))
                 level_id = getattr(executor.config, "level_id", None)
                 swaps[executor.id] = SwapView(
                     executor_id=executor.id,
@@ -157,6 +160,8 @@ class SnapshotBuilder:
                     amount_in=amount_in,
                     amount_out=amount_out,
                     amount_in_is_quote=amount_in_is_quote,
+                    delta_base=delta_base,
+                    delta_quote=delta_quote,
                 )
 
         active_lp = [v for v in lp.values() if v.is_active]
@@ -197,6 +202,17 @@ class SnapshotBuilder:
             price = self._domain.pool_price_to_strategy(price, inverted)
         out_of_range_since = custom.get("out_of_range_since")
         out_of_range_since = float(out_of_range_since) if out_of_range_since is not None else None
+        event_seq = custom.get("balance_event_seq")
+        event_seq = int(event_seq) if event_seq is not None else 0
+        event_type = custom.get("balance_event_type")
+        event_base_delta = self._to_decimal(custom.get("balance_event_base_delta"))
+        event_quote_delta = self._to_decimal(custom.get("balance_event_quote_delta"))
+        if event_base_delta is not None and event_quote_delta is not None:
+            event_base_delta, event_quote_delta = self._domain.pool_amounts_to_strategy(
+                event_base_delta,
+                event_quote_delta,
+                inverted,
+            )
 
         return LPView(
             executor_id=executor.id,
@@ -214,6 +230,10 @@ class SnapshotBuilder:
             upper_price=upper,
             current_price=price,
             out_of_range_since=out_of_range_since,
+            balance_event_seq=event_seq,
+            balance_event_type=event_type,
+            balance_event_base_delta=event_base_delta,
+            balance_event_quote_delta=event_quote_delta,
         )
 
     def _get_current_price(self) -> Optional[Decimal]:
@@ -261,6 +281,9 @@ class BalanceManager:
         self._last_balance_update_ts: float = 0.0
         self._last_balance_attempt_ts: float = 0.0
         self._wallet_update_task: Optional[asyncio.Task] = None
+        self._has_balance_snapshot: bool = False
+        self._unassigned_delta_base: Decimal = Decimal("0")
+        self._unassigned_delta_quote: Decimal = Decimal("0")
 
     @property
     def wallet_base(self) -> Decimal:
@@ -273,10 +296,15 @@ class BalanceManager:
     def schedule_refresh(self, now: float) -> None:
         if self._wallet_update_task is not None and not self._wallet_update_task.done():
             return
+        barrier = self._ctx.swap.balance_barrier
+        if barrier is not None:
+            min_interval = self._balance_refresh_backoff(barrier.attempts)
+            if (now - barrier.last_attempt_ts) < min_interval:
+                return
         if (now - self._last_balance_attempt_ts) < 1.0:
             return
         if self._config.balance_refresh_interval_sec > 0:
-            if not self._ctx.swap.awaiting_balance_refresh and (
+            if barrier is None and not self._ctx.swap.awaiting_balance_refresh and (
                 (now - self._last_balance_update_ts) < self._config.balance_refresh_interval_sec
             ):
                 return
@@ -285,24 +313,65 @@ class BalanceManager:
         if connector is None:
             return
         self._last_balance_attempt_ts = now
+        if barrier is not None:
+            barrier.last_attempt_ts = now
+            barrier.attempts += 1
         self._wallet_update_task = safe_ensure_future(self._update_wallet_balances(connector))
         self._wallet_update_task.add_done_callback(self._clear_wallet_update_task)
 
     def clear_stale_refresh(self, now: float) -> None:
-        if not self._ctx.swap.awaiting_balance_refresh:
+        barrier = self._ctx.swap.balance_barrier
+        if barrier is None:
             return
+        if barrier.deadline_ts <= 0:
+            barrier.deadline_ts = now + self._config.balance_refresh_timeout_sec
+            return
+        if now < barrier.deadline_ts:
+            return
+        if not self._ctx.failure.blocked:
+            self._logger().error(
+                "balance_sync_timeout | reason=%s age=%.0f attempts=%s",
+                barrier.reason or "unknown",
+                now - barrier.created_ts,
+                barrier.attempts,
+            )
+            self._ctx.failure.blocked = True
+            self._ctx.failure.reason = "balance_sync_timeout"
+
+    def request_balance_sync(
+        self,
+        *,
+        now: float,
+        delta_base: Decimal,
+        delta_quote: Decimal,
+        reason: str,
+    ) -> None:
+        if delta_base == 0 and delta_quote == 0:
+            return
+        barrier = self._ctx.swap.balance_barrier
+        if barrier is None and self._consume_unassigned_delta(delta_base, delta_quote):
+            return
+        if barrier is None:
+            barrier = BalanceSyncBarrier(
+                baseline_base=self._wallet_base,
+                baseline_quote=self._wallet_quote,
+                created_ts=now,
+                deadline_ts=now + self._config.balance_refresh_timeout_sec,
+                reason=reason,
+            )
+            self._ctx.swap.balance_barrier = barrier
+            self._logger().info(
+                "balance_sync_start | reason=%s baseline_base=%s baseline_quote=%s",
+                reason,
+                self._wallet_base,
+                self._wallet_quote,
+            )
+        barrier.expected_delta_base += delta_base
+        barrier.expected_delta_quote += delta_quote
+        barrier.deadline_ts = max(barrier.deadline_ts, now + self._config.balance_refresh_timeout_sec)
+        self._ctx.swap.awaiting_balance_refresh = True
         if self._ctx.swap.awaiting_balance_refresh_since <= 0:
             self._ctx.swap.awaiting_balance_refresh_since = now
-            return
-        if (now - self._ctx.swap.awaiting_balance_refresh_since) < self._config.balance_refresh_timeout_sec:
-            return
-        self._logger().warning("awaiting_balance_refresh timeout exceeded; clearing.")
-        self._ctx.swap.awaiting_balance_refresh = False
-        self._ctx.swap.awaiting_balance_refresh_since = 0.0
-
-    def mark_refresh(self, now: float) -> None:
-        self._ctx.swap.awaiting_balance_refresh = True
-        self._ctx.swap.awaiting_balance_refresh_since = now
 
     def _clear_wallet_update_task(self, task: asyncio.Task) -> None:
         if self._wallet_update_task is task:
@@ -312,11 +381,30 @@ class BalanceManager:
         try:
             timeout = float(max(1, self._config.balance_update_timeout_sec))
             await asyncio.wait_for(connector.update_balances(), timeout=timeout)
+            prev_base = self._wallet_base
+            prev_quote = self._wallet_quote
             self._wallet_base = Decimal(str(connector.get_available_balance(self._domain.base_token) or 0))
             self._wallet_quote = Decimal(str(connector.get_available_balance(self._domain.quote_token) or 0))
             self._last_balance_update_ts = self._market_data_provider.time()
-            self._ctx.swap.awaiting_balance_refresh = False
-            self._ctx.swap.awaiting_balance_refresh_since = 0.0
+            barrier = self._ctx.swap.balance_barrier
+            if self._has_balance_snapshot and barrier is None:
+                self._unassigned_delta_base += self._wallet_base - prev_base
+                self._unassigned_delta_quote += self._wallet_quote - prev_quote
+            self._has_balance_snapshot = True
+            if barrier is None:
+                self._ctx.swap.awaiting_balance_refresh = False
+                self._ctx.swap.awaiting_balance_refresh_since = 0.0
+                return
+            if self._is_balance_synced(barrier):
+                self._logger().info(
+                    "balance_sync_done | reason=%s observed_base=%s observed_quote=%s",
+                    barrier.reason or "unknown",
+                    self._wallet_base - barrier.baseline_base,
+                    self._wallet_quote - barrier.baseline_quote,
+                )
+                self._ctx.swap.balance_barrier = None
+                self._ctx.swap.awaiting_balance_refresh = False
+                self._ctx.swap.awaiting_balance_refresh_since = 0.0
         except Exception:
             self._logger().exception(
                 "update_balances failed | connector=%s base=%s quote=%s last_update_ts=%.0f last_attempt_ts=%.0f",
@@ -326,6 +414,51 @@ class BalanceManager:
                 self._last_balance_update_ts,
                 self._last_balance_attempt_ts,
             )
+
+    @staticmethod
+    def _balance_refresh_backoff(attempts: int) -> float:
+        if attempts <= 0:
+            return 3.0
+        return min(20.0, 3.0 * (2 ** min(attempts, 3)))
+
+    def _is_balance_synced(self, barrier: BalanceSyncBarrier) -> bool:
+        observed_base = self._wallet_base - barrier.baseline_base
+        observed_quote = self._wallet_quote - barrier.baseline_quote
+        expected_base = barrier.expected_delta_base
+        expected_quote = barrier.expected_delta_quote
+        tol_base = self._sync_tolerance(expected_base)
+        tol_quote = self._sync_tolerance(expected_quote)
+        return (
+            abs(observed_base - expected_base) <= tol_base
+            and abs(observed_quote - expected_quote) <= tol_quote
+        )
+
+    @staticmethod
+    def _sync_tolerance(expected: Decimal) -> Decimal:
+        return abs(expected) * Decimal("0.001")
+
+    @staticmethod
+    def _delta_sign_matches(observed: Decimal, expected: Decimal) -> bool:
+        if expected == 0:
+            return True
+        if observed == 0:
+            return False
+        return (observed > 0 and expected > 0) or (observed < 0 and expected < 0)
+
+    def _consume_unassigned_delta(self, delta_base: Decimal, delta_quote: Decimal) -> bool:
+        if not self._has_balance_snapshot:
+            return False
+        if not self._delta_sign_matches(self._unassigned_delta_base, delta_base):
+            return False
+        if not self._delta_sign_matches(self._unassigned_delta_quote, delta_quote):
+            return False
+        if abs(delta_base) > abs(self._unassigned_delta_base) + self._sync_tolerance(delta_base):
+            return False
+        if abs(delta_quote) > abs(self._unassigned_delta_quote) + self._sync_tolerance(delta_quote):
+            return False
+        self._unassigned_delta_base -= delta_base
+        self._unassigned_delta_quote -= delta_quote
+        return True
 
 
 class ActionFactory:
@@ -703,10 +836,16 @@ class CLMMLPBaseController(ControllerBase):
         price = snapshot.current_price
         if price is None or price <= 0:
             return
+        if self._ctx.swap.awaiting_balance_refresh:
+            return
         for lp_view in snapshot.active_lp:
+            if lp_view.in_transition or not lp_view.position_address:
+                continue
             lp_ctx = self._ctx.lp.setdefault(lp_view.executor_id, LpContext())
             anchor = lp_ctx.anchor
             if anchor is not None and anchor.value_quote > 0:
+                continue
+            if self._estimate_position_value(lp_view, price) <= 0:
                 continue
             new_anchor = self._build_budget_anchor(price, lp_view, snapshot.wallet_base, snapshot.wallet_quote)
             if new_anchor is None:
@@ -840,13 +979,9 @@ class CLMMLPBaseController(ControllerBase):
             flow = IntentFlow.REBALANCE
         else:
             flow = IntentFlow.ENTRY
-        patch = DecisionPatch()
-        patch.swap.awaiting_balance_refresh = True
-        patch.swap.awaiting_balance_refresh_since = snapshot.now
         return Decision(
             intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="concurrent_swaps"),
             actions=actions,
-            patch=patch,
         )
 
     def _build_stop_actions(self, snapshot: Snapshot) -> List[StopExecutorAction]:
@@ -868,14 +1003,9 @@ class CLMMLPBaseController(ControllerBase):
         if not regions.manual_stop:
             return None
         actions = self._build_stop_actions(snapshot)
-        patch = DecisionPatch()
-        if actions:
-            patch.swap.awaiting_balance_refresh = True
-            patch.swap.awaiting_balance_refresh_since = snapshot.now
         return Decision(
             intent=Intent(flow=IntentFlow.MANUAL, stage=IntentStage.STOP_LP, reason="manual_kill_switch"),
             actions=actions,
-            patch=patch,
         )
 
     def _rule_failure_blocked(
@@ -905,9 +1035,6 @@ class CLMMLPBaseController(ControllerBase):
         patch.failure.set_reason = reason
         patch.rebalance.clear_all = True
         patch.stoploss.pending_liquidation = False
-        if actions:
-            patch.swap.awaiting_balance_refresh = True
-            patch.swap.awaiting_balance_refresh_since = snapshot.now
         self.logger().error(
             "LP executor failure detected | executor_id=%s reason=%s. Manual intervention required.",
             failed_id,
@@ -1045,6 +1172,8 @@ class CLMMLPBaseController(ControllerBase):
         current_price = snapshot.current_price
         if current_price is None or current_price <= 0:
             return None
+        if ctx.stoploss.triggered:
+            return None
 
         triggered = False
         for lp_view in snapshot.active_lp:
@@ -1067,25 +1196,17 @@ class CLMMLPBaseController(ControllerBase):
         patch = DecisionPatch()
         patch.rebalance.clear_all = True
         patch.stoploss.last_exit_reason = "stop_loss"
+        patch.stoploss.triggered = True
+        patch.stoploss.triggered_ts = snapshot.now
         patch.stoploss.until_ts = snapshot.now + self.config.stop_loss_pause_sec
-        if actions:
-            patch.swap.awaiting_balance_refresh = True
-            patch.swap.awaiting_balance_refresh_since = snapshot.now
         if self._stop_loss_liquidation_mode == StopLossLiquidationMode.QUOTE:
             patch.stoploss.pending_liquidation = True
             patch.stoploss.last_liquidation_attempt_ts = 0.0
-            patch.stoploss.liquidation_target_base = self._compute_liquidation_target_base(snapshot, snapshot.active_lp)
         return Decision(
             intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.STOP_LP, reason="stop_loss_triggered"),
             actions=actions,
             patch=patch,
         )
-
-    def _compute_liquidation_target_base(self, snapshot: Snapshot, stopped: List[LPView]) -> Optional[Decimal]:
-        total: Decimal = Decimal("0")
-        for lp_view in stopped:
-            total += max(Decimal("0"), lp_view.base_amount + lp_view.base_fee)
-        return total
 
     def _decide_liquidation(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
@@ -1093,35 +1214,31 @@ class CLMMLPBaseController(ControllerBase):
             if (now - ctx.stoploss.last_liquidation_attempt_ts) < self.config.cooldown_seconds:
                 return Decision(intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="liquidation_cooldown"))
 
+        if ctx.swap.awaiting_balance_refresh:
+            return Decision(intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="liquidation_wait_balance"))
+
         current_price = snapshot.current_price
         if current_price is None or current_price <= 0:
             return Decision(intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="price_unavailable"))
 
-        base_to_liquidate = snapshot.wallet_base
         target = ctx.stoploss.liquidation_target_base
-        if target is not None:
-            target = max(Decimal("0"), target)
-            min_base = self._min_liquidation_base(current_price)
-            if target <= min_base:
-                patch = DecisionPatch()
-                patch.stoploss.pending_liquidation = False
-                patch.stoploss.liquidation_target_base = None
-                return Decision(
-                    intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="stop_loss_liquidation_complete"),
-                    patch=patch,
-                )
-            base_to_liquidate = min(base_to_liquidate, target)
+        if target is None:
+            return Decision(intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="liquidation_wait_settle"))
+
+        base_to_liquidate = snapshot.wallet_base
+        target = max(Decimal("0"), target)
+        min_base = self._min_liquidation_base(current_price)
+        if target <= min_base:
+            patch = DecisionPatch()
+            patch.stoploss.pending_liquidation = False
+            patch.stoploss.liquidation_target_base = None
+            return Decision(
+                intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="stop_loss_liquidation_complete"),
+                patch=patch,
+            )
+        base_to_liquidate = min(base_to_liquidate, target)
 
         if base_to_liquidate <= 0:
-            expected_base = max(Decimal("0"), target or Decimal("0"))
-            if snapshot.wallet_base <= 0 and expected_base > 0:
-                patch = DecisionPatch()
-                patch.swap.awaiting_balance_refresh = True
-                patch.swap.awaiting_balance_refresh_since = now
-                return Decision(
-                    intent=Intent(flow=IntentFlow.STOPLOSS, stage=IntentStage.WAIT, reason="liquidation_wait_balance"),
-                    patch=patch,
-                )
             patch = DecisionPatch()
             patch.stoploss.pending_liquidation = False
             return Decision(
@@ -1336,9 +1453,11 @@ class CLMMLPBaseController(ControllerBase):
     def _reconcile(self, snapshot: Snapshot) -> None:
         self._balance_manager.clear_stale_refresh(snapshot.now)
         self._reconcile_done_swaps(snapshot)
+        self._reconcile_lp_balance_events(snapshot)
         self._rebalance_engine.reconcile(snapshot, self._ctx)
         self._ensure_anchors(snapshot)
         self._update_fee_rate_estimates(snapshot)
+        self._reconcile_stoploss_latch(snapshot)
         self._cleanup_ctx(snapshot)
 
     def _cleanup_ctx(self, snapshot: Snapshot) -> None:
@@ -1364,17 +1483,58 @@ class CLMMLPBaseController(ControllerBase):
             elif swap.purpose == SwapPurpose.INVENTORY:
                 self._handle_inventory_swap(swap, now)
 
+    def _reconcile_lp_balance_events(self, snapshot: Snapshot) -> None:
+        for executor_id, lp_view in snapshot.lp.items():
+            if lp_view.balance_event_seq <= 0:
+                continue
+            lp_ctx = self._ctx.lp.setdefault(executor_id, LpContext())
+            if lp_view.balance_event_seq <= lp_ctx.last_balance_event_seq:
+                continue
+            lp_ctx.last_balance_event_seq = lp_view.balance_event_seq
+            if lp_view.balance_event_base_delta is None or lp_view.balance_event_quote_delta is None:
+                self.logger().error(
+                    "lp_balance_event_missing | executor_id=%s seq=%s type=%s",
+                    executor_id,
+                    lp_view.balance_event_seq,
+                    lp_view.balance_event_type,
+                )
+                self._ctx.failure.blocked = True
+                self._ctx.failure.reason = "lp_balance_event_missing"
+                continue
+            self._balance_manager.request_balance_sync(
+                now=snapshot.now,
+                delta_base=lp_view.balance_event_base_delta,
+                delta_quote=lp_view.balance_event_quote_delta,
+                reason=f"lp_{lp_view.balance_event_type or 'event'}",
+            )
+            if self._ctx.stoploss.pending_liquidation and lp_view.balance_event_type == "close":
+                if lp_view.balance_event_base_delta > 0:
+                    target = self._ctx.stoploss.liquidation_target_base or Decimal("0")
+                    self._ctx.stoploss.liquidation_target_base = target + lp_view.balance_event_base_delta
+
+    def _reconcile_stoploss_latch(self, snapshot: Snapshot) -> None:
+        if not self._ctx.stoploss.triggered:
+            return
+        if self._ctx.stoploss.pending_liquidation:
+            return
+        if snapshot.now < self._ctx.stoploss.until_ts:
+            return
+        if snapshot.active_lp:
+            return
+        self._ctx.stoploss.triggered = False
+        self._ctx.stoploss.triggered_ts = 0.0
+
     def _handle_inventory_swap(self, swap: SwapView, now: float) -> None:
         if swap.close_type != CloseType.COMPLETED:
             return
-        self._balance_manager.mark_refresh(now)
+        self._request_swap_balance_sync(swap, now, "inventory_swap")
 
     def _handle_liquidation_swap(self, swap: SwapView, now: float) -> None:
         self._ctx.stoploss.last_liquidation_attempt_ts = now
         if swap.close_type != CloseType.COMPLETED:
             self._ctx.stoploss.pending_liquidation = True
             return
-        self._balance_manager.mark_refresh(now)
+        self._request_swap_balance_sync(swap, now, "stoploss_swap")
         target = self._ctx.stoploss.liquidation_target_base
         if target is None:
             self._ctx.stoploss.pending_liquidation = True
@@ -1387,6 +1547,23 @@ class CLMMLPBaseController(ControllerBase):
             return
         self._ctx.stoploss.pending_liquidation = True
         self._ctx.stoploss.liquidation_target_base = remaining
+
+    def _request_swap_balance_sync(self, swap: SwapView, now: float, reason: str) -> None:
+        if swap.delta_base is None or swap.delta_quote is None:
+            self.logger().error(
+                "swap_balance_event_missing | executor_id=%s level_id=%s",
+                swap.executor_id,
+                swap.level_id,
+            )
+            self._ctx.failure.blocked = True
+            self._ctx.failure.reason = "swap_balance_event_missing"
+            return
+        self._balance_manager.request_balance_sync(
+            now=now,
+            delta_base=swap.delta_base,
+            delta_quote=swap.delta_quote,
+            reason=reason,
+        )
 
     def _resolve_liquidation_sold_base(self, swap: SwapView) -> Decimal:
         sold = None

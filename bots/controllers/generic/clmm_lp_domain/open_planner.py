@@ -68,8 +68,6 @@ def plan_open(
         return Decision(intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="budget_unavailable"))
 
     patch = DecisionPatch()
-    patch.swap.awaiting_balance_refresh = True
-    patch.swap.awaiting_balance_refresh_since = snapshot.now
     if patch_mutator is not None:
         patch_mutator(patch, action)
 

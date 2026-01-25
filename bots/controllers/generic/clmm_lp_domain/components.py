@@ -145,6 +145,10 @@ class LPView:
     upper_price: Optional[Decimal]
     current_price: Optional[Decimal]
     out_of_range_since: Optional[float]
+    balance_event_seq: int = 0
+    balance_event_type: Optional[str] = None
+    balance_event_base_delta: Optional[Decimal] = None
+    balance_event_quote_delta: Optional[Decimal] = None
 
     @property
     def in_transition(self) -> bool:
@@ -165,6 +169,8 @@ class SwapView:
     amount_in: Optional[Decimal] = None
     amount_out: Optional[Decimal] = None
     amount_in_is_quote: Optional[bool] = None
+    delta_base: Optional[Decimal] = None
+    delta_quote: Optional[Decimal] = None
 
 
 @dataclass(frozen=True)
@@ -221,6 +227,7 @@ class FeeEstimatorContext:
 class LpContext:
     anchor: Optional[BudgetAnchor] = None
     fee: FeeEstimatorContext = field(default_factory=FeeEstimatorContext)
+    last_balance_event_seq: int = 0
 
 
 class RebalanceStage(str, Enum):
@@ -246,16 +253,32 @@ class RebalanceContext:
 
 
 @dataclass
+class BalanceSyncBarrier:
+    baseline_base: Decimal
+    baseline_quote: Decimal
+    expected_delta_base: Decimal = Decimal("0")
+    expected_delta_quote: Decimal = Decimal("0")
+    created_ts: float = 0.0
+    deadline_ts: float = 0.0
+    last_attempt_ts: float = 0.0
+    attempts: int = 0
+    reason: str = ""
+
+
+@dataclass
 class SwapContext:
     settled_executor_ids: Set[str] = field(default_factory=set)
     last_inventory_swap_ts: float = 0.0
     awaiting_balance_refresh: bool = False
     awaiting_balance_refresh_since: float = 0.0
+    balance_barrier: Optional[BalanceSyncBarrier] = None
 
 
 @dataclass
 class StopLossContext:
     until_ts: float = 0.0
+    triggered: bool = False
+    triggered_ts: float = 0.0
     pending_liquidation: bool = False  # True when additional base must be sold to complete stoploss liquidation.
     liquidation_target_base: Optional[Decimal] = None  # Remaining base amount to liquidate.
     last_liquidation_attempt_ts: float = 0.0
@@ -294,6 +317,10 @@ class ControllerContext:
 
         if patch.stoploss.until_ts is not None:
             self.stoploss.until_ts = patch.stoploss.until_ts
+        if patch.stoploss.triggered is not None:
+            self.stoploss.triggered = patch.stoploss.triggered
+        if patch.stoploss.triggered_ts is not None:
+            self.stoploss.triggered_ts = patch.stoploss.triggered_ts
         if patch.stoploss.last_exit_reason is not None:
             self.stoploss.last_exit_reason = patch.stoploss.last_exit_reason
         if patch.stoploss.pending_liquidation is not None:
@@ -332,6 +359,8 @@ class RebalancePatch:
 @dataclass
 class StopLossPatch:
     until_ts: Optional[float] = None
+    triggered: Optional[bool] = None
+    triggered_ts: Optional[float] = None
     last_exit_reason: Optional[str] = None
     pending_liquidation: Optional[bool] = None
     liquidation_target_base: Optional[Decimal] = None
