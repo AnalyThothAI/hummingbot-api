@@ -1,5 +1,6 @@
 from datetime import datetime
-from typing import Any, Dict, List, Optional
+import time
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 import streamlit as st
@@ -69,6 +70,31 @@ def format_number(value: Optional[float], precision: int = 2) -> str:
     return f"{number:,.{precision}f}"
 
 
+def split_trading_pair(trading_pair: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    if not trading_pair or "-" not in trading_pair:
+        return None, None
+    base, quote = trading_pair.split("-", 1)
+    return base, quote
+
+
+def format_quote_value(value: Optional[float], quote_symbol: Optional[str], precision: int = 2) -> str:
+    formatted = format_number(value, precision)
+    if formatted == "-":
+        return "-"
+    unit = quote_symbol or "Quote"
+    return f"{formatted} {unit}"
+
+
+def format_timestamp_age(timestamp: Optional[float]) -> str:
+    if timestamp is None:
+        return "-"
+    try:
+        age = max(0, time.time() - float(timestamp))
+    except (TypeError, ValueError):
+        return "-"
+    return format_age(age) or "-"
+
+
 def format_age(seconds: Optional[float]) -> Optional[str]:
     if seconds is None:
         return None
@@ -104,6 +130,11 @@ def response_has_success_flag(response: Dict[str, Any]) -> bool:
     return inner.get("success", True) is True
 
 
+def is_not_found_error(error: Exception) -> bool:
+    message = str(error).lower()
+    return "404" in message and "not found" in message
+
+
 def handle_action_response(
     response: Dict[str, Any],
     success_message: str,
@@ -133,33 +164,6 @@ def handle_action_response(
         message = data.get("message") or response.get("error") or error_message
         st.error(message)
     return False
-
-
-def stop_bot(bot_name: str, skip_order_cancellation: bool = False):
-    payload = {
-        "bot_name": bot_name,
-        "skip_order_cancellation": skip_order_cancellation,
-    }
-    response = backend_api_request("POST", "/bot-orchestration/stop-bot", json_body=payload)
-    if handle_action_response(
-        response,
-        f"Stop strategy command sent to {bot_name}.",
-        f"Failed to stop strategy for {bot_name}.",
-        require_success_flag=True,
-    ):
-        return
-
-
-def start_bot(bot_name: str):
-    payload = {"bot_name": bot_name}
-    response = backend_api_request("POST", "/bot-orchestration/start-bot", json_body=payload)
-    if handle_action_response(
-        response,
-        f"Start strategy command sent to {bot_name}.",
-        f"Failed to start strategy for {bot_name}.",
-        require_success_flag=True,
-    ):
-        return
 
 
 def stop_container(bot_name: str):
@@ -345,6 +349,7 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
     total_volume_traded = 0
     total_unrealized_pnl_quote = 0
     total_realized_pnl_quote = 0
+    quote_symbols: set = set()
 
     if not isinstance(performance, dict):
         return (
@@ -374,6 +379,9 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         controller_name = controller_config.get("controller_name", controller)
         connector_name = controller_config.get("connector_name", "N/A")
         trading_pair = controller_config.get("trading_pair", "N/A")
+        _, quote_symbol = split_trading_pair(trading_pair)
+        if quote_symbol:
+            quote_symbols.add(quote_symbol)
         kill_switch_status = controller_config.get("manual_kill_switch", False)
 
         realized_pnl_quote = controller_performance.get("realized_pnl_quote", 0)
@@ -401,11 +409,11 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
             "Trading Pair": trading_pair,
             "Signals": signals.get("signals", ""),
             "Notes": signals.get("notes", ""),
-            "Realized PNL ($)": round(realized_pnl_quote, 2),
-            "Unrealized PNL ($)": round(unrealized_pnl_quote, 2),
-            "NET PNL ($)": round(global_pnl_quote, 2),
-            "NAV ($)": round(nav_quote, 2) if nav_quote is not None else None,
-            "Volume ($)": round(volume_traded, 2),
+            "Realized PNL": format_quote_value(realized_pnl_quote, quote_symbol, 2),
+            "Unrealized PNL": format_quote_value(unrealized_pnl_quote, quote_symbol, 2),
+            "NET PNL": format_quote_value(global_pnl_quote, quote_symbol, 2),
+            "NAV": format_quote_value(nav_quote, quote_symbol, 2) if nav_quote is not None else "-",
+            "Volume": format_quote_value(volume_traded, quote_symbol, 2),
             "Close Types": close_types_str,
             "_controller_id": controller,
         }
@@ -428,12 +436,204 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         total_volume_traded,
         total_unrealized_pnl_quote,
         total_realized_pnl_quote,
+        quote_symbols,
         config_map,
     )
 
 
-def build_lp_position_rows(performance: Dict[str, Any], config_map: Dict[str, Any]) -> List[Dict[str, str]]:
-    rows = []
+LP_POSITION_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
+.lp-card {
+  --lp-ink: #1c1917;
+  --lp-muted: #6b5f55;
+  --lp-paper: #fffaf2;
+  --lp-wash: #f4eee6;
+  --lp-line: rgba(28, 25, 23, 0.14);
+  --lp-teal: #0f766e;
+  --lp-amber: #d97706;
+  --lp-rose: #b42318;
+  background: linear-gradient(180deg, var(--lp-paper) 0%, var(--lp-wash) 100%);
+  border: 1px solid var(--lp-line);
+  border-radius: 18px;
+  padding: 16px 18px;
+  margin-bottom: 16px;
+  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+  position: relative;
+  overflow: hidden;
+  font-family: 'IBM Plex Sans', sans-serif;
+  color: var(--lp-ink);
+}
+.lp-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image: radial-gradient(rgba(28, 25, 23, 0.08) 1px, transparent 1px);
+  background-size: 14px 14px;
+  opacity: 0.12;
+  pointer-events: none;
+}
+.lp-card-inner {
+  position: relative;
+  z-index: 1;
+}
+.lp-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+.lp-title {
+  font-family: 'Bricolage Grotesque', sans-serif;
+  font-size: 1.05rem;
+  font-weight: 700;
+  color: var(--lp-ink);
+}
+.lp-sub {
+  font-size: 0.78rem;
+  color: var(--lp-muted);
+  margin-top: 4px;
+}
+.lp-state {
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--lp-line);
+  color: var(--lp-muted);
+  background: rgba(255, 255, 255, 0.55);
+}
+.lp-state[data-state="IN_RANGE"] {
+  color: var(--lp-teal);
+  border-color: rgba(15, 118, 110, 0.35);
+  background: rgba(15, 118, 110, 0.12);
+}
+.lp-state[data-state="OUT_OF_RANGE"] {
+  color: var(--lp-amber);
+  border-color: rgba(217, 119, 6, 0.4);
+  background: rgba(217, 119, 6, 0.12);
+}
+.lp-card-body {
+  display: grid;
+  grid-template-columns: minmax(240px, 1fr) minmax(280px, 1.2fr);
+  gap: 16px;
+  margin-top: 16px;
+}
+.lp-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.lp-metric {
+  padding: 8px 10px;
+  border-radius: 12px;
+  border: 1px solid var(--lp-line);
+  background: rgba(255, 255, 255, 0.7);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.lp-metric.primary {
+  border-color: rgba(15, 118, 110, 0.25);
+  background: rgba(15, 118, 110, 0.08);
+}
+.lp-label {
+  font-size: 0.66rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--lp-muted);
+}
+.lp-value {
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--lp-ink);
+}
+.lp-range {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.lp-range-track {
+  position: relative;
+  height: 18px;
+  border-radius: 999px;
+  background: rgba(28, 25, 23, 0.08);
+  border: 1px solid rgba(28, 25, 23, 0.16);
+  overflow: hidden;
+}
+.lp-range-track.out {
+  background: rgba(217, 119, 6, 0.12);
+}
+.lp-range-band {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(14, 165, 233, 0.55), rgba(16, 185, 129, 0.55));
+}
+.lp-range-price {
+  position: absolute;
+  top: -6px;
+  width: 12px;
+  height: 12px;
+  background: var(--lp-ink);
+  transform: rotate(45deg);
+  border: 2px solid var(--lp-paper);
+  box-shadow: 0 0 0 2px rgba(28, 25, 23, 0.12);
+}
+.lp-range-price.out {
+  background: var(--lp-rose);
+}
+.lp-range-labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.lp-chip {
+  font-size: 0.72rem;
+  padding: 4px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--lp-line);
+  background: rgba(255, 255, 255, 0.7);
+  color: var(--lp-muted);
+}
+.lp-chip.strong {
+  color: var(--lp-ink);
+  border-color: rgba(28, 25, 23, 0.25);
+  background: rgba(255, 255, 255, 0.9);
+}
+.lp-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 0.74rem;
+  color: var(--lp-muted);
+}
+.lp-meta strong {
+  color: var(--lp-ink);
+  font-weight: 600;
+}
+.lp-range-fallback {
+  font-size: 0.8rem;
+  color: var(--lp-muted);
+}
+@media (max-width: 900px) {
+  .lp-card-body {
+    grid-template-columns: 1fr;
+  }
+  .lp-metrics {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+</style>
+"""
+
+
+def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
     if not isinstance(performance, dict):
         return rows
 
@@ -452,6 +652,8 @@ def build_lp_position_rows(performance: Dict[str, Any], config_map: Dict[str, An
         controller_config = config_map.get(controller_id, {})
         controller_name = controller_config.get("controller_name", controller_id)
         trading_pair = controller_config.get("trading_pair")
+        _, quote_symbol = split_trading_pair(trading_pair)
+        current_price = custom_info.get("price")
 
         for pos in positions:
             if not isinstance(pos, dict):
@@ -465,38 +667,155 @@ def build_lp_position_rows(performance: Dict[str, Any], config_map: Dict[str, An
                 else:
                     state = "-"
                 rows.append({
-                    "Controller": controller_name,
-                    "Pair": trading_pair or "-",
-                    "State": state,
-                    "Position": pos.get("executor_id") or "-",
-                    "Lower": format_number(pos.get("lower_price"), 6),
-                    "Upper": format_number(pos.get("upper_price"), 6),
-                    "Base": "-",
-                    "Quote": "-",
-                    "Value ($)": format_number(pos.get("position_value_quote"), 2),
-                    "Anchor ($)": format_number(pos.get("anchor_value_quote"), 2),
-                    "StopLoss ($)": format_number(pos.get("stoploss_trigger_quote"), 2),
-                    "Fee/hr ($)": format_number(pos.get("fee_rate_ewma_quote_per_hour"), 4),
-                    "OOR Since": format_number(pos.get("out_of_range_since"), 0),
+                    "controller": controller_name,
+                    "pair": trading_pair or "-",
+                    "quote_symbol": quote_symbol,
+                    "state": state,
+                    "position": pos.get("executor_id") or "-",
+                    "lower": pos.get("lower_price"),
+                    "upper": pos.get("upper_price"),
+                    "price": current_price,
+                    "base": pos.get("base") if pos.get("base") is not None else pos.get("base_amount"),
+                    "quote": pos.get("quote") if pos.get("quote") is not None else pos.get("quote_amount"),
+                    "value_quote": pos.get("position_value_quote"),
+                    "anchor_quote": pos.get("anchor_value_quote"),
+                    "stoploss_quote": pos.get("stoploss_trigger_quote"),
+                    "fee_quote_per_hour": pos.get("fee_rate_ewma_quote_per_hour"),
+                    "out_of_range_since": pos.get("out_of_range_since"),
                 })
                 continue
             rows.append({
-                "Controller": controller_name,
-                "Pair": trading_pair or "-",
-                "State": pos.get("state") or "-",
-                "Position": pos.get("position") or "-",
-                "Lower": format_number(pos.get("lower"), 6),
-                "Upper": format_number(pos.get("upper"), 6),
-                "Base": format_number(pos.get("base"), 4),
-                "Quote": format_number(pos.get("quote"), 4),
-                "Value ($)": format_number(pos.get("value_quote"), 2),
-                "Anchor ($)": "-",
-                "StopLoss ($)": "-",
-                "Fee/hr ($)": "-",
-                "OOR Since": "-",
+                "controller": controller_name,
+                "pair": trading_pair or "-",
+                "quote_symbol": quote_symbol,
+                "state": pos.get("state") or "-",
+                "position": pos.get("position") or "-",
+                "lower": pos.get("lower"),
+                "upper": pos.get("upper"),
+                "price": current_price,
+                "base": pos.get("base"),
+                "quote": pos.get("quote"),
+                "value_quote": pos.get("value_quote"),
+                "anchor_quote": None,
+                "stoploss_quote": None,
+                "fee_quote_per_hour": None,
+                "out_of_range_since": None,
             })
 
     return rows
+
+
+def build_range_bar_html(
+    lower: Optional[float],
+    upper: Optional[float],
+    price: Optional[float],
+) -> Tuple[str, Optional[bool]]:
+    if lower is None or upper is None or price is None:
+        return "<div class='lp-range-fallback'>Range or price unavailable</div>", None
+    try:
+        lower_val = float(lower)
+        upper_val = float(upper)
+        price_val = float(price)
+    except (TypeError, ValueError):
+        return "<div class='lp-range-fallback'>Range or price unavailable</div>", None
+    if upper_val <= lower_val:
+        return "<div class='lp-range-fallback'>Range invalid</div>", None
+
+    width = upper_val - lower_val
+    pad = width * 0.25
+    min_val = lower_val - pad
+    max_val = upper_val + pad
+    span = max_val - min_val
+    if span <= 0:
+        return "<div class='lp-range-fallback'>Range invalid</div>", None
+
+    def pct(value: float) -> float:
+        return max(0.0, min(100.0, ((value - min_val) / span) * 100.0))
+
+    lower_pct = pct(lower_val)
+    upper_pct = pct(upper_val)
+    price_pct = pct(price_val)
+    out_of_range = price_val < lower_val or price_val > upper_val
+    track_class = "lp-range-track out" if out_of_range else "lp-range-track"
+    price_class = "lp-range-price out" if out_of_range else "lp-range-price"
+
+    return (
+        "<div class='lp-range'>"
+        f"<div class='{track_class}'>"
+        f"<div class='lp-range-band' style='left:{lower_pct:.2f}%; width:{max(0.5, upper_pct - lower_pct):.2f}%;'></div>"
+        f"<div class='{price_class}' style='left:{price_pct:.2f}%;'></div>"
+        "</div>"
+        "<div class='lp-range-labels'>"
+        f"<span class='lp-chip'>Low {format_number(lower_val, 6)}</span>"
+        f"<span class='lp-chip strong'>Price {format_number(price_val, 6)}</span>"
+        f"<span class='lp-chip'>High {format_number(upper_val, 6)}</span>"
+        "</div>"
+        "</div>"
+    ), out_of_range
+
+
+def render_lp_positions(positions: List[Dict[str, Any]]) -> None:
+    if not positions:
+        return
+    st.markdown(LP_POSITION_CSS, unsafe_allow_html=True)
+    for pos in positions:
+        state = pos.get("state") or "-"
+        state_attr = state if isinstance(state, str) else "-"
+        state_label = state_attr.replace("_", " ").title() if state_attr != "-" else "Unknown"
+
+        quote_symbol = pos.get("quote_symbol")
+        range_html, out_of_range = build_range_bar_html(pos.get("lower"), pos.get("upper"), pos.get("price"))
+
+        metrics = [
+            {"label": "Value", "value": format_quote_value(pos.get("value_quote"), quote_symbol, 4), "primary": True},
+            {"label": "Anchor", "value": format_quote_value(pos.get("anchor_quote"), quote_symbol, 4), "primary": False},
+            {"label": "StopLoss", "value": format_quote_value(pos.get("stoploss_quote"), quote_symbol, 4), "primary": False},
+            {"label": "Fee/hr", "value": format_quote_value(pos.get("fee_quote_per_hour"), quote_symbol, 6), "primary": False},
+            {"label": "Base", "value": format_number(pos.get("base"), 6), "primary": False},
+            {"label": "Quote", "value": format_number(pos.get("quote"), 6), "primary": False},
+        ]
+
+        metrics_html = "".join(
+            f"<div class='lp-metric{' primary' if metric['primary'] else ''}'>"
+            f"<span class='lp-label'>{metric['label']}</span>"
+            f"<span class='lp-value'>{metric['value']}</span></div>"
+            for metric in metrics
+        )
+
+        oor_age = format_timestamp_age(pos.get("out_of_range_since"))
+        if out_of_range is None:
+            status_text = "Range unknown"
+            meta_right = f"Price {format_number(pos.get('price'), 6)}"
+        else:
+            status_text = "Out of range" if out_of_range else "In range"
+            meta_right = (
+                f"OOR age {oor_age}" if out_of_range and oor_age != "-" else f"Price {format_number(pos.get('price'), 6)}"
+            )
+        meta_html = (
+            "<div class='lp-meta'>"
+            f"<span><strong>{status_text}</strong></span>"
+            f"<span>{meta_right}</span>"
+            "</div>"
+        )
+
+        card_html = (
+            "<div class='lp-card'>"
+            "<div class='lp-card-inner'>"
+            "<div class='lp-card-head'>"
+            "<div>"
+            f"<div class='lp-title'>{pos.get('controller')} / {pos.get('pair')}</div>"
+            f"<div class='lp-sub'>Position {pos.get('position')}</div>"
+            "</div>"
+            f"<div class='lp-state' data-state='{state_attr}'>{state_label}</div>"
+            "</div>"
+            "<div class='lp-card-body'>"
+            f"<div class='lp-metrics'>{metrics_html}</div>"
+            f"<div>{range_html}{meta_html}</div>"
+            "</div>"
+            "</div>"
+            "</div>"
+        )
+        st.markdown(card_html, unsafe_allow_html=True)
 
 
 def format_error_logs(error_logs: List[Any]) -> List[str]:
@@ -610,21 +929,6 @@ def render_overview(instances: List[Dict[str, Any]]):
                 docker_status == "running" and bot_status_value != "stopped"
             )
 
-            strategy_label = "—"
-            strategy_action = None
-            strategy_available = mqtt_status in {"connected", "stale"}
-            if strategy_available:
-                if bot_status_value == "stopped":
-                    strategy_label = "▶️ Start Strategy"
-                    strategy_action = lambda name=bot_name: start_bot(name)
-                else:
-                    strategy_label = "⏹️ Stop Strategy"
-                    strategy_action = lambda name=bot_name: stop_bot(name)
-            elif bot_status_value == "stopped":
-                strategy_label = "▶️ Start Strategy"
-            else:
-                strategy_label = "⏹️ Stop Strategy"
-
             container_label = "—"
             container_action = None
             if docker_status == "running":
@@ -637,17 +941,8 @@ def render_overview(instances: List[Dict[str, Any]]):
                 container_label = "➕ Launch New"
                 container_action = lambda: st.switch_page("frontend/pages/orchestration/launch_bot_v2/app.py")
 
-            action_cols = st.columns(4)
+            action_cols = st.columns(3)
             with action_cols[0]:
-                if st.button(
-                    strategy_label,
-                    key=f"strategy_{bot_name}",
-                    use_container_width=True,
-                    disabled=strategy_action is None,
-                ):
-                    if strategy_action:
-                        strategy_action()
-            with action_cols[1]:
                 if st.button(
                     container_label,
                     key=f"container_{bot_name}",
@@ -656,7 +951,7 @@ def render_overview(instances: List[Dict[str, Any]]):
                 ):
                     if container_action:
                         container_action()
-            with action_cols[2]:
+            with action_cols[1]:
                 if st.button(
                     "📦 Archive",
                     key=f"archive_{bot_name}",
@@ -664,7 +959,7 @@ def render_overview(instances: List[Dict[str, Any]]):
                     disabled=archive_disabled,
                 ):
                     archive_bot(bot_name, docker_status)
-            with action_cols[3]:
+            with action_cols[2]:
                 if st.button("📜 Logs Page", key=f"open_logs_{bot_name}", use_container_width=True):
                     st.session_state.logs_selected_container = bot_name
                     st.switch_page("frontend/pages/orchestration/logs/app.py")
@@ -685,7 +980,8 @@ def render_overview(instances: List[Dict[str, Any]]):
                     controller_configs = backend_api_client.controllers.get_bot_controller_configs(bot_name)
                     controller_configs = controller_configs if controller_configs else []
                 except Exception as e:
-                    st.warning(f"Could not fetch controller configs for {bot_name}: {e}")
+                    if not is_not_found_error(e):
+                        st.warning(f"Could not fetch controller configs for {bot_name}: {e}")
                     controller_configs = []
 
             if performance:
@@ -705,22 +1001,31 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
         total_volume_traded,
         total_unrealized_pnl_quote,
         total_realized_pnl_quote,
+        quote_symbols,
         config_map,
     ) = build_controller_rows(performance, controller_configs)
 
     total_global_pnl_pct = total_global_pnl_quote / total_volume_traded if total_volume_traded > 0 else 0
+    quote_label = "Quote"
+    if len(quote_symbols) == 1:
+        quote_label = next(iter(quote_symbols))
+    elif len(quote_symbols) > 1:
+        quote_label = "Mixed"
 
     metric_cols = st.columns(5)
     with metric_cols[0]:
-        st.metric("🏦 NET PNL", f"${total_global_pnl_quote:.2f}")
+        st.metric("🏦 NET PNL", f"{total_global_pnl_quote:.2f} {quote_label}")
     with metric_cols[1]:
-        st.metric("💹 Unrealized PNL", f"${total_unrealized_pnl_quote:.2f}")
+        st.metric("💹 Unrealized PNL", f"{total_unrealized_pnl_quote:.2f} {quote_label}")
     with metric_cols[2]:
-        st.metric("✅ Realized PNL", f"${total_realized_pnl_quote:.2f}")
+        st.metric("✅ Realized PNL", f"{total_realized_pnl_quote:.2f} {quote_label}")
     with metric_cols[3]:
         st.metric("📊 NET PNL (%)", f"{total_global_pnl_pct:.2%}")
     with metric_cols[4]:
-        st.metric("💸 Volume Traded", f"${total_volume_traded:.2f}")
+        st.metric("💸 Volume Traded", f"{total_volume_traded:.2f} {quote_label}")
+
+    if len(quote_symbols) > 1:
+        st.caption("Totals include mixed quote currencies; per-controller values are in their own quote units.")
 
     st.caption(
         f"Controllers: {len(active_controllers)} active · {len(stopped_controllers)} paused · {len(error_controllers)} error"
@@ -808,11 +1113,10 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
         if missing:
             st.info(f"Controllers configured but not reporting yet: {', '.join(missing)}")
 
-    lp_rows = build_lp_position_rows(performance, config_map)
-    if lp_rows:
+    lp_positions = build_lp_positions(performance, config_map)
+    if lp_positions:
         with st.expander("LP Positions", expanded=True):
-            lp_df = pd.DataFrame(lp_rows)
-            st.dataframe(lp_df, use_container_width=True, hide_index=True)
+            render_lp_positions(lp_positions)
 
 
 def render_logs(bot_name: str, bot_data: Dict[str, Any]):

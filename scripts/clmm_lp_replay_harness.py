@@ -220,12 +220,30 @@ def _lp_executor_info(
     out_of_range_since: Optional[float],
     is_active: bool,
     close_type: Optional[CloseType],
-    balance_event_seq: int = 0,
-    balance_event_type: Optional[str] = None,
-    balance_event_base_delta: Optional[Decimal] = None,
-    balance_event_quote_delta: Optional[Decimal] = None,
+    balance_event: Optional[Dict[str, object]] = None,
 ) -> ExecutorInfo:
     base_token, quote_token = trading_pair.split("-")
+    balance_event_payload = None
+    if balance_event is not None:
+        event_seq = balance_event.get("seq")
+        try:
+            event_seq = int(event_seq) if event_seq is not None else 0
+        except (TypeError, ValueError):
+            event_seq = 0
+        event_type = balance_event.get("type")
+        delta = balance_event.get("delta")
+        if not isinstance(delta, dict):
+            delta = {}
+        base_delta = delta.get("base")
+        quote_delta = delta.get("quote")
+        balance_event_payload = {
+            "seq": event_seq,
+            "type": event_type,
+            "delta": {
+                "base": float(base_delta) if base_delta is not None else None,
+                "quote": float(quote_delta) if quote_delta is not None else None,
+            },
+        }
     config = LPPositionExecutorConfig(
         timestamp=timestamp,
         connector_name=connector_name,
@@ -265,10 +283,7 @@ def _lp_executor_info(
             "base_fee": 0.0,
             "quote_fee": 0.0,
             "out_of_range_since": out_of_range_since,
-            "balance_event_seq": balance_event_seq,
-            "balance_event_type": balance_event_type,
-            "balance_event_base_delta": float(balance_event_base_delta) if balance_event_base_delta is not None else None,
-            "balance_event_quote_delta": float(balance_event_quote_delta) if balance_event_quote_delta is not None else None,
+            "balance_event": balance_event_payload,
         },
         close_type=close_type,
         controller_id=controller_id,
@@ -507,10 +522,14 @@ def _build_lp_event_missing_delta_scenario(
         out_of_range_since=None,
         is_active=True,
         close_type=None,
-        balance_event_seq=1,
-        balance_event_type="close",
-        balance_event_base_delta=None,
-        balance_event_quote_delta=None,
+        balance_event={
+            "seq": 1,
+            "type": "close",
+            "delta": {
+                "base": None,
+                "quote": None,
+            },
+        },
     )
     return [
         Step(
@@ -702,10 +721,14 @@ def _build_stoploss_flow_scenario(
         out_of_range_since=None,
         is_active=False,
         close_type=CloseType.COMPLETED,
-        balance_event_seq=1,
-        balance_event_type="close",
-        balance_event_base_delta=Decimal("1"),
-        balance_event_quote_delta=price,
+        balance_event={
+            "seq": 1,
+            "type": "close",
+            "delta": {
+                "base": Decimal("1"),
+                "quote": price,
+            },
+        },
     )
     liquidation_swap = _swap_executor_info(
         executor_id="swap-liquidation",

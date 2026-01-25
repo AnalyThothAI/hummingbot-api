@@ -397,6 +397,8 @@ class CLMMLPBaseController(ControllerBase):
                 "upper_price": _as_float(lp_view.upper_price),
                 "in_range": in_range,
                 "position_value_quote": _as_float(position_value),
+                "base": _as_float(abs(lp_view.base_amount)),
+                "quote": _as_float(abs(lp_view.quote_amount)),
             }
             if anchor is not None:
                 lp_item["anchor_value_quote"] = float(anchor.value_quote)
@@ -542,7 +544,11 @@ class CLMMLPBaseController(ControllerBase):
         )
 
     def _estimate_position_value(self, lp_view: LPView, current_price: Decimal) -> Decimal:
-        return (lp_view.base_amount + lp_view.base_fee) * current_price + (lp_view.quote_amount + lp_view.quote_fee)
+        base_amount = abs(lp_view.base_amount)
+        quote_amount = abs(lp_view.quote_amount)
+        base_fee = abs(lp_view.base_fee)
+        quote_fee = abs(lp_view.quote_fee)
+        return (base_amount + base_fee) * current_price + (quote_amount + quote_fee)
 
     def _update_fee_rate_estimates(self, snapshot: Snapshot):
         current_price = snapshot.current_price
@@ -1167,32 +1173,35 @@ class CLMMLPBaseController(ControllerBase):
     def _reconcile_lp_balance_events(self, snapshot: Snapshot) -> None:
         liquidation_delta = Decimal("0")
         for executor_id, lp_view in snapshot.lp.items():
-            if lp_view.balance_event_seq <= 0:
+            event = lp_view.balance_event
+            if event is None or event.seq <= 0:
                 continue
             lp_ctx = self._ctx.lp.setdefault(executor_id, LpContext())
-            if lp_view.balance_event_seq <= lp_ctx.last_balance_event_seq:
+            if event.seq <= lp_ctx.last_balance_event_seq:
                 continue
-            lp_ctx.last_balance_event_seq = lp_view.balance_event_seq
-            if lp_view.balance_event_base_delta is None or lp_view.balance_event_quote_delta is None:
+            lp_ctx.last_balance_event_seq = event.seq
+            if event.delta_base is None or event.delta_quote is None:
                 self.logger().error(
                     "lp_balance_event_missing | executor_id=%s seq=%s type=%s",
                     executor_id,
-                    lp_view.balance_event_seq,
-                    lp_view.balance_event_type,
+                    event.seq,
+                    event.event_type,
                 )
                 patch = DecisionPatch()
                 patch.failure.set_reason = "lp_balance_event_missing"
                 self._ctx.apply(patch)
                 continue
+            delta_base = event.delta_base
+            delta_quote = event.delta_quote
             self._balance_manager.request_balance_sync(
                 now=snapshot.now,
-                delta_base=lp_view.balance_event_base_delta,
-                delta_quote=lp_view.balance_event_quote_delta,
-                reason=f"lp_{lp_view.balance_event_type or 'event'}",
+                delta_base=delta_base,
+                delta_quote=delta_quote,
+                reason=f"lp_{event.event_type or 'event'}",
             )
-            if self._ctx.stoploss.pending_liquidation and lp_view.balance_event_type == "close":
-                if lp_view.balance_event_base_delta > 0:
-                    liquidation_delta += lp_view.balance_event_base_delta
+            if self._ctx.stoploss.pending_liquidation and event.event_type == "close":
+                if delta_base > 0:
+                    liquidation_delta += delta_base
         if liquidation_delta > 0:
             patch = DecisionPatch()
             target = self._ctx.stoploss.liquidation_target_base or Decimal("0")

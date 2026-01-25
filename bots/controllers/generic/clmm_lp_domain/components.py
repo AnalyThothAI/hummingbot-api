@@ -129,6 +129,14 @@ class PoolDomainAdapter:
 
 
 @dataclass(frozen=True)
+class LPBalanceEvent:
+    seq: int
+    event_type: Optional[str]
+    delta_base: Optional[Decimal]
+    delta_quote: Optional[Decimal]
+
+
+@dataclass(frozen=True)
 class LPView:
     executor_id: str
     is_active: bool
@@ -145,10 +153,7 @@ class LPView:
     upper_price: Optional[Decimal]
     current_price: Optional[Decimal]
     out_of_range_since: Optional[float]
-    balance_event_seq: int = 0
-    balance_event_type: Optional[str] = None
-    balance_event_base_delta: Optional[Decimal] = None
-    balance_event_quote_delta: Optional[Decimal] = None
+    balance_event: Optional[LPBalanceEvent] = None
 
     @property
     def in_transition(self) -> bool:

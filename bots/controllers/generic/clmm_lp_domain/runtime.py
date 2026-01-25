@@ -14,6 +14,7 @@ from .components import (
     BalanceSyncBarrier,
     ControllerContext,
     DecisionPatch,
+    LPBalanceEvent,
     LPView,
     PoolDomainAdapter,
     Snapshot,
@@ -122,16 +123,31 @@ class SnapshotBuilder:
             price = self._domain.pool_price_to_strategy(price, inverted)
         out_of_range_since = custom.get("out_of_range_since")
         out_of_range_since = float(out_of_range_since) if out_of_range_since is not None else None
-        event_seq = custom.get("balance_event_seq")
-        event_seq = int(event_seq) if event_seq is not None else 0
-        event_type = custom.get("balance_event_type")
-        event_base_delta = self._to_decimal(custom.get("balance_event_base_delta"))
-        event_quote_delta = self._to_decimal(custom.get("balance_event_quote_delta"))
-        if event_base_delta is not None and event_quote_delta is not None:
-            event_base_delta, event_quote_delta = self._domain.pool_amounts_to_strategy(
-                event_base_delta,
-                event_quote_delta,
-                inverted,
+        balance_event = None
+        event_payload = custom.get("balance_event")
+        if isinstance(event_payload, dict):
+            event_seq = event_payload.get("seq")
+            try:
+                event_seq = int(event_seq) if event_seq is not None else 0
+            except (TypeError, ValueError):
+                event_seq = 0
+            event_type = event_payload.get("type")
+            delta_payload = event_payload.get("delta")
+            if not isinstance(delta_payload, dict):
+                delta_payload = {}
+            event_base_delta = self._to_decimal(delta_payload.get("base"))
+            event_quote_delta = self._to_decimal(delta_payload.get("quote"))
+            if event_base_delta is not None and event_quote_delta is not None:
+                event_base_delta, event_quote_delta = self._domain.pool_amounts_to_strategy(
+                    event_base_delta,
+                    event_quote_delta,
+                    inverted,
+                )
+            balance_event = LPBalanceEvent(
+                seq=event_seq,
+                event_type=event_type,
+                delta_base=event_base_delta,
+                delta_quote=event_quote_delta,
             )
 
         return LPView(
@@ -150,10 +166,7 @@ class SnapshotBuilder:
             upper_price=upper,
             current_price=price,
             out_of_range_since=out_of_range_since,
-            balance_event_seq=event_seq,
-            balance_event_type=event_type,
-            balance_event_base_delta=event_base_delta,
-            balance_event_quote_delta=event_quote_delta,
+            balance_event=balance_event,
         )
 
     def _get_current_price(self) -> Optional[Decimal]:
