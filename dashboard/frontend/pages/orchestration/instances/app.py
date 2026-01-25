@@ -237,9 +237,13 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
     signals = []
     notes = []
 
-    state = custom_info.get("state") or custom_info.get("controller_state") or custom_info.get("hedge_state")
+    mode = custom_info.get("mode")
+    state = mode or custom_info.get("state") or custom_info.get("controller_state") or custom_info.get("hedge_state")
     if state:
         signals.append(f"State: {state}")
+    mode_rule = custom_info.get("mode_rule")
+    if mode_rule:
+        notes.append(f"Rule: {mode_rule}")
 
     intent = custom_info.get("intent")
     if isinstance(intent, dict):
@@ -252,27 +256,35 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
         if reason:
             notes.append(str(reason))
 
-    positions = custom_info.get("positions")
-    if isinstance(positions, dict):
-        lp_active = positions.get("lp_active")
-        swap_active = positions.get("swap_active")
-        if lp_active is not None:
-            signals.append(f"LP: {lp_active}")
-        if swap_active is not None:
-            signals.append(f"Swaps: {swap_active}")
+    lp_active = custom_info.get("active_lp_count")
+    swap_active = custom_info.get("active_swap_count")
+    if lp_active is None or swap_active is None:
+        positions = custom_info.get("positions")
+        if isinstance(positions, dict):
+            if lp_active is None:
+                lp_active = positions.get("lp_active")
+            if swap_active is None:
+                swap_active = positions.get("swap_active")
+    if lp_active is not None:
+        signals.append(f"LP: {lp_active}")
+    if swap_active is not None:
+        signals.append(f"Swaps: {swap_active}")
 
     price = custom_info.get("price")
     if price is not None:
         signals.append(f"Price: {format_number(price, 4)}")
 
-    wallet = custom_info.get("wallet")
-    if isinstance(wallet, dict):
-        base = wallet.get("base")
-        quote = wallet.get("quote")
-        if base is not None or quote is not None:
-            base_str = format_number(base, 4) if base is not None else "-"
-            quote_str = format_number(quote, 4) if quote is not None else "-"
-            signals.append(f"Wallet: {base_str}/{quote_str}")
+    base = custom_info.get("wallet_base")
+    quote = custom_info.get("wallet_quote")
+    if base is None and quote is None:
+        wallet = custom_info.get("wallet")
+        if isinstance(wallet, dict):
+            base = wallet.get("base")
+            quote = wallet.get("quote")
+    if base is not None or quote is not None:
+        base_str = format_number(base, 4) if base is not None else "-"
+        quote_str = format_number(quote, 4) if quote is not None else "-"
+        signals.append(f"Wallet: {base_str}/{quote_str}")
 
     stop_loss_active = False
     rebalance_pending = None
@@ -286,6 +298,15 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
     if custom_info.get("rebalance_pending") is not None:
         rebalance_pending = custom_info.get("rebalance_pending")
 
+    if custom_info.get("stoploss_pending_liquidation") is True:
+        stop_loss_active = True
+    rebalance_count = custom_info.get("rebalance_plan_count")
+    if rebalance_count is not None:
+        rebalance_pending = rebalance_count
+
+    if custom_info.get("awaiting_balance_refresh") is True:
+        signals.append("Balance: syncing")
+
     if stop_loss_active:
         signals.append("StopLoss: on")
     if rebalance_pending:
@@ -294,6 +315,9 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
     state_reason = custom_info.get("state_reason") or custom_info.get("intent_reason")
     if state_reason:
         notes.append(state_reason)
+    cooldown_sec = custom_info.get("stoploss_cooldown_remaining_sec")
+    if cooldown_sec is not None and cooldown_sec > 0:
+        notes.append(f"StopLoss cooldown: {format_number(cooldown_sec, 0)}s")
 
     return {
         "signals": " | ".join(signals),
@@ -415,6 +439,10 @@ def build_lp_position_rows(performance: Dict[str, Any], config_map: Dict[str, An
             continue
         custom_info = inner_dict.get("custom_info", {})
         positions = custom_info.get("lp_positions")
+        source = "lp_positions"
+        if not isinstance(positions, list) or not positions:
+            positions = custom_info.get("active_lp")
+            source = "active_lp"
         if not isinstance(positions, list) or not positions:
             continue
 
@@ -425,6 +453,26 @@ def build_lp_position_rows(performance: Dict[str, Any], config_map: Dict[str, An
         for pos in positions:
             if not isinstance(pos, dict):
                 continue
+            if source == "active_lp":
+                in_range = pos.get("in_range")
+                if in_range is True:
+                    state = "IN_RANGE"
+                elif in_range is False:
+                    state = "OUT_OF_RANGE"
+                else:
+                    state = "-"
+                rows.append({
+                    "Controller": controller_name,
+                    "Pair": trading_pair or "-",
+                    "State": state,
+                    "Position": pos.get("executor_id") or "-",
+                    "Lower": format_number(pos.get("lower_price"), 6),
+                    "Upper": format_number(pos.get("upper_price"), 6),
+                    "Base": "-",
+                    "Quote": "-",
+                    "Value ($)": format_number(pos.get("position_value_quote"), 2),
+                })
+                continue
             rows.append({
                 "Controller": controller_name,
                 "Pair": trading_pair or "-",
@@ -434,6 +482,7 @@ def build_lp_position_rows(performance: Dict[str, Any], config_map: Dict[str, An
                 "Upper": format_number(pos.get("upper"), 6),
                 "Base": format_number(pos.get("base"), 4),
                 "Quote": format_number(pos.get("quote"), 4),
+                "Value ($)": format_number(pos.get("value_quote"), 2),
             })
 
     return rows

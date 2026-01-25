@@ -1,5 +1,5 @@
 from decimal import Decimal
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from .components import PoolDomainAdapter
 from .range_calculator import RangeCalculator, RangePlan
@@ -19,6 +19,14 @@ class CLMMPolicyBase:
 
     def quote_per_base_ratio(self, price: Decimal, lower: Decimal, upper: Decimal) -> Optional[Decimal]:
         raise NotImplementedError
+
+    def target_amounts_from_value(
+        self,
+        value_quote: Decimal,
+        price: Decimal,
+        ratio_quote_per_base: Decimal,
+    ) -> Optional[Tuple[Decimal, Decimal]]:
+        return V3Math.target_amounts_from_value(value_quote, price, ratio_quote_per_base)
 
     def extra_lp_params(self) -> Optional[Dict]:
         return None

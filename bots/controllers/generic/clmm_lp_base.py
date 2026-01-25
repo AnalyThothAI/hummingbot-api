@@ -3,7 +3,7 @@ import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
-from typing import Callable, Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from pydantic import Field
 
@@ -17,7 +17,6 @@ from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPP
 from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction, StopExecutorAction
 
-from .clmm_lp_domain.cost_filter import CostFilter
 from .clmm_lp_domain.components import (
     BudgetAnchor,
     ControllerContext,
@@ -35,11 +34,11 @@ from .clmm_lp_domain.components import (
     SwapPurpose,
     PoolDomainAdapter,
 )
+from .clmm_lp_domain.cost_filter import CostFilter
 from .clmm_lp_domain.runtime import ActionFactory, BalanceManager, SnapshotBuilder
 from .clmm_lp_domain.open_planner import OpenProposal, plan_open
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
 from .clmm_lp_domain.policies import CLMMPolicyBase
-from .clmm_lp_domain.v3_math import V3Math
 
 Rule = Callable[[Snapshot, ControllerContext, Regions], Optional[Decision]]
 ReconcileHandler = Callable[[Snapshot], None]
@@ -606,6 +605,11 @@ class CLMMLPBaseController(ControllerBase):
 
     def _compute_regions(self, snapshot: Snapshot) -> Regions:
         label = self._select_active_swap_label(snapshot.active_swaps)
+        gate_flow = IntentFlow.ENTRY
+        if self._ctx.stoploss.pending_liquidation:
+            gate_flow = IntentFlow.STOPLOSS
+        if self._ctx.rebalance.plans:
+            gate_flow = IntentFlow.REBALANCE
         return Regions(
             manual_stop=bool(self.config.manual_kill_switch),
             failure_blocked=bool(self._ctx.failure.blocked),
@@ -620,6 +624,7 @@ class CLMMLPBaseController(ControllerBase):
             reenter_blocked=(
                 (not self.config.reenter_enabled) and self._ctx.stoploss.last_exit_reason == "stop_loss"
             ),
+            gate_flow=gate_flow,
         )
 
     @staticmethod
@@ -737,12 +742,9 @@ class CLMMLPBaseController(ControllerBase):
         if not regions.has_active_swaps:
             return None
         label = regions.active_swap_label or "swap"
+        flow = regions.gate_flow
         if label == "liquidate":
             flow = IntentFlow.STOPLOSS
-        elif regions.rebalance_pending:
-            flow = IntentFlow.REBALANCE
-        else:
-            flow = IntentFlow.ENTRY
         return Decision(
             intent=Intent(flow=flow, stage=IntentStage.WAIT, reason=f"{label}_in_progress"),
         )
@@ -781,13 +783,7 @@ class CLMMLPBaseController(ControllerBase):
     ) -> Optional[Decision]:
         if not regions.awaiting_balance_refresh:
             return None
-        if regions.rebalance_pending:
-            flow = IntentFlow.REBALANCE
-        elif regions.stoploss_pending_liquidation:
-            flow = IntentFlow.STOPLOSS
-        else:
-            flow = IntentFlow.ENTRY
-        return Decision(intent=Intent(flow=flow, stage=IntentStage.WAIT, reason="wait_balance_refresh"))
+        return Decision(intent=Intent(flow=regions.gate_flow, stage=IntentStage.WAIT, reason="wait_balance_refresh"))
 
     def _rule_stoploss_liquidation(
         self,
@@ -1027,7 +1023,7 @@ class CLMMLPBaseController(ControllerBase):
         if effective_budget <= 0:
             return None, "insufficient_balance"
 
-        targets = V3Math.target_amounts_from_value(effective_budget, current_price, ratio)
+        targets = self._policy.target_amounts_from_value(effective_budget, current_price, ratio)
         if targets is None:
             return None, "target_unavailable"
         target_base, target_quote = targets
@@ -1156,10 +1152,10 @@ class CLMMLPBaseController(ControllerBase):
         for executor_id in list(self._ctx.lp.keys()):
             lp_view = snapshot.lp.get(executor_id)
             if lp_view is None or lp_view.is_done:
-                self._remove_lp_context(executor_id)
+                self._ctx.lp.pop(executor_id, None)
         if self._ctx.swap.settled_executor_ids:
             active_swap_ids = set(snapshot.swaps.keys())
-            self._prune_settled_swaps(active_swap_ids)
+            self._ctx.swap.settled_executor_ids.intersection_update(active_swap_ids)
 
     def _reconcile_done_swaps(self, snapshot: Snapshot):
         now = snapshot.now
@@ -1168,7 +1164,7 @@ class CLMMLPBaseController(ControllerBase):
                 continue
             if swap.executor_id in self._ctx.swap.settled_executor_ids:
                 continue
-            self._mark_swap_settled(swap.executor_id)
+            self._ctx.swap.settled_executor_ids.add(swap.executor_id)
 
             if swap.purpose == SwapPurpose.STOPLOSS:
                 self._handle_liquidation_swap(swap, now)
@@ -1183,15 +1179,17 @@ class CLMMLPBaseController(ControllerBase):
             lp_ctx = self._ctx.lp.setdefault(executor_id, LpContext())
             if lp_view.balance_event_seq <= lp_ctx.last_balance_event_seq:
                 continue
-            self._record_lp_balance_event_seq(lp_ctx, lp_view.balance_event_seq)
+            lp_ctx.last_balance_event_seq = lp_view.balance_event_seq
             if lp_view.balance_event_base_delta is None or lp_view.balance_event_quote_delta is None:
-                self._block_failure(
-                    "lp_balance_event_missing",
+                self.logger().error(
                     "lp_balance_event_missing | executor_id=%s seq=%s type=%s",
                     executor_id,
                     lp_view.balance_event_seq,
                     lp_view.balance_event_type,
                 )
+                patch = DecisionPatch()
+                patch.failure.set_reason = "lp_balance_event_missing"
+                self._ctx.apply(patch)
                 continue
             self._balance_manager.request_balance_sync(
                 now=snapshot.now,
@@ -1255,12 +1253,14 @@ class CLMMLPBaseController(ControllerBase):
 
     def _request_swap_balance_sync(self, swap: SwapView, now: float, reason: str) -> None:
         if swap.delta_base is None or swap.delta_quote is None:
-            self._block_failure(
-                "swap_balance_event_missing",
+            self.logger().error(
                 "swap_balance_event_missing | executor_id=%s level_id=%s",
                 swap.executor_id,
                 swap.level_id,
             )
+            patch = DecisionPatch()
+            patch.failure.set_reason = "swap_balance_event_missing"
+            self._ctx.apply(patch)
             return
         self._balance_manager.request_balance_sync(
             now=now,
@@ -1289,20 +1289,3 @@ class CLMMLPBaseController(ControllerBase):
         patch = self._rebalance_engine.reconcile(snapshot, self._ctx)
         if patch is not None:
             self._ctx.apply(patch)
-
-    def _block_failure(self, reason: str, message: str, *args) -> None:
-        self.logger().error(message, *args)
-        self._ctx.failure.blocked = True
-        self._ctx.failure.reason = reason
-
-    def _record_lp_balance_event_seq(self, lp_ctx: LpContext, seq: int) -> None:
-        lp_ctx.last_balance_event_seq = seq
-
-    def _mark_swap_settled(self, executor_id: str) -> None:
-        self._ctx.swap.settled_executor_ids.add(executor_id)
-
-    def _prune_settled_swaps(self, active_swap_ids: Set[str]) -> None:
-        self._ctx.swap.settled_executor_ids.intersection_update(active_swap_ids)
-
-    def _remove_lp_context(self, executor_id: str) -> None:
-        self._ctx.lp.pop(executor_id, None)

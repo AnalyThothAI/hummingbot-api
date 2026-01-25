@@ -198,6 +198,7 @@ class Regions:
     rebalance_pending: bool
     entry_triggered: bool
     reenter_blocked: bool
+    gate_flow: IntentFlow
 
 
 @dataclass(frozen=True)

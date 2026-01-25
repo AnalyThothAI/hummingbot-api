@@ -13,6 +13,7 @@ from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 from .components import (
     BalanceSyncBarrier,
     ControllerContext,
+    DecisionPatch,
     LPView,
     PoolDomainAdapter,
     Snapshot,
@@ -254,8 +255,9 @@ class BalanceManager:
                 now - barrier.created_ts,
                 barrier.attempts,
             )
-            self._ctx.failure.blocked = True
-            self._ctx.failure.reason = "balance_sync_timeout"
+            patch = DecisionPatch()
+            patch.failure.set_reason = "balance_sync_timeout"
+            self._ctx.apply(patch)
 
     def request_balance_sync(
         self,
