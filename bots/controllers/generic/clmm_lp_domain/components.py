@@ -146,6 +146,7 @@ class SwapView:
     is_active: bool
     is_done: bool
     close_type: Optional[CloseType]
+    timestamp: float
     level_id: Optional[str]
     purpose: Optional[SwapPurpose]
     amount: Decimal
@@ -195,6 +196,7 @@ class ControllerContext:
     rebalance_timestamps: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
     pending_lp_id: Optional[str] = None
     pending_swap_id: Optional[str] = None
+    pending_swap_since_ts: float = 0.0
     inventory_swap_attempts: int = 0
     last_inventory_swap_ts: float = 0.0
     stoploss_swap_attempts: int = 0

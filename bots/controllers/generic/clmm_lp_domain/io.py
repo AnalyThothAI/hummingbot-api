@@ -55,6 +55,7 @@ class SnapshotBuilder:
                     is_active=executor.is_active,
                     is_done=executor.is_done,
                     close_type=executor.close_type,
+                    timestamp=float(executor.timestamp or 0),
                     level_id=level_id,
                     purpose=self._swap_purpose(level_id),
                     amount=Decimal(str(getattr(executor.config, "amount", 0))),

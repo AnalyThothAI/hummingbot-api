@@ -15,6 +15,7 @@ EstimatePositionValue = Callable[[LPView, Decimal], Decimal]
 
 
 class CLMMFSM:
+    _pending_swap_grace_sec = 30.0
     def __init__(
         self,
         *,
@@ -94,6 +95,7 @@ class CLMMFSM:
         now = snapshot.now
         ctx.pending_lp_id = None
         ctx.pending_swap_id = None
+        ctx.pending_swap_since_ts = 0.0
         ctx.anchor_value_quote = None
         if not self._can_reenter(ctx):
             return self._stay(ctx, reason="reenter_disabled")
@@ -128,6 +130,9 @@ class CLMMFSM:
             return self._transition(ctx, ControllerState.IDLE, snapshot.now, reason="entry_not_triggered")
         if self._resolve_pending_swap(snapshot, ctx):
             return self._transition(ctx, ControllerState.ENTRY_OPEN, snapshot.now, reason="swap_done")
+        pending_guard = self._guard_pending_swap(snapshot, ctx)
+        if pending_guard is not None:
+            return pending_guard
         if self._inventory_attempts_exhausted(ctx, self._config.max_inventory_swap_attempts):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="swap_attempts_exhausted")
         if not balance_fresh:
@@ -145,6 +150,7 @@ class CLMMFSM:
         if swap_action is None:
             return self._stay(ctx, reason="swap_required")
         ctx.pending_swap_id = swap_action.executor_config.id
+        ctx.pending_swap_since_ts = snapshot.now
         ctx.last_inventory_swap_ts = snapshot.now
         ctx.inventory_swap_attempts += 1
         return Decision(actions=[swap_action], reason="entry_inventory_swap")
@@ -208,6 +214,9 @@ class CLMMFSM:
     def _handle_rebalance_swap(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
         if self._resolve_pending_swap(snapshot, ctx):
             return self._transition(ctx, ControllerState.REBALANCE_OPEN, snapshot.now, reason="swap_done")
+        pending_guard = self._guard_pending_swap(snapshot, ctx)
+        if pending_guard is not None:
+            return pending_guard
         if self._inventory_attempts_exhausted(ctx, self._config.max_inventory_swap_attempts):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="swap_attempts_exhausted")
         if not balance_fresh:
@@ -225,6 +234,7 @@ class CLMMFSM:
         if swap_action is None:
             return self._stay(ctx, reason="swap_required")
         ctx.pending_swap_id = swap_action.executor_config.id
+        ctx.pending_swap_since_ts = snapshot.now
         ctx.last_inventory_swap_ts = snapshot.now
         ctx.inventory_swap_attempts += 1
         return Decision(actions=[swap_action], reason="rebalance_inventory_swap")
@@ -269,6 +279,9 @@ class CLMMFSM:
     def _handle_stoploss_swap(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
         if self._resolve_pending_swap(snapshot, ctx, is_stoploss=True):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="stoploss_swap_done")
+        pending_guard = self._guard_pending_swap(snapshot, ctx)
+        if pending_guard is not None:
+            return pending_guard
         if self._stoploss_attempts_exhausted(ctx, self._config.max_stoploss_liquidation_attempts):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="stoploss_swap_failed")
         if not balance_fresh:
@@ -291,6 +304,7 @@ class CLMMFSM:
         if swap_action is None:
             return self._stay(ctx, reason="stoploss_swap_unavailable")
         ctx.pending_swap_id = swap_action.executor_config.id
+        ctx.pending_swap_since_ts = snapshot.now
         ctx.last_stoploss_swap_ts = snapshot.now
         ctx.stoploss_swap_attempts += 1
         return Decision(actions=[swap_action], reason="stoploss_swap")
@@ -356,9 +370,12 @@ class CLMMFSM:
         if not ctx.pending_swap_id:
             return False
         swap = snapshot.swaps.get(ctx.pending_swap_id)
+        if swap is None:
+            swap = self._find_recent_completed_swap(snapshot, ctx, is_stoploss)
         if swap is None or not swap.is_done:
             return False
         ctx.pending_swap_id = None
+        ctx.pending_swap_since_ts = 0.0
         if swap.close_type != CloseType.COMPLETED:
             return False
         if is_stoploss:
@@ -491,6 +508,7 @@ class CLMMFSM:
             if next_state in {ControllerState.IDLE, ControllerState.COOLDOWN}:
                 ctx.pending_lp_id = None
                 ctx.pending_swap_id = None
+                ctx.pending_swap_since_ts = 0.0
                 ctx.inventory_swap_attempts = 0
                 ctx.stoploss_swap_attempts = 0
         self._record_decision(ctx, reason)
@@ -503,3 +521,34 @@ class CLMMFSM:
     @staticmethod
     def _record_decision(ctx: ControllerContext, reason: str) -> None:
         ctx.last_decision_reason = reason
+
+    def _guard_pending_swap(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[Decision]:
+        if not ctx.pending_swap_id:
+            return None
+        swap = snapshot.swaps.get(ctx.pending_swap_id)
+        if swap is not None and not swap.is_done:
+            return self._stay(ctx, reason="swap_pending")
+        if ctx.pending_swap_since_ts <= 0:
+            return self._stay(ctx, reason="swap_pending")
+        if (snapshot.now - ctx.pending_swap_since_ts) < self._pending_swap_grace_sec:
+            return self._stay(ctx, reason="swap_pending")
+        ctx.pending_swap_id = None
+        ctx.pending_swap_since_ts = 0.0
+        return None
+
+    def _find_recent_completed_swap(
+        self,
+        snapshot: Snapshot,
+        ctx: ControllerContext,
+        is_stoploss: bool,
+    ) -> Optional[SwapView]:
+        if ctx.pending_swap_since_ts <= 0:
+            return None
+        purpose = SwapPurpose.STOPLOSS if is_stoploss else SwapPurpose.INVENTORY
+        candidates = [
+            swap for swap in snapshot.swaps.values()
+            if swap.purpose == purpose and swap.is_done and swap.timestamp >= ctx.pending_swap_since_ts
+        ]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda swap: swap.timestamp)
