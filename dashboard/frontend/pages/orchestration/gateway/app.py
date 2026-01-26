@@ -270,6 +270,14 @@ def update_session_state(updates: dict):
             st.session_state[key] = value
 
 
+def apply_pending_widget_updates(state_key: str):
+    pending = st.session_state.pop(state_key, None)
+    if isinstance(pending, dict):
+        for key, value in pending.items():
+            if value is not None:
+                st.session_state[key] = value
+
+
 def networks_for_connector(connector_name: str, fallback: list[str]):
     meta = connectors_meta.get(connector_name) if connector_name else None
     if not meta:
@@ -393,6 +401,16 @@ with tabs[0]:
 
     st.markdown("**Add Token**")
     st.caption("EVM chains require checksum addresses (mixed-case).")
+    apply_pending_widget_updates("token_pending_updates")
+    autofill_message = st.session_state.pop("token_autofill_message", None)
+    if autofill_message:
+        st.success(autofill_message)
+    autofill_warnings = st.session_state.pop("token_autofill_warnings", None)
+    if autofill_warnings:
+        st.info(f"Metadata warnings: {', '.join(autofill_warnings)}")
+    checksum_notice = st.session_state.pop("token_checksum_notice", None)
+    if checksum_notice:
+        st.info(checksum_notice)
     network_id = select_network("Network", "token_network", network_options)
     token_address = st.text_input("Token Address", key="token_address")
     symbol = st.text_input("Symbol", key="token_symbol")
@@ -401,6 +419,7 @@ with tabs[0]:
     decimals = st.number_input("Decimals", min_value=0, max_value=36, step=1, value=decimals_value, key="token_decimals")
 
     lookup_address = None
+    pending_updates = {}
     checksum_notice = None
     if network_id and "-" in network_id and token_address:
         chain, _ = split_network_id(network_id)
@@ -411,7 +430,7 @@ with tabs[0]:
             else:
                 lookup_address = checksum_address
                 if checksum_address != token_address:
-                    st.session_state["token_address"] = checksum_address
+                    pending_updates["token_address"] = checksum_address
         elif chain == "solana" and is_valid_solana_address(token_address):
             lookup_address = token_address
 
@@ -429,17 +448,18 @@ with tabs[0]:
         if response.get("ok"):
             payload = response.get("data", {})
             token = payload.get("token", {})
-            update_session_state({
+            pending_updates.update({
                 "token_symbol": token.get("symbol"),
                 "token_name": token.get("name"),
                 "token_decimals": token.get("decimals"),
             })
-            st.success("Token metadata loaded.")
+            st.session_state["token_pending_updates"] = pending_updates
+            st.session_state["token_autofill_message"] = "Token metadata loaded."
             warnings = payload.get("warnings", [])
             if warnings:
-                st.info(f"Metadata warnings: {', '.join(warnings)}")
+                st.session_state["token_autofill_warnings"] = warnings
             if checksum_notice:
-                st.info(checksum_notice)
+                st.session_state["token_checksum_notice"] = checksum_notice
             st.rerun()
         else:
             status_code = response.get("status_code")

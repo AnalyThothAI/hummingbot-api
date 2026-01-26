@@ -17,7 +17,7 @@ native_token_symbol: SOL
 pool_address: 69hDBGDTyY4cVPNTM2TVBfFHNS7H8jfnYyZpWrVqyMvq
 pool_trading_pair: DALE-SOL
 position_value_quote: 0.3
-position_width_pct: 28
+position_width_pct: 45
 ratio_edge_buffer_pct: 0.02
 rebalance_seconds: 60
 reenter_enabled: true
