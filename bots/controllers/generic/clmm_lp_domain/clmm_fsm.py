@@ -21,7 +21,10 @@ from .exit_policy import ExitPolicy
 from .ledger import BalanceLedger, LedgerStatus
 from .rebalance_engine import RebalanceEngine
 
-BuildOpenProposal = Callable[[Optional[Decimal], Decimal, Decimal], Tuple[Optional[OpenProposal], Optional[str]]]
+BuildOpenProposal = Callable[
+    [Optional[Decimal], Decimal, Decimal, Optional[Decimal]],
+    Tuple[Optional[OpenProposal], Optional[str]],
+]
 EstimatePositionValue = Callable[[LPView, Decimal], Decimal]
 
 
@@ -57,6 +60,13 @@ class CLMMFSM:
             return decision
 
         state = ctx.state
+        if self._config.manual_kill_switch and state not in {
+            ControllerState.STOPLOSS_STOP,
+            ControllerState.STOPLOSS_SWAP,
+        }:
+            decision = self._force_manual_stop(snapshot, ctx)
+            self._record_decision(ctx, decision.reason)
+            return decision
         if state == ControllerState.IDLE:
             return self._handle_idle(snapshot, ctx, ledger_status)
         if state == ControllerState.ENTRY_OPEN:
@@ -164,7 +174,7 @@ class CLMMFSM:
             return self._stay(ctx, reason="swap_cooldown")
         if any(snapshot.active_swaps):
             return self._stay(ctx, reason="swap_in_progress")
-        plan = self._build_open_plan(snapshot)
+        plan = self._build_open_plan(snapshot, ctx)
         if plan is None:
             return self._transition(ctx, ControllerState.IDLE, snapshot.now, reason="entry_unavailable")
         if plan.delta_quote_value <= 0 or plan.delta_quote_value < plan.min_swap_value_quote:
@@ -248,7 +258,7 @@ class CLMMFSM:
             return self._stay(ctx, reason="swap_cooldown")
         if any(snapshot.active_swaps):
             return self._stay(ctx, reason="swap_in_progress")
-        plan = self._build_open_plan(snapshot)
+        plan = self._build_open_plan(snapshot, ctx)
         if plan is None:
             return self._transition(ctx, ControllerState.IDLE, snapshot.now, reason="rebalance_unavailable")
         if plan.delta_quote_value <= 0 or plan.delta_quote_value < plan.min_swap_value_quote:
@@ -285,7 +295,7 @@ class CLMMFSM:
         if ctx.pending_lp_id and (now - ctx.state_since_ts) < self._open_timeout_sec():
             return self._stay(ctx, reason="open_in_progress")
         ctx.pending_lp_id = None
-        plan = self._build_open_plan(snapshot)
+        plan = self._build_open_plan(snapshot, ctx)
         if plan is None:
             return self._transition(ctx, ControllerState.IDLE, now, reason="rebalance_unavailable")
         open_action = self._action_factory.build_open_lp_action(plan, now)
@@ -351,7 +361,7 @@ class CLMMFSM:
         return self._transition(ctx, ControllerState.IDLE, now, reason="cooldown_complete")
 
     def _plan_entry_open(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
-        plan = self._build_open_plan(snapshot)
+        plan = self._build_open_plan(snapshot, ctx)
         if plan is None:
             return self._transition(ctx, ControllerState.IDLE, snapshot.now, reason="entry_unavailable")
         if plan.delta_quote_value > 0 and plan.delta_quote_value >= plan.min_swap_value_quote:
@@ -365,11 +375,12 @@ class CLMMFSM:
         ctx.state_since_ts = snapshot.now
         return self._transition(ctx, ControllerState.ENTRY_OPEN, snapshot.now, reason="entry_open", actions=[open_action])
 
-    def _build_open_plan(self, snapshot: Snapshot) -> Optional[OpenProposal]:
+    def _build_open_plan(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[OpenProposal]:
         proposal, _ = self._build_open_proposal(
             snapshot.current_price,
             snapshot.wallet_base,
             snapshot.wallet_quote,
+            ctx.anchor_value_quote,
         )
         return proposal
 
@@ -510,10 +521,29 @@ class CLMMFSM:
             actions=[stop_action],
         )
 
+    def _force_manual_stop(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
+        now = snapshot.now
+        ctx.last_exit_reason = "manual_stop"
+        ctx.anchor_value_quote = None
+        ctx.cooldown_until_ts = 0.0
+
+        lp_view = self._select_lp(snapshot, ctx)
+        actions = []
+        for swap in snapshot.active_swaps:
+            actions.append(StopExecutorAction(controller_id=self._config.id, executor_id=swap.executor_id))
+
+        if lp_view is None or not self._is_lp_open(lp_view):
+            if actions:
+                return self._transition(ctx, ControllerState.STOPLOSS_SWAP, now, reason="manual_stop", actions=actions)
+            if snapshot.wallet_base <= 0:
+                return self._transition(ctx, ControllerState.IDLE, now, reason="manual_stop_complete")
+            return self._transition(ctx, ControllerState.STOPLOSS_SWAP, now, reason="manual_stop")
+
+        ctx.pending_lp_id = lp_view.executor_id
+        actions.insert(0, StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id))
+        return self._transition(ctx, ControllerState.STOPLOSS_STOP, now, reason="manual_stop", actions=actions)
+
     def _anchor_baseline(self, equity: Decimal) -> Decimal:
-        budget_value = max(Decimal("0"), self._config.position_value_quote)
-        if budget_value > 0:
-            return min(budget_value, equity)
         return equity
 
     @staticmethod
@@ -534,19 +564,12 @@ class CLMMFSM:
             return None
         wallet_value = snapshot.wallet_base * current_price + snapshot.wallet_quote
         if lp_view is None:
-            budget_value = max(Decimal("0"), self._config.position_value_quote)
-            if budget_value > 0:
-                return min(wallet_value, budget_value)
             return wallet_value
         return self._compute_equity(snapshot, lp_view, current_price)
 
     def _compute_equity(self, snapshot: Snapshot, lp_view: LPView, current_price: Decimal) -> Optional[Decimal]:
         lp_value = self._estimate_position_value(lp_view, current_price)
         wallet_value = snapshot.wallet_base * current_price + snapshot.wallet_quote
-        budget_value = max(Decimal("0"), self._config.position_value_quote)
-        if budget_value > 0:
-            unallocated = max(Decimal("0"), budget_value - lp_value)
-            return lp_value + min(wallet_value, unallocated)
         return lp_value + wallet_value
 
     def _select_lp(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[LPView]:

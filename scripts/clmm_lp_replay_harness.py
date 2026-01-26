@@ -151,7 +151,7 @@ def _swap_plan_from_wallet(
     wallet_base: Decimal,
     wallet_quote: Decimal,
 ) -> Dict[str, Decimal | TradeType | bool]:
-    proposal, reason = controller._build_open_proposal(price, wallet_base, wallet_quote)
+    proposal, reason = controller._build_open_proposal(price, wallet_base, wallet_quote, None)
     if proposal is None:
         raise RuntimeError(f"open_proposal unavailable: {reason or 'unknown'}")
     delta_base = proposal.delta_base

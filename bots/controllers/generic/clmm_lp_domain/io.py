@@ -151,6 +151,15 @@ class SnapshotBuilder:
         delta = balance_event.get("delta") or {}
         delta_base = self._to_decimal(delta.get("base")) or Decimal("0")
         delta_quote = self._to_decimal(delta.get("quote")) or Decimal("0")
+        inverted = self._domain.executor_token_order_inverted(executor)
+        if inverted is None:
+            inverted = self._domain.pool_order_inverted
+        if inverted:
+            delta_base, delta_quote = self._domain.pool_amounts_to_strategy(
+                delta_base,
+                delta_quote,
+                inverted,
+            )
 
         rent_delta = self._rent_delta(kind_enum, custom)
         if rent_delta != 0:

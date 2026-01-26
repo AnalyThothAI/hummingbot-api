@@ -166,10 +166,23 @@ def handle_action_response(
     return False
 
 
-def stop_container(bot_name: str):
-    response = backend_api_request("POST", f"/docker/stop-container/{bot_name}")
-    if handle_action_response(response, f"Container {bot_name} stopping.", f"Failed to stop container {bot_name}."):
+def stop_strategy(bot_name: str):
+    try:
+        controller_configs = backend_api_client.controllers.get_bot_controller_configs(bot_name)
+    except Exception as e:
+        st.error(f"Failed to load controllers for {bot_name}: {e}")
         return
+    controller_ids = []
+    for config in controller_configs or []:
+        if not isinstance(config, dict):
+            continue
+        controller_name = config.get("_config_name") or config.get("id")
+        if controller_name:
+            controller_ids.append(controller_name)
+    if not controller_ids:
+        st.warning(f"No controllers found for {bot_name}.")
+        return
+    stop_controllers(bot_name, controller_ids)
 
 
 def start_container(bot_name: str):
@@ -959,8 +972,8 @@ def render_overview(instances: List[Dict[str, Any]]):
             container_label = "—"
             container_action = None
             if docker_status == "running":
-                container_label = "⛔ Stop Container"
-                container_action = lambda name=bot_name: stop_container(name)
+                container_label = "⛔ Stop Strategy"
+                container_action = lambda name=bot_name: stop_strategy(name)
             elif docker_status in {"exited", "created", "dead"}:
                 container_label = "▶️ Start Container"
                 container_action = lambda name=bot_name: start_container(name)

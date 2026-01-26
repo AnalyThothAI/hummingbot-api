@@ -386,10 +386,14 @@ class CLMMLPBaseController(ControllerBase):
         current_price: Optional[Decimal],
         wallet_base: Decimal,
         wallet_quote: Decimal,
+        anchor_value_quote: Optional[Decimal],
     ) -> Tuple[Optional[OpenProposal], Optional[str]]:
         if current_price is None or current_price <= 0:
             return None, "price_unavailable"
-        total_value = max(Decimal("0"), self.config.position_value_quote)
+        total_value = anchor_value_quote
+        if total_value is None or total_value <= 0:
+            total_value = self.config.position_value_quote
+        total_value = max(Decimal("0"), total_value)
         if total_value <= 0:
             return None, "budget_unavailable"
         range_plan = self._policy.range_plan(current_price)
