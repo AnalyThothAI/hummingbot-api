@@ -26,11 +26,13 @@ class SnapshotBuilder:
         config: "CLMMLPBaseConfig",
         domain: PoolDomainAdapter,
         market_data_provider,
+        pool_price_provider: Optional[Callable[[], Optional[Decimal]]] = None,
     ) -> None:
         self._controller_id = controller_id
         self._config = config
         self._domain = domain
         self._market_data_provider = market_data_provider
+        self._pool_price_provider = pool_price_provider
 
     def build(
         self,
@@ -204,9 +206,14 @@ class SnapshotBuilder:
 
     def _get_current_price(self) -> Optional[Decimal]:
         price = self._market_data_provider.get_rate(self._config.trading_pair)
-        if price is None:
+        if price is not None:
+            return Decimal(str(price))
+        if self._pool_price_provider is None:
             return None
-        return Decimal(str(price))
+        pool_price = self._pool_price_provider()
+        if pool_price is None:
+            return None
+        return Decimal(str(pool_price))
 
     @staticmethod
     def _to_decimal(value: Optional[object]) -> Optional[Decimal]:
@@ -312,7 +319,81 @@ class BalanceManager:
                 self._domain.base_token,
                 self._domain.quote_token,
                 self._last_balance_update_ts,
-                self._last_balance_attempt_ts,
+            self._last_balance_attempt_ts,
+        )
+
+
+class PoolPriceManager:
+    def __init__(
+        self,
+        *,
+        config: "CLMMLPBaseConfig",
+        domain: PoolDomainAdapter,
+        market_data_provider,
+        logger: Callable[[], HummingbotLogger],
+    ) -> None:
+        self._config = config
+        self._domain = domain
+        self._market_data_provider = market_data_provider
+        self._logger = logger
+
+        self._price: Optional[Decimal] = None
+        self._last_price_ts: float = 0.0
+        self._last_price_attempt_ts: float = 0.0
+        self._price_update_task: Optional[asyncio.Task] = None
+
+    def schedule_refresh(self, now: float) -> None:
+        if self._price_update_task is not None and not self._price_update_task.done():
+            return
+        if (now - self._last_price_attempt_ts) < 1.0:
+            return
+        if self._config.balance_refresh_interval_sec > 0 and self._last_price_ts > 0:
+            if (now - self._last_price_ts) < self._config.balance_refresh_interval_sec:
+                return
+        connector = self._market_data_provider.connectors.get(self._config.connector_name)
+        if connector is None or not hasattr(connector, "get_pool_info"):
+            return
+        self._last_price_attempt_ts = now
+        self._price_update_task = safe_ensure_future(self._update_price(connector))
+        self._price_update_task.add_done_callback(self._clear_price_update_task)
+
+    def get_price(self) -> Optional[Decimal]:
+        if self._price is None or self._last_price_ts <= 0:
+            return None
+        timeout = max(0, self._config.balance_refresh_timeout_sec)
+        if timeout > 0:
+            now = self._market_data_provider.time()
+            if (now - self._last_price_ts) > timeout:
+                return None
+        return self._price
+
+    def _clear_price_update_task(self, task: asyncio.Task) -> None:
+        if self._price_update_task is task:
+            self._price_update_task = None
+
+    async def _update_price(self, connector) -> None:
+        pool_pair = self._config.pool_trading_pair or self._config.trading_pair
+        try:
+            timeout = float(max(1, self._config.balance_update_timeout_sec))
+            pool_info = await asyncio.wait_for(connector.get_pool_info(pool_pair), timeout=timeout)
+            if pool_info is None:
+                return
+            price_value = getattr(pool_info, "price", None)
+            if price_value is None:
+                return
+            pool_price = Decimal(str(price_value))
+            if pool_price <= 0:
+                return
+            pool_price = self._domain.pool_price_to_strategy(pool_price, self._domain.pool_order_inverted)
+            if pool_price <= 0:
+                return
+            self._price = pool_price
+            self._last_price_ts = self._market_data_provider.time()
+        except Exception:
+            self._logger().exception(
+                "pool_price_update_failed | connector=%s pair=%s",
+                self._config.connector_name,
+                pool_pair,
             )
 
 

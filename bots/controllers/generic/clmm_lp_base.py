@@ -21,7 +21,7 @@ from .clmm_lp_domain.policies import CLMMPolicyBase
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
 from .clmm_lp_domain.exit_policy import ExitPolicy
 from .clmm_lp_domain.ledger import BalanceLedger
-from .clmm_lp_domain.io import ActionFactory, BalanceManager, SnapshotBuilder
+from .clmm_lp_domain.io import ActionFactory, BalanceManager, PoolPriceManager, SnapshotBuilder
 
 
 class CLMMLPBaseConfig(ControllerConfigBase):
@@ -104,6 +104,12 @@ class CLMMLPBaseController(ControllerBase):
             market_data_provider=self.market_data_provider,
             logger=self.logger,
         )
+        self._pool_price_manager = PoolPriceManager(
+            config=self.config,
+            domain=self._domain,
+            market_data_provider=self.market_data_provider,
+            logger=self.logger,
+        )
         self._ledger = BalanceLedger(logger=self.logger)
         self._ledger_status = None
         self._action_factory = ActionFactory(
@@ -119,6 +125,7 @@ class CLMMLPBaseController(ControllerBase):
             config=self.config,
             domain=self._domain,
             market_data_provider=self.market_data_provider,
+            pool_price_provider=self._pool_price_manager.get_price,
         )
         self._rebalance_engine = RebalanceEngine(
             config=self.config,
@@ -153,6 +160,7 @@ class CLMMLPBaseController(ControllerBase):
     async def update_processed_data(self):
         now = self.market_data_provider.time()
         self._balance_manager.schedule_refresh(now)
+        self._pool_price_manager.schedule_refresh(now)
         snapshot = self._refresh_snapshot(now)
         self._latest_snapshot = snapshot
         self._update_fee_rate_estimates(snapshot)
@@ -308,6 +316,7 @@ class CLMMLPBaseController(ControllerBase):
 
     def _refresh_snapshot(self, now: float) -> Snapshot:
         self._balance_manager.schedule_refresh(now)
+        self._pool_price_manager.schedule_refresh(now)
         raw_snapshot = self._build_snapshot(
             now,
             wallet_base=self._balance_manager.wallet_base,
