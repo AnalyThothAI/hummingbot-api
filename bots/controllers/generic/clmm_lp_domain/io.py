@@ -8,9 +8,10 @@ from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy_v2.executors.gateway_swap_executor.data_types import GatewaySwapExecutorConfig
 from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionExecutorConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction
+from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
-from .components import LPView, PoolDomainAdapter, Snapshot, SwapPurpose, SwapView
+from .components import BalanceEvent, BalanceEventKind, LPView, PoolDomainAdapter, Snapshot, SwapPurpose, SwapView
 
 if TYPE_CHECKING:
     from ..clmm_lp_base import CLMMLPBaseConfig
@@ -38,16 +39,26 @@ class SnapshotBuilder:
         executors_info: List[ExecutorInfo],
         wallet_base: Decimal,
         wallet_quote: Decimal,
+        snapshot_wallet_base: Optional[Decimal] = None,
+        snapshot_wallet_quote: Optional[Decimal] = None,
     ) -> Snapshot:
         current_price = self._get_current_price()
+        if snapshot_wallet_base is None:
+            snapshot_wallet_base = wallet_base
+        if snapshot_wallet_quote is None:
+            snapshot_wallet_quote = wallet_quote
 
         lp: Dict[str, LPView] = {}
         swaps: Dict[str, SwapView] = {}
+        balance_events: List[BalanceEvent] = []
         for executor in executors_info:
             if executor.controller_id != self._controller_id:
                 continue
             if executor.type == "lp_position_executor":
                 lp[executor.id] = self._parse_lp_view(executor)
+                lp_event = self._parse_lp_balance_event(executor, now)
+                if lp_event is not None:
+                    balance_events.append(lp_event)
             elif executor.type == "gateway_swap_executor":
                 level_id = getattr(executor.config, "level_id", None)
                 swaps[executor.id] = SwapView(
@@ -60,6 +71,9 @@ class SnapshotBuilder:
                     purpose=self._swap_purpose(level_id),
                     amount=Decimal(str(getattr(executor.config, "amount", 0))),
                 )
+                swap_event = self._parse_swap_balance_event(executor, now)
+                if swap_event is not None:
+                    balance_events.append(swap_event)
 
         active_lp = [v for v in lp.values() if v.is_active]
         active_swaps = [v for v in swaps.values() if v.is_active]
@@ -68,10 +82,13 @@ class SnapshotBuilder:
             current_price=current_price,
             wallet_base=wallet_base,
             wallet_quote=wallet_quote,
+            snapshot_wallet_base=snapshot_wallet_base,
+            snapshot_wallet_quote=snapshot_wallet_quote,
             lp=lp,
             swaps=swaps,
             active_lp=active_lp,
             active_swaps=active_swaps,
+            balance_events=balance_events,
         )
 
     def _parse_lp_view(self, executor: ExecutorInfo) -> LPView:
@@ -116,6 +133,74 @@ class SnapshotBuilder:
             current_price=price,
             out_of_range_since=out_of_range_since,
         )
+
+    def _parse_lp_balance_event(self, executor: ExecutorInfo, now: float) -> Optional[BalanceEvent]:
+        custom = executor.custom_info or {}
+        balance_event = custom.get("balance_event")
+        if not isinstance(balance_event, dict):
+            return None
+        kind = balance_event.get("type")
+        try:
+            kind_enum = BalanceEventKind(kind)
+        except (TypeError, ValueError):
+            return None
+        if kind_enum not in {BalanceEventKind.LP_OPEN, BalanceEventKind.LP_CLOSE}:
+            return None
+        delta = balance_event.get("delta") or {}
+        delta_base = self._to_decimal(delta.get("base")) or Decimal("0")
+        delta_quote = self._to_decimal(delta.get("quote")) or Decimal("0")
+
+        rent_delta = self._rent_delta(kind_enum, custom)
+        if rent_delta != 0:
+            native_token = self._config.native_token_symbol
+            if native_token == self._domain.base_token:
+                delta_base += rent_delta
+            elif native_token == self._domain.quote_token:
+                delta_quote += rent_delta
+
+        timestamp = balance_event.get("timestamp")
+        if timestamp is None or float(timestamp) <= 0:
+            timestamp = executor.close_timestamp or executor.timestamp or now
+        timestamp = float(timestamp)
+        seq = balance_event.get("seq")
+        event_id = f"{executor.id}:{seq}" if seq is not None else f"{executor.id}:{kind_enum.value}:{int(timestamp * 1000)}"
+        return BalanceEvent(
+            event_id=event_id,
+            executor_id=executor.id,
+            timestamp=timestamp,
+            kind=kind_enum,
+            delta_base=delta_base,
+            delta_quote=delta_quote,
+        )
+
+    def _parse_swap_balance_event(self, executor: ExecutorInfo, now: float) -> Optional[BalanceEvent]:
+        if not executor.is_done or executor.close_type != CloseType.COMPLETED:
+            return None
+        custom = executor.custom_info or {}
+        delta_base = self._to_decimal(custom.get("delta_base"))
+        delta_quote = self._to_decimal(custom.get("delta_quote"))
+        if delta_base is None or delta_quote is None:
+            return None
+        timestamp = float(executor.close_timestamp or executor.timestamp or now)
+        event_id = f"{executor.id}:{BalanceEventKind.SWAP.value}"
+        return BalanceEvent(
+            event_id=event_id,
+            executor_id=executor.id,
+            timestamp=timestamp,
+            kind=BalanceEventKind.SWAP,
+            delta_base=delta_base,
+            delta_quote=delta_quote,
+        )
+
+    @staticmethod
+    def _rent_delta(kind: BalanceEventKind, custom: Dict) -> Decimal:
+        if kind == BalanceEventKind.LP_OPEN:
+            rent = SnapshotBuilder._to_decimal(custom.get("position_rent")) or Decimal("0")
+            return -rent
+        if kind == BalanceEventKind.LP_CLOSE:
+            rent = SnapshotBuilder._to_decimal(custom.get("position_rent_refunded")) or Decimal("0")
+            return rent
+        return Decimal("0")
 
     def _get_current_price(self) -> Optional[Decimal]:
         price = self._market_data_provider.get_rate(self._config.trading_pair)

@@ -26,6 +26,22 @@ class SwapPurpose(str, Enum):
     STOPLOSS = "liquidate"
 
 
+class BalanceEventKind(str, Enum):
+    LP_OPEN = "open"
+    LP_CLOSE = "close"
+    SWAP = "swap"
+
+
+@dataclass(frozen=True)
+class BalanceEvent:
+    event_id: str
+    executor_id: str
+    timestamp: float
+    kind: BalanceEventKind
+    delta_base: Decimal
+    delta_quote: Decimal
+
+
 @dataclass(frozen=True)
 class PoolDomainAdapter:
     trading_pair: str
@@ -158,10 +174,13 @@ class Snapshot:
     current_price: Optional[Decimal]
     wallet_base: Decimal
     wallet_quote: Decimal
+    snapshot_wallet_base: Decimal
+    snapshot_wallet_quote: Decimal
     lp: Dict[str, LPView]
     swaps: Dict[str, SwapView]
     active_lp: List[LPView]
     active_swaps: List[SwapView]
+    balance_events: List[BalanceEvent]
 
 
 @dataclass(frozen=True)

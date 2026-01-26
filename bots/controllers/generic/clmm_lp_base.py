@@ -20,6 +20,7 @@ from .clmm_lp_domain.clmm_fsm import CLMMFSM
 from .clmm_lp_domain.policies import CLMMPolicyBase
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
 from .clmm_lp_domain.exit_policy import ExitPolicy
+from .clmm_lp_domain.ledger import BalanceLedger
 from .clmm_lp_domain.io import ActionFactory, BalanceManager, SnapshotBuilder
 
 
@@ -103,6 +104,8 @@ class CLMMLPBaseController(ControllerBase):
             market_data_provider=self.market_data_provider,
             logger=self.logger,
         )
+        self._ledger = BalanceLedger(logger=self.logger)
+        self._ledger_status = None
         self._action_factory = ActionFactory(
             config=self.config,
             domain=self._domain,
@@ -129,6 +132,7 @@ class CLMMLPBaseController(ControllerBase):
             estimate_position_value=self._estimate_position_value,
             rebalance_engine=self._rebalance_engine,
             exit_policy=self._exit_policy,
+            ledger=self._ledger,
         )
         self._latest_snapshot: Optional[Snapshot] = None
 
@@ -149,7 +153,7 @@ class CLMMLPBaseController(ControllerBase):
     async def update_processed_data(self):
         now = self.market_data_provider.time()
         self._balance_manager.schedule_refresh(now)
-        snapshot = self._build_snapshot(now)
+        snapshot = self._refresh_snapshot(now)
         self._latest_snapshot = snapshot
         self._update_fee_rate_estimates(snapshot)
 
@@ -167,15 +171,24 @@ class CLMMLPBaseController(ControllerBase):
     def determine_executor_actions(self) -> List[ExecutorAction]:
         snapshot = self._latest_snapshot
         if snapshot is None:
-            snapshot = self._build_snapshot(self.market_data_provider.time())
+            snapshot = self._refresh_snapshot(self.market_data_provider.time())
         self._latest_snapshot = None
-        balance_fresh = self._balance_manager.is_fresh(snapshot.now)
-        decision = self._fsm.step(snapshot, self._ctx, balance_fresh)
+        ledger_status = self._ledger_status
+        if ledger_status is None:
+            ledger_status = self._ledger.update(
+                events=snapshot.balance_events,
+                snapshot_base=snapshot.snapshot_wallet_base,
+                snapshot_quote=snapshot.snapshot_wallet_quote,
+                snapshot_fresh=self._balance_manager.is_fresh(snapshot.now),
+                now=snapshot.now,
+            )
+            self._ledger_status = ledger_status
+        decision = self._fsm.step(snapshot, self._ctx, ledger_status)
         self._log_decision_actions(decision)
         return decision.actions
 
     def get_custom_info(self) -> Dict:
-        snapshot = self._latest_snapshot or self._build_snapshot(self.market_data_provider.time())
+        snapshot = self._latest_snapshot or self._refresh_snapshot(self.market_data_provider.time())
         nav = self._compute_nav(snapshot)
         if nav is None:
             return {}
@@ -195,10 +208,16 @@ class CLMMLPBaseController(ControllerBase):
             "nav_wallet_quote": float(wallet_value),
             "wallet_base": float(snapshot.wallet_base),
             "wallet_quote": float(snapshot.wallet_quote),
+            "snapshot_wallet_base": float(snapshot.snapshot_wallet_base),
+            "snapshot_wallet_quote": float(snapshot.snapshot_wallet_quote),
             "active_lp_count": len(snapshot.active_lp),
             "active_swap_count": len(snapshot.active_swaps),
             "balance_fresh": self._balance_manager.is_fresh(now),
         }
+        if self._ledger_status is not None:
+            info["ledger_recent"] = self._ledger_status.is_recent
+            info["ledger_reconciled"] = self._ledger_status.is_reconciled
+            info["ledger_needs_reconcile"] = self._ledger_status.needs_reconcile
         if current_price is not None:
             info["price"] = float(current_price)
         if budget_value > 0:
@@ -211,23 +230,25 @@ class CLMMLPBaseController(ControllerBase):
             info["cooldown_remaining_sec"] = cooldown_remaining
 
         if snapshot.active_lp:
-            lp_view = snapshot.active_lp[0]
-            in_range = None
-            position_value = None
-            if current_price is not None:
-                position_value = self._estimate_position_value(lp_view, current_price)
-                if lp_view.lower_price is not None and lp_view.upper_price is not None:
-                    in_range = lp_view.lower_price <= current_price <= lp_view.upper_price
-            info["active_lp"] = {
-                "executor_id": lp_view.executor_id,
-                "lower_price": _as_float(lp_view.lower_price),
-                "upper_price": _as_float(lp_view.upper_price),
-                "in_range": in_range,
-                "position_value_quote": _as_float(position_value),
-                "base": _as_float(abs(lp_view.base_amount)),
-                "quote": _as_float(abs(lp_view.quote_amount)),
-                "out_of_range_since": lp_view.out_of_range_since,
-            }
+            active_positions = []
+            for lp_view in snapshot.active_lp:
+                in_range = None
+                position_value = None
+                if current_price is not None:
+                    position_value = self._estimate_position_value(lp_view, current_price)
+                    if lp_view.lower_price is not None and lp_view.upper_price is not None:
+                        in_range = lp_view.lower_price <= current_price <= lp_view.upper_price
+                active_positions.append({
+                    "executor_id": lp_view.executor_id,
+                    "lower_price": _as_float(lp_view.lower_price),
+                    "upper_price": _as_float(lp_view.upper_price),
+                    "in_range": in_range,
+                    "position_value_quote": _as_float(position_value),
+                    "base": _as_float(abs(lp_view.base_amount)),
+                    "quote": _as_float(abs(lp_view.quote_amount)),
+                    "out_of_range_since": lp_view.out_of_range_since,
+                })
+            info["active_lp"] = active_positions
         return info
 
     def _log_decision_actions(self, decision) -> None:
@@ -240,13 +261,63 @@ class CLMMLPBaseController(ControllerBase):
             len(decision.actions),
         )
 
-    def _build_snapshot(self, now: float) -> Snapshot:
+    def _build_snapshot(
+        self,
+        now: float,
+        *,
+        wallet_base: Decimal,
+        wallet_quote: Decimal,
+        snapshot_wallet_base: Decimal,
+        snapshot_wallet_quote: Decimal,
+    ) -> Snapshot:
         return self._snapshot_builder.build(
             now=now,
             executors_info=self.executors_info,
+            wallet_base=wallet_base,
+            wallet_quote=wallet_quote,
+            snapshot_wallet_base=snapshot_wallet_base,
+            snapshot_wallet_quote=snapshot_wallet_quote,
+        )
+
+    @staticmethod
+    def _snapshot_with_ledger(raw_snapshot: Snapshot, ledger_base: Decimal, ledger_quote: Decimal) -> Snapshot:
+        return Snapshot(
+            now=raw_snapshot.now,
+            current_price=raw_snapshot.current_price,
+            wallet_base=ledger_base,
+            wallet_quote=ledger_quote,
+            snapshot_wallet_base=raw_snapshot.snapshot_wallet_base,
+            snapshot_wallet_quote=raw_snapshot.snapshot_wallet_quote,
+            lp=raw_snapshot.lp,
+            swaps=raw_snapshot.swaps,
+            active_lp=raw_snapshot.active_lp,
+            active_swaps=raw_snapshot.active_swaps,
+            balance_events=raw_snapshot.balance_events,
+        )
+
+    def _refresh_snapshot(self, now: float) -> Snapshot:
+        self._balance_manager.schedule_refresh(now)
+        raw_snapshot = self._build_snapshot(
+            now,
             wallet_base=self._balance_manager.wallet_base,
             wallet_quote=self._balance_manager.wallet_quote,
+            snapshot_wallet_base=self._balance_manager.wallet_base,
+            snapshot_wallet_quote=self._balance_manager.wallet_quote,
         )
+        balance_fresh = self._balance_manager.is_fresh(now)
+        self._ledger_status = self._ledger.update(
+            events=raw_snapshot.balance_events,
+            snapshot_base=raw_snapshot.snapshot_wallet_base,
+            snapshot_quote=raw_snapshot.snapshot_wallet_quote,
+            snapshot_fresh=balance_fresh,
+            now=now,
+        )
+        ledger_base = raw_snapshot.snapshot_wallet_base
+        ledger_quote = raw_snapshot.snapshot_wallet_quote
+        if self._ledger_status is not None and self._ledger_status.has_balance:
+            ledger_base = self._ledger.balance_base
+            ledger_quote = self._ledger.balance_quote
+        return self._snapshot_with_ledger(raw_snapshot, ledger_base, ledger_quote)
 
     def _compute_nav(self, snapshot: Snapshot) -> Optional[Tuple[Decimal, Decimal, Decimal, Decimal]]:
         current_price = snapshot.current_price

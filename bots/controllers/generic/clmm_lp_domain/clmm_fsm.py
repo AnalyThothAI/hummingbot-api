@@ -6,8 +6,19 @@ from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPP
 from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executor_actions import StopExecutorAction
 
-from .components import ControllerContext, ControllerState, Decision, LPView, OpenProposal, Snapshot, SwapPurpose, SwapView
+from .components import (
+    BalanceEventKind,
+    ControllerContext,
+    ControllerState,
+    Decision,
+    LPView,
+    OpenProposal,
+    Snapshot,
+    SwapPurpose,
+    SwapView,
+)
 from .exit_policy import ExitPolicy
+from .ledger import BalanceLedger, LedgerStatus
 from .rebalance_engine import RebalanceEngine
 
 BuildOpenProposal = Callable[[Optional[Decimal], Decimal, Decimal], Tuple[Optional[OpenProposal], Optional[str]]]
@@ -25,6 +36,7 @@ class CLMMFSM:
         estimate_position_value: EstimatePositionValue,
         rebalance_engine: RebalanceEngine,
         exit_policy: ExitPolicy,
+        ledger: BalanceLedger,
     ) -> None:
         self._config = config
         self._action_factory = action_factory
@@ -32,8 +44,9 @@ class CLMMFSM:
         self._estimate_position_value = estimate_position_value
         self._rebalance_engine = rebalance_engine
         self._exit_policy = exit_policy
+        self._ledger = ledger
 
-    def step(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
+    def step(self, snapshot: Snapshot, ctx: ControllerContext, ledger_status: LedgerStatus) -> Decision:
         now = snapshot.now
         if ctx.state_since_ts <= 0:
             ctx.state_since_ts = now
@@ -45,23 +58,23 @@ class CLMMFSM:
 
         state = ctx.state
         if state == ControllerState.IDLE:
-            return self._handle_idle(snapshot, ctx, balance_fresh)
+            return self._handle_idle(snapshot, ctx, ledger_status)
         if state == ControllerState.ENTRY_OPEN:
-            return self._handle_entry_open(snapshot, ctx, balance_fresh)
+            return self._handle_entry_open(snapshot, ctx, ledger_status)
         if state == ControllerState.ENTRY_SWAP:
-            return self._handle_entry_swap(snapshot, ctx, balance_fresh)
+            return self._handle_entry_swap(snapshot, ctx, ledger_status)
         if state == ControllerState.ACTIVE:
-            return self._handle_active(snapshot, ctx)
+            return self._handle_active(snapshot, ctx, ledger_status)
         if state == ControllerState.REBALANCE_STOP:
-            return self._handle_rebalance_stop(snapshot, ctx)
+            return self._handle_rebalance_stop(snapshot, ctx, ledger_status)
         if state == ControllerState.REBALANCE_SWAP:
-            return self._handle_rebalance_swap(snapshot, ctx, balance_fresh)
+            return self._handle_rebalance_swap(snapshot, ctx, ledger_status)
         if state == ControllerState.REBALANCE_OPEN:
-            return self._handle_rebalance_open(snapshot, ctx, balance_fresh)
+            return self._handle_rebalance_open(snapshot, ctx, ledger_status)
         if state == ControllerState.STOPLOSS_STOP:
-            return self._handle_stoploss_stop(snapshot, ctx)
+            return self._handle_stoploss_stop(snapshot, ctx, ledger_status)
         if state == ControllerState.STOPLOSS_SWAP:
-            return self._handle_stoploss_swap(snapshot, ctx, balance_fresh)
+            return self._handle_stoploss_swap(snapshot, ctx, ledger_status)
         if state == ControllerState.COOLDOWN:
             return self._handle_cooldown(snapshot, ctx)
         ctx.state = ControllerState.IDLE
@@ -91,7 +104,7 @@ class CLMMFSM:
                 return Decision(actions=actions, reason="lp_concurrency_guard")
         return None
 
-    def _handle_idle(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
+    def _handle_idle(self, snapshot: Snapshot, ctx: ControllerContext, ledger_status: LedgerStatus) -> Decision:
         now = snapshot.now
         ctx.pending_lp_id = None
         ctx.pending_swap_id = None
@@ -101,15 +114,19 @@ class CLMMFSM:
             return self._stay(ctx, reason="reenter_disabled")
         if not self._is_entry_triggered(snapshot.current_price):
             return self._stay(ctx, reason="idle")
-        if not balance_fresh:
-            return self._stay(ctx, reason="balance_stale")
+        ledger_guard = self._ledger_guard(ctx, ledger_status)
+        if ledger_guard is not None:
+            return ledger_guard
         return self._plan_entry_open(snapshot, ctx)
 
-    def _handle_entry_open(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
+    def _handle_entry_open(self, snapshot: Snapshot, ctx: ControllerContext, ledger_status: LedgerStatus) -> Decision:
         now = snapshot.now
         lp_view = self._select_lp(snapshot, ctx)
+        if ctx.pending_lp_id and self._ledger.has_event(ctx.pending_lp_id, BalanceEventKind.LP_OPEN, ctx.state_since_ts):
+            self._set_anchor_if_ready(snapshot, ctx, lp_view)
+            return self._transition(ctx, ControllerState.ACTIVE, now, reason="entry_opened")
         if lp_view and self._is_lp_open(lp_view):
-            self._set_anchor_if_ready(snapshot, ctx)
+            self._set_anchor_if_ready(snapshot, ctx, lp_view)
             return self._transition(ctx, ControllerState.ACTIVE, now, reason="entry_opened")
         if lp_view and self._is_lp_failed(lp_view):
             ctx.pending_lp_id = None
@@ -118,14 +135,15 @@ class CLMMFSM:
             return self._transition(ctx, ControllerState.IDLE, now, reason="entry_not_triggered")
         if snapshot.active_swaps:
             return self._stay(ctx, reason="swap_in_progress")
-        if not balance_fresh:
-            return self._stay(ctx, reason="balance_stale")
+        ledger_guard = self._ledger_guard(ctx, ledger_status)
+        if ledger_guard is not None:
+            return ledger_guard
         if ctx.pending_lp_id and (now - ctx.state_since_ts) < self._open_timeout_sec():
             return self._stay(ctx, reason="open_in_progress")
         ctx.pending_lp_id = None
         return self._plan_entry_open(snapshot, ctx)
 
-    def _handle_entry_swap(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
+    def _handle_entry_swap(self, snapshot: Snapshot, ctx: ControllerContext, ledger_status: LedgerStatus) -> Decision:
         if not self._is_entry_triggered(snapshot.current_price):
             return self._transition(ctx, ControllerState.IDLE, snapshot.now, reason="entry_not_triggered")
         if self._resolve_pending_swap(snapshot, ctx):
@@ -135,8 +153,9 @@ class CLMMFSM:
             return pending_guard
         if self._inventory_attempts_exhausted(ctx, self._config.max_inventory_swap_attempts):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="swap_attempts_exhausted")
-        if not balance_fresh:
-            return self._stay(ctx, reason="balance_stale")
+        ledger_guard = self._ledger_guard(ctx, ledger_status)
+        if ledger_guard is not None:
+            return ledger_guard
         if self._swap_cooldown_active(ctx.last_inventory_swap_ts, snapshot.now):
             return self._stay(ctx, reason="swap_cooldown")
         if any(snapshot.active_swaps):
@@ -155,7 +174,7 @@ class CLMMFSM:
         ctx.inventory_swap_attempts += 1
         return Decision(actions=[swap_action], reason="entry_inventory_swap")
 
-    def _handle_active(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
+    def _handle_active(self, snapshot: Snapshot, ctx: ControllerContext, ledger_status: LedgerStatus) -> Decision:
         now = snapshot.now
         lp_view = self._select_lp(snapshot, ctx)
         if lp_view is None or not self._is_lp_open(lp_view):
@@ -166,29 +185,15 @@ class CLMMFSM:
             return self._transition(ctx, ControllerState.IDLE, now, reason="lp_failed")
         if self._is_lp_in_transition(lp_view):
             return self._stay(ctx, reason="lp_in_transition")
-        self._set_anchor_if_ready(snapshot, ctx)
-        equity = None
-        if snapshot.current_price is not None and snapshot.current_price > 0:
-            equity = self._compute_equity(snapshot, lp_view, snapshot.current_price)
-        if self._exit_policy.should_stoploss(ctx.anchor_value_quote, equity):
-            ctx.last_exit_reason = "stop_loss"
-            ctx.cooldown_until_ts = now + self._config.stop_loss_pause_sec
-            ctx.pending_lp_id = lp_view.executor_id
-            stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
-            ctx.anchor_value_quote = None
-            return self._transition(
-                ctx,
-                ControllerState.STOPLOSS_STOP,
-                now,
-                reason="stop_loss_triggered",
-                actions=[stop_action],
-            )
+        stoploss_decision = self._maybe_stoploss(snapshot, ctx, lp_view, now, reason="stop_loss_triggered")
+        if stoploss_decision is not None:
+            return stoploss_decision
+        self._set_anchor_if_ready(snapshot, ctx, lp_view)
         signal = self._rebalance_engine.evaluate(snapshot, ctx, lp_view)
         if signal.should_rebalance:
             self._rebalance_engine.record_rebalance(now, ctx)
             ctx.pending_lp_id = lp_view.executor_id
             stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
-            ctx.anchor_value_quote = None
             return self._transition(
                 ctx,
                 ControllerState.REBALANCE_STOP,
@@ -200,18 +205,29 @@ class CLMMFSM:
             return self._stay(ctx, reason="take_profit_signal")
         return self._stay(ctx, reason="active")
 
-    def _handle_rebalance_stop(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
+    def _handle_rebalance_stop(self, snapshot: Snapshot, ctx: ControllerContext, ledger_status: LedgerStatus) -> Decision:
         now = snapshot.now
         lp_view = self._select_lp(snapshot, ctx)
-        if lp_view is None or self._is_lp_closed(lp_view):
+        stoploss_decision = self._maybe_stoploss(snapshot, ctx, lp_view, now, reason="stop_loss_rebalance")
+        if stoploss_decision is not None:
+            return stoploss_decision
+        if ctx.pending_lp_id and self._ledger.has_event(ctx.pending_lp_id, BalanceEventKind.LP_CLOSE, ctx.state_since_ts):
             return self._transition(ctx, ControllerState.REBALANCE_SWAP, now, reason="rebalance_lp_closed")
+        if lp_view is None or self._is_lp_closed(lp_view):
+            if ledger_status.is_reconciled:
+                return self._transition(ctx, ControllerState.REBALANCE_SWAP, now, reason="rebalance_lp_closed")
+            return self._stay(ctx, reason="rebalance_wait_close")
         if self._is_lp_in_transition(lp_view):
             return self._stay(ctx, reason="rebalance_stop_in_transition")
         stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
         ctx.pending_lp_id = lp_view.executor_id
         return self._stay(ctx, reason="rebalance_stop", actions=[stop_action])
 
-    def _handle_rebalance_swap(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
+    def _handle_rebalance_swap(self, snapshot: Snapshot, ctx: ControllerContext, ledger_status: LedgerStatus) -> Decision:
+        lp_view = self._select_lp(snapshot, ctx)
+        stoploss_decision = self._maybe_stoploss(snapshot, ctx, lp_view, snapshot.now, reason="stop_loss_rebalance")
+        if stoploss_decision is not None:
+            return stoploss_decision
         if self._resolve_pending_swap(snapshot, ctx):
             return self._transition(ctx, ControllerState.REBALANCE_OPEN, snapshot.now, reason="swap_done")
         pending_guard = self._guard_pending_swap(snapshot, ctx)
@@ -219,8 +235,9 @@ class CLMMFSM:
             return pending_guard
         if self._inventory_attempts_exhausted(ctx, self._config.max_inventory_swap_attempts):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="swap_attempts_exhausted")
-        if not balance_fresh:
-            return self._stay(ctx, reason="balance_stale")
+        ledger_guard = self._ledger_guard(ctx, ledger_status)
+        if ledger_guard is not None:
+            return ledger_guard
         if self._swap_cooldown_active(ctx.last_inventory_swap_ts, snapshot.now):
             return self._stay(ctx, reason="swap_cooldown")
         if any(snapshot.active_swaps):
@@ -239,19 +256,26 @@ class CLMMFSM:
         ctx.inventory_swap_attempts += 1
         return Decision(actions=[swap_action], reason="rebalance_inventory_swap")
 
-    def _handle_rebalance_open(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
+    def _handle_rebalance_open(self, snapshot: Snapshot, ctx: ControllerContext, ledger_status: LedgerStatus) -> Decision:
         now = snapshot.now
         lp_view = self._select_lp(snapshot, ctx)
+        stoploss_decision = self._maybe_stoploss(snapshot, ctx, lp_view, now, reason="stop_loss_rebalance")
+        if stoploss_decision is not None:
+            return stoploss_decision
+        if ctx.pending_lp_id and self._ledger.has_event(ctx.pending_lp_id, BalanceEventKind.LP_OPEN, ctx.state_since_ts):
+            self._set_anchor_if_ready(snapshot, ctx, lp_view)
+            return self._transition(ctx, ControllerState.ACTIVE, now, reason="rebalance_opened")
         if lp_view and self._is_lp_open(lp_view):
-            self._set_anchor_if_ready(snapshot, ctx)
+            self._set_anchor_if_ready(snapshot, ctx, lp_view)
             return self._transition(ctx, ControllerState.ACTIVE, now, reason="rebalance_opened")
         if lp_view and self._is_lp_failed(lp_view):
             ctx.pending_lp_id = None
             return self._transition(ctx, ControllerState.IDLE, now, reason="lp_failed")
         if snapshot.active_swaps:
             return self._stay(ctx, reason="swap_in_progress")
-        if not balance_fresh:
-            return self._stay(ctx, reason="balance_stale")
+        ledger_guard = self._ledger_guard(ctx, ledger_status)
+        if ledger_guard is not None:
+            return ledger_guard
         if ctx.pending_lp_id and (now - ctx.state_since_ts) < self._open_timeout_sec():
             return self._stay(ctx, reason="open_in_progress")
         ctx.pending_lp_id = None
@@ -265,18 +289,22 @@ class CLMMFSM:
         ctx.state_since_ts = now
         return self._stay(ctx, reason="rebalance_open", actions=[open_action])
 
-    def _handle_stoploss_stop(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
+    def _handle_stoploss_stop(self, snapshot: Snapshot, ctx: ControllerContext, ledger_status: LedgerStatus) -> Decision:
         now = snapshot.now
         lp_view = self._select_lp(snapshot, ctx)
-        if lp_view is None or self._is_lp_closed(lp_view):
+        if ctx.pending_lp_id and self._ledger.has_event(ctx.pending_lp_id, BalanceEventKind.LP_CLOSE, ctx.state_since_ts):
             return self._transition(ctx, ControllerState.STOPLOSS_SWAP, now, reason="stoploss_lp_closed")
+        if lp_view is None or self._is_lp_closed(lp_view):
+            if ledger_status.is_reconciled:
+                return self._transition(ctx, ControllerState.STOPLOSS_SWAP, now, reason="stoploss_lp_closed")
+            return self._stay(ctx, reason="stoploss_wait_close")
         if self._is_lp_in_transition(lp_view):
             return self._stay(ctx, reason="stoploss_stop_in_transition")
         stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
         ctx.pending_lp_id = lp_view.executor_id
         return self._stay(ctx, reason="stoploss_stop", actions=[stop_action])
 
-    def _handle_stoploss_swap(self, snapshot: Snapshot, ctx: ControllerContext, balance_fresh: bool) -> Decision:
+    def _handle_stoploss_swap(self, snapshot: Snapshot, ctx: ControllerContext, ledger_status: LedgerStatus) -> Decision:
         if self._resolve_pending_swap(snapshot, ctx, is_stoploss=True):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="stoploss_swap_done")
         pending_guard = self._guard_pending_swap(snapshot, ctx)
@@ -284,8 +312,9 @@ class CLMMFSM:
             return pending_guard
         if self._stoploss_attempts_exhausted(ctx, self._config.max_stoploss_liquidation_attempts):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="stoploss_swap_failed")
-        if not balance_fresh:
-            return self._stay(ctx, reason="balance_stale")
+        ledger_guard = self._ledger_guard(ctx, ledger_status)
+        if ledger_guard is not None:
+            return ledger_guard
         if self._swap_cooldown_active(ctx.last_stoploss_swap_ts, snapshot.now):
             return self._stay(ctx, reason="swap_cooldown")
         if any(snapshot.active_swaps):
@@ -369,6 +398,14 @@ class CLMMFSM:
     def _resolve_pending_swap(self, snapshot: Snapshot, ctx: ControllerContext, is_stoploss: bool = False) -> bool:
         if not ctx.pending_swap_id:
             return False
+        if self._ledger.has_event(ctx.pending_swap_id, BalanceEventKind.SWAP, ctx.pending_swap_since_ts):
+            ctx.pending_swap_id = None
+            ctx.pending_swap_since_ts = 0.0
+            if is_stoploss:
+                ctx.stoploss_swap_attempts = 0
+            else:
+                ctx.inventory_swap_attempts = 0
+            return True
         swap = snapshot.swaps.get(ctx.pending_swap_id)
         if swap is None:
             swap = self._find_recent_completed_swap(snapshot, ctx, is_stoploss)
@@ -415,19 +452,85 @@ class CLMMFSM:
             return current_price >= self._config.target_price
         return current_price <= self._config.target_price
 
-    def _set_anchor_if_ready(self, snapshot: Snapshot, ctx: ControllerContext) -> None:
+    def _set_anchor_if_ready(self, snapshot: Snapshot, ctx: ControllerContext, lp_view: Optional[LPView]) -> None:
         if ctx.anchor_value_quote is not None:
             return
-        current_price = snapshot.current_price
+        current_price = self._effective_price(snapshot, lp_view)
         if current_price is None or current_price <= 0:
             return
-        lp_view = self._select_lp(snapshot, ctx)
-        if lp_view is None:
-            return
-        equity = self._compute_equity(snapshot, lp_view, current_price)
+        equity = self._compute_equity_value(snapshot, lp_view, current_price)
         if equity is None or equity <= 0:
             return
         ctx.anchor_value_quote = equity
+
+    def _maybe_stoploss(
+        self,
+        snapshot: Snapshot,
+        ctx: ControllerContext,
+        lp_view: Optional[LPView],
+        now: float,
+        *,
+        reason: str,
+    ) -> Optional[Decision]:
+        current_price = self._effective_price(snapshot, lp_view)
+        if current_price is None or current_price <= 0:
+            return None
+        equity = self._compute_equity_value(snapshot, lp_view, current_price)
+        if equity is None:
+            return None
+        if ctx.anchor_value_quote is None:
+            ctx.anchor_value_quote = self._anchor_baseline(equity)
+        if not self._exit_policy.should_stoploss(ctx.anchor_value_quote, equity):
+            return None
+        ctx.last_exit_reason = "stop_loss"
+        ctx.cooldown_until_ts = now + self._config.stop_loss_pause_sec
+        ctx.anchor_value_quote = None
+        if lp_view is None or self._is_lp_closed(lp_view):
+            return self._transition(
+                ctx,
+                ControllerState.STOPLOSS_SWAP,
+                now,
+                reason=reason,
+            )
+        ctx.pending_lp_id = lp_view.executor_id
+        stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
+        return self._transition(
+            ctx,
+            ControllerState.STOPLOSS_STOP,
+            now,
+            reason=reason,
+            actions=[stop_action],
+        )
+
+    def _anchor_baseline(self, equity: Decimal) -> Decimal:
+        budget_value = max(Decimal("0"), self._config.position_value_quote)
+        if budget_value > 0:
+            return min(budget_value, equity)
+        return equity
+
+    @staticmethod
+    def _effective_price(snapshot: Snapshot, lp_view: Optional[LPView]) -> Optional[Decimal]:
+        if snapshot.current_price is not None and snapshot.current_price > 0:
+            return snapshot.current_price
+        if lp_view is not None and lp_view.current_price is not None and lp_view.current_price > 0:
+            return lp_view.current_price
+        return None
+
+    def _compute_equity_value(
+        self,
+        snapshot: Snapshot,
+        lp_view: Optional[LPView],
+        current_price: Decimal,
+    ) -> Optional[Decimal]:
+        if current_price <= 0:
+            return None
+        wallet_value = snapshot.wallet_base * current_price + snapshot.wallet_quote
+        if lp_view is None:
+            budget_value = max(Decimal("0"), self._config.position_value_quote)
+            if budget_value > 0:
+                return min(wallet_value, budget_value)
+            return wallet_value
+        return self._compute_equity(snapshot, lp_view, current_price)
 
     def _compute_equity(self, snapshot: Snapshot, lp_view: LPView, current_price: Decimal) -> Optional[Decimal]:
         lp_value = self._estimate_position_value(lp_view, current_price)
@@ -493,6 +596,13 @@ class CLMMFSM:
         if self._config.reenter_enabled:
             return True
         return ctx.last_exit_reason != "stop_loss"
+
+    def _ledger_guard(self, ctx: ControllerContext, ledger_status: Optional[LedgerStatus]) -> Optional[Decision]:
+        if ledger_status is None or not ledger_status.has_balance:
+            return self._stay(ctx, reason="ledger_not_ready")
+        if ledger_status.needs_reconcile:
+            return self._stay(ctx, reason="ledger_stale")
+        return None
 
     def _transition(
         self,
