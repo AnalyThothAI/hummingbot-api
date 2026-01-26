@@ -109,7 +109,11 @@ class CLMMFSM:
         ctx.pending_lp_id = None
         ctx.pending_swap_id = None
         ctx.pending_swap_since_ts = 0.0
-        ctx.anchor_value_quote = None
+        lp_view = self._select_lp(snapshot, ctx)
+        if ctx.anchor_value_quote is not None:
+            stoploss_decision = self._maybe_stoploss(snapshot, ctx, lp_view, now, reason="stop_loss_idle")
+            if stoploss_decision is not None:
+                return stoploss_decision
         if not self._can_reenter(ctx):
             return self._stay(ctx, reason="reenter_disabled")
         if not self._is_entry_triggered(snapshot.current_price):
@@ -178,10 +182,8 @@ class CLMMFSM:
         now = snapshot.now
         lp_view = self._select_lp(snapshot, ctx)
         if lp_view is None or not self._is_lp_open(lp_view):
-            ctx.anchor_value_quote = None
             return self._transition(ctx, ControllerState.IDLE, now, reason="lp_missing")
         if self._is_lp_failed(lp_view):
-            ctx.anchor_value_quote = None
             return self._transition(ctx, ControllerState.IDLE, now, reason="lp_failed")
         if self._is_lp_in_transition(lp_view):
             return self._stay(ctx, reason="lp_in_transition")
@@ -189,6 +191,10 @@ class CLMMFSM:
         if stoploss_decision is not None:
             return stoploss_decision
         self._set_anchor_if_ready(snapshot, ctx, lp_view)
+        current_price = self._effective_price(snapshot, lp_view)
+        equity = None
+        if current_price is not None and current_price > 0:
+            equity = self._compute_equity_value(snapshot, lp_view, current_price)
         signal = self._rebalance_engine.evaluate(snapshot, ctx, lp_view)
         if signal.should_rebalance:
             self._rebalance_engine.record_rebalance(now, ctx)
@@ -405,6 +411,7 @@ class CLMMFSM:
                 ctx.stoploss_swap_attempts = 0
             else:
                 ctx.inventory_swap_attempts = 0
+                self._set_anchor_if_ready(snapshot, ctx, self._select_lp(snapshot, ctx))
             return True
         swap = snapshot.swaps.get(ctx.pending_swap_id)
         if swap is None:
@@ -419,6 +426,7 @@ class CLMMFSM:
             ctx.stoploss_swap_attempts = 0
         else:
             ctx.inventory_swap_attempts = 0
+            self._set_anchor_if_ready(snapshot, ctx, self._select_lp(snapshot, ctx))
         return True
 
     def _inventory_attempts_exhausted(self, ctx: ControllerContext, max_attempts: int) -> bool:

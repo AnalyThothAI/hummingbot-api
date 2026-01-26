@@ -130,7 +130,7 @@ GeckoTerminal / Meteora (由 Gateway 内部调用)
 ## 8. Dashboard 交互变更
 
 - Add Token：填写 network + address 后自动回填 `symbol/name/decimals`。
-- Add Pool：输入 token/search 后自动搜索并展示池列表，选择后回填地址/币对/费率；若为 Meteora，展示 `bin_step`。
+- Add Pool：输入 token/search 后自动搜索并展示池列表，支持 TVL/Volume/APY 过滤与排序，选择后回填地址/币对/费率；若为 Meteora，展示 `bin_step`，并提供选中池摘要。
 - 手填流程不受影响。
 
 ## 9. 实现细节（建议模块）

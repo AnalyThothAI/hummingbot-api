@@ -224,6 +224,14 @@ class CLMMLPBaseController(ControllerBase):
             info["nav_budget_quote"] = float(budget_value)
         if self._ctx.anchor_value_quote is not None:
             info["anchor_value_quote"] = float(self._ctx.anchor_value_quote)
+        stoploss_trigger_quote: Optional[Decimal] = None
+        if self._ctx.anchor_value_quote is not None and self.config.stop_loss_pnl_pct > 0:
+            stoploss_trigger_quote = self._ctx.anchor_value_quote * (Decimal("1") - self.config.stop_loss_pnl_pct)
+            info["stoploss_trigger_quote"] = float(stoploss_trigger_quote)
+        fee_rate_ewma_quote_per_hour: Optional[Decimal] = None
+        if self._ctx.fee.fee_rate_ewma is not None:
+            fee_rate_ewma_quote_per_hour = self._ctx.fee.fee_rate_ewma * Decimal("3600")
+            info["fee_rate_ewma_quote_per_hour"] = float(fee_rate_ewma_quote_per_hour)
 
         cooldown_remaining = max(0.0, self._ctx.cooldown_until_ts - now)
         if cooldown_remaining > 0:
@@ -244,6 +252,9 @@ class CLMMLPBaseController(ControllerBase):
                     "upper_price": _as_float(lp_view.upper_price),
                     "in_range": in_range,
                     "position_value_quote": _as_float(position_value),
+                    "anchor_value_quote": _as_float(self._ctx.anchor_value_quote),
+                    "stoploss_trigger_quote": _as_float(stoploss_trigger_quote),
+                    "fee_rate_ewma_quote_per_hour": _as_float(fee_rate_ewma_quote_per_hour),
                     "base": _as_float(abs(lp_view.base_amount)),
                     "quote": _as_float(abs(lp_view.quote_amount)),
                     "out_of_range_since": lp_view.out_of_range_since,

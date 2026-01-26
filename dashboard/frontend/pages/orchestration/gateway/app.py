@@ -254,6 +254,15 @@ def is_valid_solana_address(address: str) -> bool:
     return bool(re.fullmatch(r"[1-9A-HJ-NP-Za-km-z]{32,44}", address))
 
 
+def to_float(value) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def format_api_error(response, fallback: str):
     data = response.get("data", {})
     if isinstance(data, dict):
@@ -262,12 +271,6 @@ def format_api_error(response, fallback: str):
             return detail
     error = response.get("error")
     return error or fallback
-
-
-def update_session_state(updates: dict):
-    for key, value in updates.items():
-        if value is not None:
-            st.session_state[key] = value
 
 
 def apply_pending_widget_updates(state_key: str):
@@ -562,6 +565,10 @@ with tabs[1]:
         set_default_selection("pool_network", "pool_network_ctx", connector_name, default_pool_network)
     network_id = select_network("Network", "pool_network", pool_network_options)
     pool_type = st.selectbox("Pool Type", ["clmm", "amm"], key="pool_type")
+    apply_pending_widget_updates("pool_pending_updates")
+    pool_autofill_message = st.session_state.pop("pool_autofill_message", None)
+    if pool_autofill_message:
+        st.success(pool_autofill_message)
 
     pool_search_context = f"{connector_name}|{network_id}|{pool_type}"
     if st.session_state.get("pool_search_context") != pool_search_context:
@@ -587,6 +594,24 @@ with tabs[1]:
         pages = st.number_input("Pages", min_value=1, max_value=10, value=1, step=1, key="pool_search_pages")
     with options_cols[1]:
         limit = st.number_input("Limit", min_value=1, max_value=200, value=50, step=1, key="pool_search_limit")
+
+    st.markdown("**Filters & Sorting**")
+    filter_cols = st.columns(4)
+    with filter_cols[0]:
+        min_tvl = st.number_input("Min TVL (USD)", min_value=0.0, step=1000.0, value=0.0, key="pool_filter_min_tvl")
+    with filter_cols[1]:
+        min_volume = st.number_input("Min Volume 24h (USD)", min_value=0.0, step=1000.0, value=0.0, key="pool_filter_min_volume")
+    with filter_cols[2]:
+        min_apy = st.number_input("Min APY %", min_value=0.0, step=1.0, value=0.0, key="pool_filter_min_apy")
+    with filter_cols[3]:
+        sort_options = [
+            "TVL (desc)",
+            "Volume 24h (desc)",
+            "APY (desc)",
+            "APR (desc)",
+            "Fee % (asc)",
+        ]
+        sort_choice = st.selectbox("Sort By", sort_options, key="pool_filter_sort")
 
     def is_search_value_ready(value: str | None) -> bool:
         if not value:
@@ -630,20 +655,21 @@ with tabs[1]:
             ])
             if st.session_state.get("pool_search_key") != search_key:
                 st.session_state["pool_search_key"] = search_key
-                response = backend_api_request(
-                    "GET",
-                    "/metadata/pools",
-                    params={
-                        "connector": connector_name,
-                        "network_id": network_id,
-                        "pool_type": pool_type,
-                        "token_a": token_a or None,
-                        "token_b": token_b or None,
-                        "search": search_term or None,
-                        "pages": int(pages),
-                        "limit": int(limit),
-                    },
-                )
+                with st.spinner("Searching pools..."):
+                    response = backend_api_request(
+                        "GET",
+                        "/metadata/pools",
+                        params={
+                            "connector": connector_name,
+                            "network_id": network_id,
+                            "pool_type": pool_type,
+                            "token_a": token_a or None,
+                            "token_b": token_b or None,
+                            "search": search_term or None,
+                            "pages": int(pages),
+                            "limit": int(limit),
+                        },
+                    )
                 if response.get("ok"):
                     payload = response.get("data", {})
                     pools_results = payload.get("pools", [])
@@ -655,52 +681,100 @@ with tabs[1]:
                     else:
                         st.error(format_api_error(response, "Failed to fetch pools."))
     else:
+        st.caption("Enter token symbols or addresses to search pools.")
         st.session_state.pop("pool_search_results", None)
         st.session_state.pop("pool_search_key", None)
+        st.session_state.pop("pool_search_choice", None)
 
     pools_results = st.session_state.get("pool_search_results", [])
     if pools_results:
-        display_rows = []
+        filtered_pools = []
         for pool in pools_results:
-            display_rows.append({
-                "Pair": pool.get("trading_pair"),
-                "Fee %": pool.get("fee_tier"),
-                "Bin Step": pool.get("bin_step"),
-                "Volume 24h": pool.get("volume_24h"),
-                "TVL (USD)": pool.get("tvl_usd"),
-                "APR %": pool.get("apr"),
-                "APY %": pool.get("apy"),
-                "Address": pool.get("address"),
-            })
+            tvl_value = to_float(pool.get("tvl_usd"))
+            volume_value = to_float(pool.get("volume_24h"))
+            apy_value = to_float(pool.get("apy"))
+            if min_tvl > 0 and (tvl_value is None or tvl_value < min_tvl):
+                continue
+            if min_volume > 0 and (volume_value is None or volume_value < min_volume):
+                continue
+            if min_apy > 0 and (apy_value is None or apy_value < min_apy):
+                continue
+            filtered_pools.append(pool)
 
-        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+        sort_field_map = {
+            "TVL (desc)": ("tvl_usd", True),
+            "Volume 24h (desc)": ("volume_24h", True),
+            "APY (desc)": ("apy", True),
+            "APR (desc)": ("apr", True),
+            "Fee % (asc)": ("fee_tier", False),
+        }
+        sort_field, sort_desc = sort_field_map.get(sort_choice, ("tvl_usd", True))
 
-        options = {}
-        for pool in pools_results:
-            address = pool.get("address", "")
-            address_suffix = f"{address[:6]}...{address[-4:]}" if address else "unknown"
-            label = f"{pool.get('trading_pair', 'unknown')} | {address_suffix}"
-            options[label] = pool
+        def sort_key(pool):
+            value = to_float(pool.get(sort_field))
+            if value is None:
+                return float("-inf") if sort_desc else float("inf")
+            return value
 
-        selected_label = st.selectbox("Select Pool to Fill Form", list(options.keys()), key="pool_search_choice")
-        if st.button("Use Selected Pool", key="pool_search_apply"):
+        filtered_pools = sorted(filtered_pools, key=sort_key, reverse=sort_desc)
+
+        if filtered_pools:
+            st.caption(f"{len(filtered_pools)} pools match filters.")
+            display_rows = []
+            for pool in filtered_pools:
+                display_rows.append({
+                    "Pair": pool.get("trading_pair"),
+                    "Fee %": pool.get("fee_tier"),
+                    "Bin Step": pool.get("bin_step"),
+                    "Volume 24h": pool.get("volume_24h"),
+                    "TVL (USD)": pool.get("tvl_usd"),
+                    "APR %": pool.get("apr"),
+                    "APY %": pool.get("apy"),
+                    "Address": pool.get("address"),
+                })
+
+            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+
+            options = {}
+            for pool in filtered_pools:
+                address = pool.get("address", "")
+                address_suffix = f"{address[:6]}...{address[-4:]}" if address else "unknown"
+                label = f"{pool.get('trading_pair', 'unknown')} | {address_suffix}"
+                options[label] = pool
+
+            selected_label = st.selectbox("Select Pool to Fill Form", list(options.keys()), key="pool_search_choice")
             selected_pool = options.get(selected_label, {})
-            updates = {
-                "pool_base_symbol": selected_pool.get("base_symbol"),
-                "pool_quote_symbol": selected_pool.get("quote_symbol"),
-                "pool_base_address": selected_pool.get("base_address"),
-                "pool_quote_address": selected_pool.get("quote_address"),
-                "pool_address": selected_pool.get("address"),
-            }
-            fee_tier = selected_pool.get("fee_tier")
-            if fee_tier is not None:
-                try:
-                    updates["pool_fee_pct"] = float(fee_tier)
-                except (TypeError, ValueError):
-                    pass
-            update_session_state(updates)
-            st.success("Pool details loaded.")
-            st.rerun()
+
+            st.markdown(f"**Selected Pool**: {selected_pool.get('trading_pair', 'unknown')}")
+            summary_cols = st.columns(4)
+            summary_cols[0].metric("TVL (USD)", selected_pool.get("tvl_usd") or "—")
+            summary_cols[1].metric("Volume 24h", selected_pool.get("volume_24h") or "—")
+            summary_cols[2].metric("APR %", selected_pool.get("apr") or "—")
+            summary_cols[3].metric("APY %", selected_pool.get("apy") or "—")
+            st.caption(
+                f"Fee %: {selected_pool.get('fee_tier') or '-'} | Bin Step: {selected_pool.get('bin_step') or '-'}"
+            )
+            st.caption(f"Address: {selected_pool.get('address') or '-'}")
+
+            if st.button("Use Selected Pool", key="pool_search_apply"):
+                updates = {
+                    "pool_base_symbol": selected_pool.get("base_symbol"),
+                    "pool_quote_symbol": selected_pool.get("quote_symbol"),
+                    "pool_base_address": selected_pool.get("base_address"),
+                    "pool_quote_address": selected_pool.get("quote_address"),
+                    "pool_address": selected_pool.get("address"),
+                }
+                fee_tier = selected_pool.get("fee_tier")
+                if fee_tier is not None:
+                    try:
+                        updates["pool_fee_pct"] = float(fee_tier)
+                    except (TypeError, ValueError):
+                        pass
+                st.session_state["pool_pending_updates"] = updates
+                st.session_state["pool_autofill_message"] = "Pool details loaded."
+                st.rerun()
+        else:
+            st.info("No pools match the current filters.")
 
     with st.form("gateway_add_pool"):
         col1a, col2a, col3a = st.columns(3)
