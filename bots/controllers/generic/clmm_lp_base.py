@@ -11,7 +11,6 @@ from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy_v2.budget.budget_coordinator import BudgetCoordinatorRegistry
 from hummingbot.strategy_v2.controllers import ControllerBase, ControllerConfigBase
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
-from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionStates
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
 
 from .clmm_lp_domain.components import ControllerContext, ControllerState, LPView, OpenProposal, Snapshot, PoolDomainAdapter
@@ -300,7 +299,7 @@ class CLMMLPBaseController(ControllerBase):
                     "fee_rate_ewma_quote_per_hour": _as_float(fee_rate_ewma_quote_per_hour),
                     "base": _as_float(abs(lp_view.base_amount)),
                     "quote": _as_float(abs(lp_view.quote_amount)),
-                    "out_of_range_since": lp_view.out_of_range_since,
+                    "out_of_range_since": self._ctx.out_of_range_since,
                     "info_unavailable": (
                         lp_view.position_address is None
                         and lp_view.lower_price is None
@@ -441,11 +440,13 @@ class CLMMLPBaseController(ControllerBase):
         if not snapshot.active_lp:
             return
         lp_view = snapshot.active_lp[0]
-        if lp_view.state != LPPositionStates.IN_RANGE.value:
-            return
         position_address = lp_view.position_address or ""
         if not position_address:
             return
+        # Use controller price + bounds to avoid blocking on executor state (router price gaps).
+        if lp_view.lower_price is not None and lp_view.upper_price is not None:
+            if current_price < lp_view.lower_price or current_price > lp_view.upper_price:
+                return
         CostFilter.update_fee_rate_ewma(
             now=snapshot.now,
             position_address=position_address,

@@ -223,6 +223,7 @@ class ControllerContext:
     last_stoploss_swap_ts: float = 0.0
     last_exit_reason: Optional[str] = None
     last_decision_reason: Optional[str] = None
+    out_of_range_since: Optional[float] = None
     fee: FeeEstimatorContext = field(default_factory=FeeEstimatorContext)
 
 

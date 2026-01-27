@@ -203,6 +203,7 @@ class CLMMFSM:
         if stoploss_decision is not None:
             return stoploss_decision
         self._set_anchor_if_ready(snapshot, ctx, lp_view)
+        self._update_out_of_range_timer(snapshot, ctx, lp_view)
         current_price = self._effective_price(snapshot, lp_view)
         equity = None
         if current_price is not None and current_price > 0:
@@ -565,6 +566,23 @@ class CLMMFSM:
             return lp_view.current_price
         return None
 
+    def _update_out_of_range_timer(self, snapshot: Snapshot, ctx: ControllerContext, lp_view: LPView) -> None:
+        if not self._is_lp_open(lp_view):
+            ctx.out_of_range_since = None
+            return
+        lower_price = lp_view.lower_price
+        upper_price = lp_view.upper_price
+        if lower_price is None or upper_price is None or lower_price <= 0 or upper_price <= 0:
+            return
+        effective_price = self._effective_price(snapshot, lp_view)
+        if effective_price is None or effective_price <= 0:
+            return
+        if lower_price <= effective_price <= upper_price:
+            ctx.out_of_range_since = None
+            return
+        if ctx.out_of_range_since is None:
+            ctx.out_of_range_since = snapshot.now
+
     def _compute_equity_value(
         self,
         snapshot: Snapshot,
@@ -684,6 +702,7 @@ class CLMMFSM:
                 ctx.pending_swap_since_ts = 0.0
                 ctx.inventory_swap_attempts = 0
                 ctx.stoploss_swap_attempts = 0
+                ctx.out_of_range_since = None
         self._record_decision(ctx, reason)
         return Decision(actions=actions or [], next_state=ctx.state, reason=reason)
 

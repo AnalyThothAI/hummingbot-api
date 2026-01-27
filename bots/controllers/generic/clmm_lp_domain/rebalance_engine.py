@@ -38,7 +38,7 @@ class RebalanceEngine:
         if deviation_pct < (hysteresis_pct * Decimal("100")):
             return RebalanceSignal(False, "hysteresis_guard")
 
-        out_of_range_since = lp_view.out_of_range_since
+        out_of_range_since = ctx.out_of_range_since
         if out_of_range_since is None:
             return RebalanceSignal(False, "out_of_range_timer_missing")
         if (now - out_of_range_since) < self._config.rebalance_seconds:
