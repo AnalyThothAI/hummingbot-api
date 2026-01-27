@@ -171,8 +171,8 @@ class AccountsService:
             try:
                 await self.check_all_connectors()
                 # Update all connector states (balances, orders, positions, trading rules)
-                await self.connector_manager.update_all_connector_states()
-                await self.update_account_state()
+                await self.connector_manager.update_all_connector_states(skip_gateway_connectors=True)
+                await self.update_account_state(skip_gateway=True, skip_gateway_connectors=True)
                 await self.dump_account_state()
             except Exception as e:
                 logger.error(f"Error updating account state: {e}")
@@ -328,7 +328,9 @@ class AccountsService:
         self,
         skip_gateway: bool = False,
         account_names: Optional[List[str]] = None,
-        connector_names: Optional[List[str]] = None
+        connector_names: Optional[List[str]] = None,
+        refresh_gateway_only: bool = False,
+        skip_gateway_connectors: bool = False,
     ):
         """Update account state for filtered connectors and optionally Gateway wallets.
 
@@ -337,7 +339,13 @@ class AccountsService:
             account_names: If provided, only update these accounts. If None, update all accounts.
             connector_names: If provided, only update these connectors. If None, update all connectors.
                             For Gateway, this filters by chain-network (e.g., 'solana-mainnet-beta').
+            refresh_gateway_only: If True, refresh only Gateway wallet balances.
+            skip_gateway_connectors: If True, skip Gateway connectors when updating connector states.
         """
+        if refresh_gateway_only:
+            await self._update_gateway_balances(chain_networks=connector_names)
+            return
+
         all_connectors = self.connector_manager.get_all_connectors()
 
         # Prepare parallel tasks
@@ -352,6 +360,8 @@ class AccountsService:
             if account_name not in self.accounts_state:
                 self.accounts_state[account_name] = {}
             for connector_name, connector in connectors.items():
+                if skip_gateway_connectors and ("/" in connector_name or connector_name.startswith("gateway_")):
+                    continue
                 # Filter by connector_names if specified
                 if connector_names and connector_name not in connector_names:
                     continue

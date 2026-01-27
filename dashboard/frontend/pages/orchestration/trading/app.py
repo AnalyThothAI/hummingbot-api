@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
 
-from frontend.st_utils import get_backend_api_client, initialize_st_page
+from frontend.st_utils import get_backend_api_client, initialize_st_page, backend_api_request
 
 # Enable nested async
 nest_asyncio.apply()
@@ -1415,10 +1415,22 @@ def get_balances():
         if not st.session_state.selected_account:
             return []
 
-        # Get portfolio state for the selected account
-        portfolio_state = backend_api_client.portfolio.get_state(
-            account_names=[st.session_state.selected_account]
-        )
+        now = time.time()
+        last_refresh = st.session_state.get("gateway_refresh_ts_trading", 0)
+        refresh_gateway = (now - last_refresh) >= 60
+
+        payload = {"account_names": [st.session_state.selected_account]}
+        if refresh_gateway:
+            payload["refresh_gateway_only"] = True
+
+        response = backend_api_request("POST", "/portfolio/state", json_body=payload)
+        if not response.get("ok"):
+            raise Exception(response.get("error") or "Portfolio state request failed")
+
+        if refresh_gateway:
+            st.session_state.gateway_refresh_ts_trading = now
+
+        portfolio_state = response.get("data", {})
 
         # Extract balances
         balances = []

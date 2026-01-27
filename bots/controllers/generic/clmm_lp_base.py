@@ -222,6 +222,16 @@ class CLMMLPBaseController(ControllerBase):
             "active_swap_count": len(snapshot.active_swaps),
             "balance_fresh": self._balance_manager.is_fresh(now),
         }
+        controller_value_quote: Optional[Decimal] = None
+        if current_price is not None and current_price > 0:
+            if snapshot.active_lp:
+                controller_value_quote = sum(
+                    self._estimate_position_value(lp_view, current_price) for lp_view in snapshot.active_lp
+                )
+            else:
+                controller_value_quote = snapshot.wallet_base * current_price + snapshot.wallet_quote
+        if controller_value_quote is not None:
+            info["controller_value_quote"] = float(controller_value_quote)
         if nav is not None:
             nav_value, lp_value, wallet_value, budget_value = nav
             info["nav_quote"] = float(nav_value)
@@ -238,6 +248,17 @@ class CLMMLPBaseController(ControllerBase):
         if self._ctx.anchor_value_quote is not None:
             info["anchor_value_quote"] = float(self._ctx.anchor_value_quote)
             info["anchor_basis"] = "budget_cap"
+        if controller_value_quote is not None and self._ctx.anchor_value_quote is not None:
+            anchor = self._ctx.anchor_value_quote
+            if anchor > 0:
+                controller_pnl_quote = controller_value_quote - anchor
+                info["controller_pnl_source"] = "controller"
+                info["controller_anchor_quote"] = float(anchor)
+                info["controller_net_pnl_quote"] = float(controller_pnl_quote)
+                info["controller_unrealized_pnl_quote"] = float(controller_pnl_quote)
+                info["controller_realized_pnl_quote"] = 0.0
+                info["controller_net_pnl_pct"] = float(controller_pnl_quote / anchor)
+                info["controller_volume_quote"] = float(anchor)
         stoploss_trigger_quote: Optional[Decimal] = None
         if self._ctx.anchor_value_quote is not None and self.config.stop_loss_pnl_pct > 0:
             stoploss_trigger_quote = self._ctx.anchor_value_quote * (Decimal("1") - self.config.stop_loss_pnl_pct)

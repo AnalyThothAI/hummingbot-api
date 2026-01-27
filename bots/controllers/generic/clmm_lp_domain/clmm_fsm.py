@@ -206,7 +206,7 @@ class CLMMFSM:
         current_price = self._effective_price(snapshot, lp_view)
         equity = None
         if current_price is not None and current_price > 0:
-            equity = self._compute_equity_value(snapshot, lp_view, current_price)
+            equity = self._compute_risk_equity_value(snapshot, lp_view, current_price, ctx.anchor_value_quote)
         signal = self._rebalance_engine.evaluate(snapshot, ctx, lp_view)
         if signal.should_rebalance:
             self._rebalance_engine.record_rebalance(now, ctx)
@@ -483,7 +483,7 @@ class CLMMFSM:
         current_price = self._effective_price(snapshot, lp_view)
         if current_price is None or current_price <= 0:
             return
-        equity = self._compute_equity_value(snapshot, lp_view, current_price)
+        equity = self._compute_risk_equity_value(snapshot, lp_view, current_price, None)
         if equity is None or equity <= 0:
             return
         ctx.anchor_value_quote = self._anchor_baseline(equity)
@@ -502,7 +502,7 @@ class CLMMFSM:
         current_price = self._effective_price(snapshot, lp_view)
         if current_price is None or current_price <= 0:
             return None
-        equity = self._compute_equity_value(snapshot, lp_view, current_price)
+        equity = self._compute_risk_equity_value(snapshot, lp_view, current_price, ctx.anchor_value_quote)
         if equity is None:
             return None
         if ctx.anchor_value_quote is None:
@@ -577,6 +577,27 @@ class CLMMFSM:
         if lp_view is None:
             return wallet_value
         return self._compute_equity(snapshot, lp_view, current_price)
+
+    def _compute_risk_equity_value(
+        self,
+        snapshot: Snapshot,
+        lp_view: Optional[LPView],
+        current_price: Decimal,
+        anchor_value_quote: Optional[Decimal],
+    ) -> Optional[Decimal]:
+        if current_price <= 0:
+            return None
+        wallet_value = snapshot.wallet_base * current_price + snapshot.wallet_quote
+        lp_value = Decimal("0")
+        if lp_view is not None:
+            lp_value = self._estimate_position_value(lp_view, current_price)
+        cap = anchor_value_quote
+        if cap is None or cap <= 0:
+            cap = max(Decimal("0"), self._config.position_value_quote)
+        if cap <= 0:
+            return lp_value + wallet_value
+        budget_wallet = max(Decimal("0"), cap - lp_value)
+        return lp_value + min(wallet_value, budget_wallet)
 
     def _compute_equity(self, snapshot: Snapshot, lp_view: LPView, current_price: Decimal) -> Optional[Decimal]:
         lp_value = self._estimate_position_value(lp_view, current_price)

@@ -317,12 +317,15 @@ class BalanceManager:
         router_name = self._config.router_connector
         if router_name and router_name != self._config.connector_name:
             router_connector = self._market_data_provider.connectors.get(router_name)
+        token_symbols = [self._domain.base_token, self._domain.quote_token]
+        if self._config.native_token_symbol:
+            token_symbols.append(self._config.native_token_symbol)
 
         async def _safe_update(conn, name: str) -> bool:
             if conn is None:
                 return False
             try:
-                await asyncio.wait_for(conn.update_balances(), timeout=timeout)
+                await asyncio.wait_for(conn.update_balances(token_symbols=token_symbols), timeout=timeout)
                 return True
             except Exception:
                 self._logger().exception(

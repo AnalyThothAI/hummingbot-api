@@ -420,6 +420,15 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         unrealized_pnl_quote = controller_performance.get("unrealized_pnl_quote", 0)
         global_pnl_quote = controller_performance.get("global_pnl_quote", 0)
         volume_traded = controller_performance.get("volume_traded", 0)
+        if isinstance(custom_info, dict) and "controller_net_pnl_quote" in custom_info:
+            def _override_value(key: str, default_value: Any):
+                value = custom_info.get(key)
+                return default_value if value is None else value
+
+            global_pnl_quote = _override_value("controller_net_pnl_quote", global_pnl_quote)
+            unrealized_pnl_quote = _override_value("controller_unrealized_pnl_quote", unrealized_pnl_quote)
+            realized_pnl_quote = _override_value("controller_realized_pnl_quote", realized_pnl_quote)
+            volume_traded = _override_value("controller_volume_quote", volume_traded)
         nav_quote = custom_info.get("nav_quote")
 
         close_types = controller_performance.get("close_type_counts", {})

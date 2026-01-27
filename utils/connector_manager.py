@@ -404,13 +404,15 @@ class ConnectorManager:
         except Exception as e:
             logger.error(f"Error updating connector state for {connector_name}: {e}")
 
-    async def update_all_connector_states(self):
+    async def update_all_connector_states(self, *, skip_gateway_connectors: bool = False):
         """
         Update state for all cached connectors.
         This can be called periodically to refresh connector data.
         """
         for cache_key, connector in self._connector_cache.items():
             account_name, connector_name = cache_key.split(":", 1)
+            if skip_gateway_connectors and ("/" in connector_name or connector_name.startswith("gateway_")):
+                continue
             try:
                 await self._update_connector_state(connector, connector_name, account_name)
             except Exception as e:

@@ -2,13 +2,16 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-from frontend.st_utils import get_backend_api_client, initialize_st_page
+from frontend.st_utils import get_backend_api_client, initialize_st_page, backend_api_request
 
 initialize_st_page(title="Portfolio", icon="💰")
 
 # Page content
 client = get_backend_api_client()
 NUM_COLUMNS = 4
+
+if "portfolio_refresh_gateway" not in st.session_state:
+    st.session_state.portfolio_refresh_gateway = False
 
 
 # Convert portfolio state to DataFrame for easier manipulation
@@ -125,7 +128,15 @@ def get_portfolio_filters():
     
     # Get portfolio state for available exchanges and tokens
     try:
-        portfolio_state = client.portfolio.get_state(account_names=selected_accounts)
+        payload = {"account_names": selected_accounts}
+        if st.session_state.portfolio_refresh_gateway:
+            payload["refresh_gateway_only"] = True
+        response = backend_api_request("POST", "/portfolio/state", json_body=payload)
+        if not response.get("ok"):
+            raise Exception(response.get("error") or "Portfolio state request failed")
+        portfolio_state = response.get("data", {})
+        st.session_state.portfolio_state_cache = portfolio_state
+        st.session_state.portfolio_refresh_gateway = False
     except Exception as e:
         st.error(f"Failed to fetch portfolio state: {e}")
         return None, None, None
@@ -160,6 +171,8 @@ def get_portfolio_filters():
 
 # Get filters once at the top level
 st.header("Portfolio Filters")
+if st.button("Refresh Gateway Balances"):
+    st.session_state.portfolio_refresh_gateway = True
 selected_accounts, selected_exchanges, selected_tokens = get_portfolio_filters()
 
 if not selected_accounts:
@@ -173,7 +186,13 @@ def portfolio_overview():
     
     # Get portfolio state and summary
     try:
-        portfolio_state = client.portfolio.get_state(account_names=selected_accounts)
+        portfolio_state = st.session_state.get("portfolio_state_cache", {})
+        if not portfolio_state:
+            response = backend_api_request("POST", "/portfolio/state", json_body={"account_names": selected_accounts})
+            if not response.get("ok"):
+                raise Exception(response.get("error") or "Portfolio state request failed")
+            portfolio_state = response.get("data", {})
+            st.session_state.portfolio_state_cache = portfolio_state
         portfolio_summary = client.portfolio.get_portfolio_summary()
     except Exception as e:
         st.error(f"Failed to fetch portfolio data: {e}")
