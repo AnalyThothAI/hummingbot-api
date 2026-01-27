@@ -185,6 +185,25 @@ def stop_strategy(bot_name: str):
     stop_controllers(bot_name, controller_ids)
 
 
+def start_strategy(bot_name: str):
+    try:
+        controller_configs = backend_api_client.controllers.get_bot_controller_configs(bot_name)
+    except Exception as e:
+        st.error(f"Failed to load controllers for {bot_name}: {e}")
+        return
+    controller_ids = []
+    for config in controller_configs or []:
+        if not isinstance(config, dict):
+            continue
+        controller_name = config.get("_config_name") or config.get("id")
+        if controller_name:
+            controller_ids.append(controller_name)
+    if not controller_ids:
+        st.warning(f"No controllers found for {bot_name}.")
+        return
+    start_controllers(bot_name, controller_ids)
+
+
 def start_container(bot_name: str):
     response = backend_api_request("POST", f"/docker/start-container/{bot_name}")
     if handle_action_response(response, f"Container {bot_name} starting.", f"Failed to start container {bot_name}."):
@@ -415,7 +434,6 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         signals = build_controller_signals(custom_info)
 
         controller_info = {
-            "Select": False,
             "ID": controller_config.get("id"),
             "Controller": controller_name,
             "Connector": connector_name,
@@ -458,33 +476,27 @@ LP_POSITION_CSS = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&display=swap');
 .lp-card {
-  --lp-ink: #1c1917;
-  --lp-muted: #6b5f55;
-  --lp-paper: #fffaf2;
-  --lp-wash: #f4eee6;
-  --lp-line: rgba(28, 25, 23, 0.14);
-  --lp-teal: #0f766e;
-  --lp-amber: #d97706;
-  --lp-rose: #b42318;
-  background: linear-gradient(180deg, var(--lp-paper) 0%, var(--lp-wash) 100%);
+  --lp-ink: #111827;
+  --lp-muted: #6b7280;
+  --lp-paper: #ffffff;
+  --lp-wash: #f8fafc;
+  --lp-line: rgba(15, 23, 42, 0.12);
+  --lp-good: #059669;
+  --lp-warn: #d97706;
+  --lp-alert: #dc2626;
+  --lp-info: #2563eb;
+  --lp-range-fill: #60a5fa;
+  --lp-range-out: #f97316;
+  background: var(--lp-paper);
   border: 1px solid var(--lp-line);
   border-radius: 18px;
   padding: 16px 18px;
   margin-bottom: 16px;
-  box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+  box-shadow: 0 6px 16px rgba(15, 23, 42, 0.06);
   position: relative;
   overflow: hidden;
   font-family: 'IBM Plex Sans', sans-serif;
   color: var(--lp-ink);
-}
-.lp-card::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  background-image: radial-gradient(rgba(28, 25, 23, 0.08) 1px, transparent 1px);
-  background-size: 14px 14px;
-  opacity: 0.12;
-  pointer-events: none;
 }
 .lp-card-inner {
   position: relative;
@@ -516,22 +528,22 @@ LP_POSITION_CSS = """
   border-radius: 999px;
   border: 1px solid var(--lp-line);
   color: var(--lp-muted);
-  background: rgba(255, 255, 255, 0.55);
+  background: var(--lp-wash);
 }
 .lp-state[data-state="IN_RANGE"] {
-  color: var(--lp-teal);
-  border-color: rgba(15, 118, 110, 0.35);
-  background: rgba(15, 118, 110, 0.12);
+  color: var(--lp-good);
+  border-color: rgba(5, 150, 105, 0.35);
+  background: rgba(5, 150, 105, 0.12);
 }
 .lp-state[data-state="OUT_OF_RANGE"] {
-  color: var(--lp-amber);
+  color: var(--lp-warn);
   border-color: rgba(217, 119, 6, 0.4);
   background: rgba(217, 119, 6, 0.12);
 }
 .lp-state[data-state="REBALANCE"] {
-  color: #1d4ed8;
-  border-color: rgba(29, 78, 216, 0.35);
-  background: rgba(29, 78, 216, 0.12);
+  color: var(--lp-info);
+  border-color: rgba(37, 99, 235, 0.35);
+  background: rgba(37, 99, 235, 0.12);
 }
 .lp-card-body {
   display: grid;
@@ -548,14 +560,14 @@ LP_POSITION_CSS = """
   padding: 8px 10px;
   border-radius: 12px;
   border: 1px solid var(--lp-line);
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--lp-wash);
   display: flex;
   flex-direction: column;
   gap: 4px;
 }
 .lp-metric.primary {
-  border-color: rgba(15, 118, 110, 0.25);
-  background: rgba(15, 118, 110, 0.08);
+  border-color: rgba(37, 99, 235, 0.25);
+  background: rgba(37, 99, 235, 0.08);
 }
 .lp-label {
   font-size: 0.66rem;
@@ -577,32 +589,34 @@ LP_POSITION_CSS = """
   position: relative;
   height: 18px;
   border-radius: 999px;
-  background: rgba(28, 25, 23, 0.08);
-  border: 1px solid rgba(28, 25, 23, 0.16);
+  background: #eef2f7;
+  border: 1px solid #e2e8f0;
   overflow: hidden;
 }
 .lp-range-track.out {
-  background: rgba(217, 119, 6, 0.12);
+  background: rgba(249, 115, 22, 0.12);
+  border-color: rgba(249, 115, 22, 0.35);
 }
 .lp-range-band {
   position: absolute;
   top: 0;
   bottom: 0;
   border-radius: 999px;
-  background: linear-gradient(90deg, rgba(14, 165, 233, 0.55), rgba(16, 185, 129, 0.55));
+  background: var(--lp-range-fill);
 }
 .lp-range-price {
   position: absolute;
   top: -6px;
   width: 12px;
   height: 12px;
-  background: var(--lp-ink);
+  background: #111827;
   transform: rotate(45deg);
   border: 2px solid var(--lp-paper);
-  box-shadow: 0 0 0 2px rgba(28, 25, 23, 0.12);
+  box-shadow: 0 0 0 2px rgba(28, 25, 23, 0.14);
 }
 .lp-range-price.out {
-  background: var(--lp-rose);
+  background: var(--lp-range-out);
+  box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.35);
 }
 .lp-range-labels {
   display: flex;
@@ -615,13 +629,13 @@ LP_POSITION_CSS = """
   padding: 4px 8px;
   border-radius: 999px;
   border: 1px solid var(--lp-line);
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--lp-wash);
   color: var(--lp-muted);
 }
 .lp-chip.strong {
   color: var(--lp-ink);
   border-color: rgba(28, 25, 23, 0.25);
-  background: rgba(255, 255, 255, 0.9);
+  background: #ffffff;
 }
 .lp-meta {
   display: flex;
@@ -685,7 +699,9 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
                 continue
             if source in {"active_lp", "last_lp_snapshot"}:
                 in_range = pos.get("in_range")
-                if source == "last_lp_snapshot":
+                if pos.get("info_unavailable"):
+                    state = "UNKNOWN"
+                elif source == "last_lp_snapshot":
                     state = "REBALANCE"
                 elif in_range is True:
                     state = "IN_RANGE"
@@ -965,21 +981,30 @@ def render_overview(instances: List[Dict[str, Any]]):
             if bot_status_value:
                 st.caption(f"Strategy: {format_label(bot_status_value, STRATEGY_LABELS)}")
 
-            archive_disabled = docker_status == "missing" or (
-                docker_status == "running" and bot_status_value != "stopped"
-            )
-
             container_label = "—"
             container_action = None
+            container_type = "secondary"
             if docker_status == "running":
-                container_label = "⛔ Stop Strategy"
-                container_action = lambda name=bot_name: stop_strategy(name)
+                if bot_status_value == "stopped":
+                    container_label = "▶️ Start Strategy"
+                    container_action = lambda name=bot_name: start_strategy(name)
+                    container_type = "primary"
+                elif bot_status_value == "stopping":
+                    container_label = "⏳ Stopping"
+                    container_action = None
+                else:
+                    container_label = "⛔ Stop Strategy"
+                    container_action = lambda name=bot_name: stop_strategy(name)
+                    container_type = "secondary"
             elif docker_status in {"exited", "created", "dead"}:
                 container_label = "▶️ Start Container"
                 container_action = lambda name=bot_name: start_container(name)
+                container_type = "primary"
             elif docker_status == "missing":
                 container_label = "➕ Launch New"
                 container_action = lambda: st.switch_page("frontend/pages/orchestration/launch_bot_v2/app.py")
+
+            archive_label = "🧯 Stop & Archive" if docker_status == "running" else "🗃️ Archive"
 
             action_cols = st.columns(3)
             with action_cols[0]:
@@ -988,15 +1013,16 @@ def render_overview(instances: List[Dict[str, Any]]):
                     key=f"container_{bot_name}",
                     use_container_width=True,
                     disabled=container_action is None,
+                    type=container_type,
                 ):
                     if container_action:
                         container_action()
             with action_cols[1]:
                 if st.button(
-                    "📦 Archive",
+                    archive_label,
                     key=f"archive_{bot_name}",
                     use_container_width=True,
-                    disabled=archive_disabled,
+                    type="secondary",
                 ):
                     archive_bot(bot_name, docker_status)
             with action_cols[2]:
@@ -1073,71 +1099,13 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
 
     if active_controllers:
         st.success("🚀 Active Controllers")
-        active_df = pd.DataFrame(active_controllers)
-        edited_active_df = st.data_editor(
-            active_df,
-            column_config={
-                "Select": st.column_config.CheckboxColumn(
-                    "Select",
-                    help="Select controllers to stop",
-                    default=False,
-                ),
-                "_controller_id": None,
-            },
-            disabled=[col for col in active_df.columns if col != "Select"],
-            hide_index=True,
-            use_container_width=True,
-            key=f"active_table_{bot_name}",
-        )
-
-        selected_active = [
-            row["_controller_id"]
-            for _, row in edited_active_df.iterrows()
-            if row["Select"]
-        ]
-
-        if selected_active:
-            if st.button(
-                f"⏹️ Stop Selected ({len(selected_active)})",
-                key=f"stop_active_{bot_name}",
-                type="secondary",
-            ):
-                                with st.spinner(f"Stopping {len(selected_active)} controller(s)..."):
-                                    stop_controllers(bot_name, selected_active)
+        active_df = pd.DataFrame(active_controllers).drop(columns=["_controller_id"], errors="ignore")
+        st.dataframe(active_df, use_container_width=True, hide_index=True)
 
     if stopped_controllers:
         st.warning("💤 Paused Controllers")
-        stopped_df = pd.DataFrame(stopped_controllers)
-        edited_stopped_df = st.data_editor(
-            stopped_df,
-            column_config={
-                "Select": st.column_config.CheckboxColumn(
-                    "Select",
-                    help="Select controllers to start",
-                    default=False,
-                ),
-                "_controller_id": None,
-            },
-            disabled=[col for col in stopped_df.columns if col != "Select"],
-            hide_index=True,
-            use_container_width=True,
-            key=f"stopped_table_{bot_name}",
-        )
-
-        selected_stopped = [
-            row["_controller_id"]
-            for _, row in edited_stopped_df.iterrows()
-            if row["Select"]
-        ]
-
-        if selected_stopped:
-            if st.button(
-                f"▶️ Start Selected ({len(selected_stopped)})",
-                key=f"start_stopped_{bot_name}",
-                type="primary",
-            ):
-                                with st.spinner(f"Starting {len(selected_stopped)} controller(s)..."):
-                                    start_controllers(bot_name, selected_stopped)
+        stopped_df = pd.DataFrame(stopped_controllers).drop(columns=["_controller_id"], errors="ignore")
+        st.dataframe(stopped_df, use_container_width=True, hide_index=True)
 
     if error_controllers:
         st.error("💀 Controllers with Errors")

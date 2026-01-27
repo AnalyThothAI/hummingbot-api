@@ -8,6 +8,7 @@ import docker
 
 from config import settings
 from utils.mqtt_manager import MQTTManager
+from utils.file_system import FileSystemUtil
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,29 @@ class BotsOrchestrator:
             for container in self.docker_client.containers.list()
             if container.status == "running" and self.hummingbot_containers_fiter(container)
         ]
+
+    def _get_controller_configs(self, bot_name: str) -> list:
+        configs_path = f"instances/{bot_name}/conf/controllers"
+        fs_util = FileSystemUtil()
+        if not fs_util.path_exists(configs_path):
+            return []
+        configs = []
+        for controller_file in fs_util.list_files(configs_path):
+            if controller_file.endswith(".yml"):
+                config = fs_util.read_yaml_file(f"{configs_path}/{controller_file}")
+                if isinstance(config, dict):
+                    configs.append(config)
+        return configs
+
+    def _get_controller_config_map(self, configs: list) -> dict:
+        config_map = {}
+        for config in configs:
+            if not isinstance(config, dict):
+                continue
+            config_id = config.get("id") or config.get("_config_name")
+            if config_id:
+                config_map[config_id] = config
+        return config_map
 
     def start(self):
         """Start the loop that monitors active bots."""
@@ -327,8 +351,20 @@ class BotsOrchestrator:
             )
             log_recent = log_last_seen is not None and (now - log_last_seen) <= activity_timeout
 
+            manual_kill_switch_all = False
+            try:
+                controller_configs = self._get_controller_configs(bot_name)
+                if controller_configs:
+                    manual_kill_switch_all = all(
+                        bool(config.get("manual_kill_switch")) for config in controller_configs
+                    )
+            except Exception as exc:
+                logger.warning(f"Failed to read controller configs for {bot_name}: {exc}")
+
             # Determine strategy status using controller performance/log activity (no heartbeat dependency).
-            if len(performance) > 0:
+            if manual_kill_switch_all:
+                status = "stopped"
+            elif len(performance) > 0:
                 status = "running" if performance_recent else "idle"
             elif log_recent:
                 status = "running"
@@ -343,6 +379,7 @@ class BotsOrchestrator:
 
             return {
                 "status": status,
+                "manual_kill_switch": manual_kill_switch_all,
                 "performance": performance,
                 "error_logs": error_logs,
                 "general_logs": general_logs,

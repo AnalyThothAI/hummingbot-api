@@ -41,6 +41,7 @@ class SnapshotBuilder:
         executors_info: List[ExecutorInfo],
         wallet_base: Decimal,
         wallet_quote: Decimal,
+        balance_fresh: bool = False,
         snapshot_wallet_base: Optional[Decimal] = None,
         snapshot_wallet_quote: Optional[Decimal] = None,
     ) -> Snapshot:
@@ -82,6 +83,7 @@ class SnapshotBuilder:
         return Snapshot(
             now=now,
             current_price=current_price,
+            balance_fresh=balance_fresh,
             wallet_base=wallet_base,
             wallet_quote=wallet_quote,
             snapshot_wallet_base=snapshot_wallet_base,
@@ -214,15 +216,18 @@ class SnapshotBuilder:
         return Decimal("0")
 
     def _get_current_price(self) -> Optional[Decimal]:
+        if self._pool_price_provider is None:
+            price = self._market_data_provider.get_rate(self._config.trading_pair)
+            if price is not None:
+                return Decimal(str(price))
+            return None
+        pool_price = self._pool_price_provider()
+        if pool_price is not None:
+            return Decimal(str(pool_price))
         price = self._market_data_provider.get_rate(self._config.trading_pair)
         if price is not None:
             return Decimal(str(price))
-        if self._pool_price_provider is None:
-            return None
-        pool_price = self._pool_price_provider()
-        if pool_price is None:
-            return None
-        return Decimal(str(pool_price))
+        return None
 
     @staticmethod
     def _to_decimal(value: Optional[object]) -> Optional[Decimal]:
@@ -328,8 +333,8 @@ class BalanceManager:
                 self._domain.base_token,
                 self._domain.quote_token,
                 self._last_balance_update_ts,
-            self._last_balance_attempt_ts,
-        )
+                self._last_balance_attempt_ts,
+            )
 
 
 class PoolPriceManager:

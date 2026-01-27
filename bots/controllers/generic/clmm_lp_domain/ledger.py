@@ -93,6 +93,12 @@ class BalanceLedger:
         needs_reconcile = self._has_balance and not is_recent and not is_reconciled
         return LedgerStatus(self._has_balance, is_recent, is_reconciled, needs_reconcile)
 
+    def force_reset(self, *, snapshot_base: Decimal, snapshot_quote: Decimal, now: float) -> None:
+        self._set_balance(snapshot_base, snapshot_quote)
+        self._last_event_ts = now
+        self._pending_events.clear()
+        self._last_event_by_key.clear()
+
     def _stash_events(self, events: Iterable[BalanceEvent]) -> None:
         for event in events:
             if event.event_id in self._seen_event_ids or event.event_id in self._pending_events:

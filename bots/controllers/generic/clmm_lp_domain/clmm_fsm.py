@@ -480,7 +480,7 @@ class CLMMFSM:
         equity = self._compute_equity_value(snapshot, lp_view, current_price)
         if equity is None or equity <= 0:
             return
-        ctx.anchor_value_quote = equity
+        ctx.anchor_value_quote = self._anchor_baseline(equity)
 
     def _maybe_stoploss(
         self,
@@ -491,6 +491,8 @@ class CLMMFSM:
         *,
         reason: str,
     ) -> Optional[Decision]:
+        if not snapshot.balance_fresh:
+            return None
         current_price = self._effective_price(snapshot, lp_view)
         if current_price is None or current_price <= 0:
             return None
@@ -544,7 +546,10 @@ class CLMMFSM:
         return self._transition(ctx, ControllerState.STOPLOSS_STOP, now, reason="manual_stop", actions=actions)
 
     def _anchor_baseline(self, equity: Decimal) -> Decimal:
-        return equity
+        cap = max(Decimal("0"), self._config.position_value_quote)
+        if cap <= 0:
+            return equity
+        return min(equity, cap)
 
     @staticmethod
     def _effective_price(snapshot: Snapshot, lp_view: Optional[LPView]) -> Optional[Decimal]:

@@ -172,6 +172,7 @@ class SwapView:
 class Snapshot:
     now: float
     current_price: Optional[Decimal]
+    balance_fresh: bool
     wallet_base: Decimal
     wallet_quote: Decimal
     snapshot_wallet_base: Decimal
