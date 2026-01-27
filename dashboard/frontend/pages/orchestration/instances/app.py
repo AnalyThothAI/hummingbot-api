@@ -685,6 +685,33 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
                 positions = last_snapshot
                 source = "last_lp_snapshot"
         if not isinstance(positions, list) or not positions:
+            anchor_quote = custom_info.get("anchor_value_quote")
+            stoploss_quote = custom_info.get("stoploss_trigger_quote")
+            if anchor_quote is None and stoploss_quote is None:
+                continue
+            controller_config = config_map.get(controller_id, {})
+            controller_name = controller_config.get("controller_name", controller_id)
+            trading_pair = controller_config.get("trading_pair")
+            _, quote_symbol = split_trading_pair(trading_pair)
+            rows.append({
+                "controller": controller_name,
+                "pair": trading_pair or "-",
+                "quote_symbol": quote_symbol,
+                "state": "NO_LP",
+                "position": "-",
+                "lower": None,
+                "upper": None,
+                "price": custom_info.get("price"),
+                "base": custom_info.get("wallet_base"),
+                "quote": custom_info.get("wallet_quote"),
+                "value_quote": custom_info.get("nav_quote"),
+                "anchor_quote": anchor_quote,
+                "stoploss_quote": stoploss_quote,
+                "fee_quote_per_hour": None,
+                "out_of_range_since": None,
+                "snapshot_source": None,
+                "snapshot_ts": None,
+            })
             continue
 
         controller_config = config_map.get(controller_id, {})
@@ -831,7 +858,10 @@ def render_lp_positions(positions: List[Dict[str, Any]]) -> None:
 
         snapshot_source = pos.get("snapshot_source")
         snapshot_ts = pos.get("snapshot_ts")
-        if snapshot_source == "rebalance":
+        if state_attr == "NO_LP":
+            status_text = "No active LP"
+            meta_right = f"Price {format_number(pos.get('price'), 6)}"
+        elif snapshot_source == "rebalance":
             status_text = "Rebalance pending"
             snapshot_age = format_timestamp_age(snapshot_ts)
             meta_right = (

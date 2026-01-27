@@ -344,6 +344,7 @@ class CLMMLPBaseController(ControllerBase):
     def _refresh_snapshot(self, now: float) -> Snapshot:
         self._balance_manager.schedule_refresh(now)
         self._pool_price_manager.schedule_refresh(now)
+        balance_fresh = self._balance_manager.is_fresh(now)
         raw_snapshot = self._build_snapshot(
             now,
             wallet_base=self._balance_manager.wallet_base,
@@ -352,7 +353,6 @@ class CLMMLPBaseController(ControllerBase):
             snapshot_wallet_base=self._balance_manager.wallet_base,
             snapshot_wallet_quote=self._balance_manager.wallet_quote,
         )
-        balance_fresh = self._balance_manager.is_fresh(now)
         ledger_status = self._ledger.update(
             events=raw_snapshot.balance_events,
             snapshot_base=raw_snapshot.snapshot_wallet_base,

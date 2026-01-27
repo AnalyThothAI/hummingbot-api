@@ -312,29 +312,54 @@ class BalanceManager:
             self._wallet_update_task = None
 
     async def _update_wallet_balances(self, connector) -> None:
-        try:
-            timeout = float(max(1, self._config.balance_update_timeout_sec))
-            await asyncio.wait_for(connector.update_balances(), timeout=timeout)
-            self._wallet_base = Decimal(str(connector.get_available_balance(self._domain.base_token) or 0))
-            self._wallet_quote = Decimal(str(connector.get_available_balance(self._domain.quote_token) or 0))
+        timeout = float(max(1, self._config.balance_update_timeout_sec))
+        router_connector = None
+        router_name = self._config.router_connector
+        if router_name and router_name != self._config.connector_name:
+            router_connector = self._market_data_provider.connectors.get(router_name)
+
+        async def _safe_update(conn, name: str) -> bool:
+            if conn is None:
+                return False
+            try:
+                await asyncio.wait_for(conn.update_balances(), timeout=timeout)
+                return True
+            except Exception:
+                self._logger().exception(
+                    "update_balances failed | connector=%s base=%s quote=%s last_update_ts=%.0f last_attempt_ts=%.0f",
+                    name,
+                    self._domain.base_token,
+                    self._domain.quote_token,
+                    self._last_balance_update_ts,
+                    self._last_balance_attempt_ts,
+                )
+                return False
+
+        lp_ok = await _safe_update(connector, self._config.connector_name)
+        router_ok = await _safe_update(router_connector, router_name) if router_connector else False
+
+        source = None
+        if router_connector is not None:
+            source = router_connector if router_ok else connector if lp_ok else None
+        else:
+            source = connector if lp_ok else None
+
+        if source is None:
+            return
+
+        self._wallet_base = Decimal(str(source.get_available_balance(self._domain.base_token) or 0))
+        self._wallet_quote = Decimal(str(source.get_available_balance(self._domain.quote_token) or 0))
+        # When a router connector is configured, only mark balances as fresh if its update succeeded.
+        if router_connector is None or router_ok:
             self._last_balance_update_ts = self._market_data_provider.time()
             self._has_balance_snapshot = True
-            if not self._logged_balance_snapshot:
-                self._logger().info(
-                    "balance_snapshot_ready | base=%s quote=%s",
-                    self._wallet_base,
-                    self._wallet_quote,
-                )
-                self._logged_balance_snapshot = True
-        except Exception:
-            self._logger().exception(
-                "update_balances failed | connector=%s base=%s quote=%s last_update_ts=%.0f last_attempt_ts=%.0f",
-                self._config.connector_name,
-                self._domain.base_token,
-                self._domain.quote_token,
-                self._last_balance_update_ts,
-                self._last_balance_attempt_ts,
+        if not self._logged_balance_snapshot:
+            self._logger().info(
+                "balance_snapshot_ready | base=%s quote=%s",
+                self._wallet_base,
+                self._wallet_quote,
             )
+            self._logged_balance_snapshot = True
 
 
 class PoolPriceManager:
