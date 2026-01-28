@@ -1,4 +1,4 @@
-.PHONY: setup run deploy stop install uninstall build install-pre-commit mcp
+.PHONY: setup run deploy stop install uninstall build install-pre-commit mcp mcp-docker mcp-docker-build mcp-docker-stop
 
 SETUP_SENTINEL := .setup-complete
 
@@ -16,6 +16,35 @@ run:
 # Run MCP stdio adapter
 mcp:
 	conda run --no-capture-output -n hummingbot-api python -m mcp.mcp_server
+
+MCP_DOCKER_IMAGE ?= hummingbot-api-mcp:local
+MCP_ENV_FILE ?= .env
+MCP_DOCKER_CONTAINER ?= hummingbot-api-mcp
+
+mcp-docker-build:
+	docker build -t $(MCP_DOCKER_IMAGE) -f mcp/Dockerfile .
+
+mcp-docker: mcp-docker-build
+	@ENV_ARGS=""; \
+	ENV_MOUNT=""; \
+	if [ -f "$(MCP_ENV_FILE)" ]; then \
+		ENV_MOUNT="-v $$(pwd)/$(MCP_ENV_FILE):/app/.env:ro"; \
+	fi; \
+	if [ -n "$(MCP_HUMMINGBOT_API_URL)" ]; then \
+		ENV_ARGS="$$ENV_ARGS -e MCP_HUMMINGBOT_API_URL=$(MCP_HUMMINGBOT_API_URL)"; \
+	elif [ ! -f "$(MCP_ENV_FILE)" ]; then \
+		ENV_ARGS="$$ENV_ARGS -e MCP_HUMMINGBOT_API_URL=http://host.docker.internal:8000"; \
+	fi; \
+	if [ -n "$(MCP_HUMMINGBOT_API_USERNAME)" ]; then \
+		ENV_ARGS="$$ENV_ARGS -e MCP_HUMMINGBOT_API_USERNAME=$(MCP_HUMMINGBOT_API_USERNAME)"; \
+	fi; \
+	if [ -n "$(MCP_HUMMINGBOT_API_PASSWORD)" ]; then \
+		ENV_ARGS="$$ENV_ARGS -e MCP_HUMMINGBOT_API_PASSWORD=$(MCP_HUMMINGBOT_API_PASSWORD)"; \
+	fi; \
+	docker run --rm -d -i --name $(MCP_DOCKER_CONTAINER) $$ENV_MOUNT $$ENV_ARGS $(MCP_DOCKER_IMAGE)
+
+mcp-docker-stop:
+	-docker rm -f $(MCP_DOCKER_CONTAINER)
 
 # Deploy with Docker
 deploy: $(SETUP_SENTINEL)

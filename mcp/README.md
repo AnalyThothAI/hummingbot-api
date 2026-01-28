@@ -9,17 +9,20 @@ and does not expose any network port.
    - Run from the repo root so `./hummingbot-api-mcp` is available.
 
 ```bash
-HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
-HUMMINGBOT_API_USERNAME=admin \
-HUMMINGBOT_API_PASSWORD=admin \
+MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+MCP_HUMMINGBOT_API_USERNAME=admin \
+MCP_HUMMINGBOT_API_PASSWORD=admin \
 ./hummingbot-api-mcp
 ```
 
 ## Environment variables
-- `HUMMINGBOT_API_URL` (default: `http://127.0.0.1:8000`)
-- `HUMMINGBOT_API_USERNAME` (required)
-- `HUMMINGBOT_API_PASSWORD` (required)
-- `HUMMINGBOT_API_TIMEOUT_SECONDS` (optional, default: `10`)
+- `MCP_HUMMINGBOT_API_URL` (default: `http://127.0.0.1:8000`)
+- `MCP_HUMMINGBOT_API_USERNAME` (required)
+- `MCP_HUMMINGBOT_API_PASSWORD` (required)
+- `MCP_HUMMINGBOT_API_TIMEOUT_SECONDS` (optional, default: `10`)
+
+The MCP process reads `.env` automatically if present (simple loader, no extra deps).
+`make run` starts the API, but does not start MCP.
 
 ## Tools
 ### Gateway
@@ -85,8 +88,51 @@ It does not execute any mutating calls.
 
 Notes:
 - For pool checks, `connector_name` is normalized (e.g., `meteora/clmm` -> `meteora`).
+- Uniswap pools can have token0/token1 ordering opposite to your trading pair; planner treats this as a valid match.
+- For other connectors (e.g., Meteora), pool order is not reversed.
 - If `pool_trading_pair` order differs from `trading_pair`, provide `pool_address` or token addresses to avoid ambiguity.
 - Allowance checks only apply to EVM chains (e.g., BSC/Uniswap). Solana connectors will skip allowances.
+- If tokens/pools are missing, the plan will include `gateway_restart` (required for changes to take effect).
+
+## Agent usage (recommended)
+This MCP module is intended for **plan-first** automation. Agents should build a plan, then execute actions step-by-step.
+
+### 1) Collect minimal inputs
+- `network_id` (chain-network, e.g., `solana-mainnet-beta` / `ethereum-bsc`)
+- `connector_name` (e.g., `meteora/clmm`, `uniswap/clmm`)
+- Prefer `pool_address` for deterministic matching
+- Token info: at least addresses; use `metadata_token` when symbol/decimals are missing
+- Deployment info: `deployment_type`, `instance_name`, `credentials_profile`,
+  and either `controllers_config` or `script` + `script_config`
+
+### 2) Fill missing token metadata
+- Tool: `metadata_token` (Gateway/Gecko-backed)
+
+### 3) Build a read-only plan
+- Tool: `deploy_v2_workflow_plan`
+- Output: `summary`, `checks`, `actions`, `blockers`, `notes`
+
+### 4) Execute the plan (optional, step-by-step)
+- Run each `actions[]` tool in order.
+- When `gateway_token_add` / `gateway_pool_add` appears, **restart Gateway** using `gateway_restart`.
+
+### 5) Re-run the planner to validate
+- If `summary.ready` is true and `blockers` is empty, the chain is consistent.
+
+## Validation checklist (manual)
+- Gateway running: `gateway_status`
+- Token exists: `gateway_tokens_list`
+- Pool exists: `gateway_pools_list`
+- Allowance (EVM only): `gateway_allowances`
+- Controller config exists: `controller_config_get`
+- Script config exists: `script_config_get`
+- Instance exists: `bot_instances`
+
+## Pool lookup limits (important)
+- `metadata_pools` uses GeckoTerminal via Gateway.
+- **Meteora** has a connector fallback in API; **Uniswap does not**.
+- If Gecko is rate-limited, provide `pool_address` or rely on saved pools in `/gateway/pools`.
+- If `metadata_token` cannot resolve symbol/decimals, the agent must supply them explicitly.
 
 Example input:
 ```json
@@ -154,9 +200,9 @@ Example output (trimmed):
 ## Claude CLI (stdio)
 ```bash
 claude mcp add --transport stdio hummingbot-api -- \
-  env HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
-      HUMMINGBOT_API_USERNAME=admin \
-      HUMMINGBOT_API_PASSWORD=admin \
+  env MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+      MCP_HUMMINGBOT_API_USERNAME=admin \
+      MCP_HUMMINGBOT_API_PASSWORD=admin \
       ./hummingbot-api-mcp
 ```
 
@@ -167,12 +213,64 @@ claude mcp add --transport stdio hummingbot-api -- \
     "hummingbot-api": {
       "command": "env",
       "args": [
-        "HUMMINGBOT_API_URL=http://127.0.0.1:8000",
-        "HUMMINGBOT_API_USERNAME=admin",
-        "HUMMINGBOT_API_PASSWORD=admin",
+        "MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000",
+        "MCP_HUMMINGBOT_API_USERNAME=admin",
+        "MCP_HUMMINGBOT_API_PASSWORD=admin",
         "./hummingbot-api-mcp"
       ]
     }
   }
 }
+```
+
+## Docker (optional)
+If you want a dedicated MCP image:
+
+Build:
+```bash
+docker build -t hummingbot-api-mcp:local -f mcp/Dockerfile .
+```
+
+Run (macOS/Windows):
+```bash
+docker run --rm -i \
+  -e MCP_HUMMINGBOT_API_URL=http://host.docker.internal:8000 \
+  -e MCP_HUMMINGBOT_API_USERNAME=admin \
+  -e MCP_HUMMINGBOT_API_PASSWORD=admin \
+  hummingbot-api-mcp:local
+```
+
+Run (Linux):
+```bash
+docker run --rm -i --network host \
+  -e MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+  -e MCP_HUMMINGBOT_API_USERNAME=admin \
+  -e MCP_HUMMINGBOT_API_PASSWORD=admin \
+  hummingbot-api-mcp:local
+```
+
+If you prefer not to build an image, you can run MCP in a container without creating one:
+
+macOS/Windows (use host.docker.internal):
+```bash
+docker run --rm -i -v "$PWD:/app" -w /app \
+  -e MCP_HUMMINGBOT_API_URL=http://host.docker.internal:8000 \
+  -e MCP_HUMMINGBOT_API_USERNAME=admin \
+  -e MCP_HUMMINGBOT_API_PASSWORD=admin \
+  python:3.12-slim bash -lc "pip install -q httpx && ./hummingbot-api-mcp"
+```
+
+`make mcp-docker` behavior:
+- If `.env` exists, it is mounted into the container as `/app/.env` and read by MCP.
+- If `MCP_HUMMINGBOT_API_*` variables are set in your shell, they are passed explicitly.
+- If neither is provided, the container will not have credentials and MCP will exit.
+- Runs **detached** by default (non-blocking). Stop it with `make mcp-docker-stop`.
+
+Linux (use host network):
+```bash
+docker run --rm -i --network host -v "$PWD:/app" -w /app \
+  -e MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+  -e MCP_HUMMINGBOT_API_USERNAME=admin \
+  -e MCP_HUMMINGBOT_API_PASSWORD=admin \
+  python:3.12-slim bash -lc "pip install -q httpx && ./hummingbot-api-mcp"
 ```

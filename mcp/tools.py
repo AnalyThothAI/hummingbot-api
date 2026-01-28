@@ -613,4 +613,34 @@ def tool_definitions() -> List[Dict[str, Any]]:
                 },
             },
         },
+        {
+            "name": "metadata_token",
+            "description": "Fetch token metadata via Gateway (GeckoTerminal-backed).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "network_id": {"type": "string"},
+                    "address": {"type": "string"},
+                },
+                "required": ["network_id", "address"],
+            },
+        },
+        {
+            "name": "metadata_pools",
+            "description": "Search pools via Gateway metadata (GeckoTerminal-backed).",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "network_id": {"type": "string"},
+                    "connector": {"type": "string"},
+                    "pool_type": {"type": "string"},
+                    "token_a": {"type": "string"},
+                    "token_b": {"type": "string"},
+                    "search": {"type": "string"},
+                    "pages": {"type": "integer"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["network_id"],
+            },
+        },
     ]

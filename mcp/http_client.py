@@ -21,7 +21,7 @@ class McpHttpClient:
 
     def __init__(self, base_url: str, username: str, password: str, timeout_seconds: float = 10.0) -> None:
         if not username or not password:
-            raise ValueError("HUMMINGBOT_API_USERNAME and HUMMINGBOT_API_PASSWORD are required")
+            raise ValueError("MCP_HUMMINGBOT_API_USERNAME and MCP_HUMMINGBOT_API_PASSWORD are required")
         self.base_url = base_url.rstrip("/")
         self._client = httpx.Client(
             timeout=timeout_seconds,

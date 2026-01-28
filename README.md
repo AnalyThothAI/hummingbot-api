@@ -77,9 +77,9 @@ Restart Claude Desktop after adding.
 If you prefer a local stdio adapter (no extra container), run:
 
 ```bash
-HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
-HUMMINGBOT_API_USERNAME=admin \
-HUMMINGBOT_API_PASSWORD=admin \
+MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+MCP_HUMMINGBOT_API_USERNAME=admin \
+MCP_HUMMINGBOT_API_PASSWORD=admin \
 ./hummingbot-api-mcp
 ```
 
@@ -87,9 +87,9 @@ Claude CLI config:
 
 ```bash
 claude mcp add --transport stdio hummingbot-api -- \
-  env HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
-      HUMMINGBOT_API_USERNAME=admin \
-      HUMMINGBOT_API_PASSWORD=admin \
+  env MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+      MCP_HUMMINGBOT_API_USERNAME=admin \
+      MCP_HUMMINGBOT_API_PASSWORD=admin \
       ./hummingbot-api-mcp
 ```
 
@@ -101,9 +101,9 @@ Claude Desktop config:
     "hummingbot-api": {
       "command": "env",
       "args": [
-        "HUMMINGBOT_API_URL=http://127.0.0.1:8000",
-        "HUMMINGBOT_API_USERNAME=admin",
-        "HUMMINGBOT_API_PASSWORD=admin",
+        "MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000",
+        "MCP_HUMMINGBOT_API_USERNAME=admin",
+        "MCP_HUMMINGBOT_API_PASSWORD=admin",
         "./hummingbot-api-mcp"
       ]
     }

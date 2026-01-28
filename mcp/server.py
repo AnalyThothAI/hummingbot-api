@@ -167,10 +167,12 @@ def _write_response(response: Any) -> None:
 
 def main() -> None:
     """MCP stdio entrypoint."""
-    base_url = os.getenv("HUMMINGBOT_API_URL", "http://127.0.0.1:8000")
-    username = os.getenv("HUMMINGBOT_API_USERNAME", "")
-    password = os.getenv("HUMMINGBOT_API_PASSWORD", "")
-    timeout_seconds = float(os.getenv("HUMMINGBOT_API_TIMEOUT_SECONDS", "10"))
+    _load_dotenv()
+
+    base_url = os.getenv("MCP_HUMMINGBOT_API_URL", "http://127.0.0.1:8000")
+    username = os.getenv("MCP_HUMMINGBOT_API_USERNAME", "")
+    password = os.getenv("MCP_HUMMINGBOT_API_PASSWORD", "")
+    timeout_seconds = float(os.getenv("MCP_HUMMINGBOT_API_TIMEOUT_SECONDS", "10"))
 
     try:
         http_client = McpHttpClient(base_url, username, password, timeout_seconds=timeout_seconds)
@@ -184,3 +186,26 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def _load_dotenv(path: str = ".env") -> None:
+    """Minimal .env loader to avoid external dependencies."""
+    if not os.path.exists(path):
+        return
+    try:
+        with open(path, "r", encoding="utf-8") as env_file:
+            for raw_line in env_file:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export ") :].strip()
+                if "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip("'\"")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        return

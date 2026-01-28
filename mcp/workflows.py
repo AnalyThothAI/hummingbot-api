@@ -31,7 +31,7 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
     quote_address = _get_str(arguments, "quote_address")
     fee_pct = arguments.get("fee_pct")
 
-    tokens = arguments.get("tokens") or []
+    tokens = _normalize_tokens(arguments.get("tokens") or [])
     wallet_address = _get_str(arguments, "wallet_address")
     spender = _get_str(arguments, "spender")
     approval_amount = _get_str(arguments, "approval_amount")
@@ -84,8 +84,9 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
         else:
             plan["notes"].append("gateway_start requires gateway_passphrase")
 
-    # Tokens check
+    # Tokens check (with metadata autofill when needed)
     if network_id and tokens:
+        tokens = _fill_missing_token_metadata(network_id, tokens, http_client, plan)
         token_status = _check_tokens(network_id, tokens, http_client, plan)
         if token_status.get("missing"):
             for token in token_status["missing"]:
@@ -107,6 +108,17 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
 
     # Pools check
     if connector_name:
+        if not pool_address and tokens:
+            pool_address = _maybe_resolve_pool_address(
+                network_id,
+                connector_name,
+                pool_type,
+                tokens,
+                http_client,
+                plan,
+            )
+            if pool_address:
+                plan["notes"].append("pool_address resolved via metadata_pools")
         pool_status = _check_pools(
             connector_name,
             network,
@@ -247,6 +259,14 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
     else:
         plan["blockers"].append("instance_name_required")
 
+    if _needs_gateway_restart(plan):
+        plan["actions"].append({
+            "tool": "gateway_restart",
+            "arguments": {},
+            "reason": "gateway_restart_required",
+        })
+        plan["notes"].append("Gateway restart required after adding tokens/pools.")
+
     plan["summary"] = _build_summary(plan)
     return plan
 
@@ -275,6 +295,52 @@ def _check_tokens(network_id: str, tokens: List[dict], http_client: McpHttpClien
     return {"found": found, "missing": missing}
 
 
+def _fill_missing_token_metadata(
+    network_id: str,
+    tokens: List[dict],
+    http_client: McpHttpClient,
+    plan: Dict[str, Any],
+) -> List[dict]:
+    enriched = []
+    for token in tokens:
+        if not isinstance(token, dict):
+            continue
+        address = token.get("address")
+        if not address:
+            enriched.append(token)
+            continue
+        needs_symbol = not token.get("symbol")
+        needs_decimals = token.get("decimals") is None
+        needs_name = not token.get("name")
+        if not (needs_symbol or needs_decimals or needs_name):
+            enriched.append(token)
+            continue
+        try:
+            result = http_client.get("/metadata/token", params={"network_id": network_id, "address": address})
+            payload = result.get("token", {}) if isinstance(result, dict) else {}
+            token_copy = dict(token)
+            if needs_symbol and payload.get("symbol"):
+                token_copy["symbol"] = payload.get("symbol")
+            if needs_decimals and payload.get("decimals") is not None:
+                token_copy["decimals"] = payload.get("decimals")
+            if needs_name and payload.get("name"):
+                token_copy["name"] = payload.get("name")
+            enriched.append(token_copy)
+            plan["checks"].append({
+                "name": "metadata_token",
+                "status": "ok",
+                "details": {"address": address, "token": payload},
+            })
+        except Exception as exc:
+            enriched.append(token)
+            plan["checks"].append({
+                "name": "metadata_token",
+                "status": "error",
+                "details": {"address": address, "error": str(exc)},
+            })
+    return enriched
+
+
 def _check_pools(
     connector_name: str,
     network: Optional[str],
@@ -300,7 +366,14 @@ def _check_pools(
                     matched_pool = pool
                     missing = False
                     break
-                if not pool_address and _match_pool_symbols(pool, base, quote, base_address, quote_address):
+                if not pool_address and _match_pool_symbols(
+                    pool,
+                    base,
+                    quote,
+                    base_address,
+                    quote_address,
+                    allow_reverse=_allow_reverse_pair(connector_name),
+                ):
                     matched_pool = pool
                     missing = False
                     break
@@ -514,6 +587,7 @@ def _match_pool_symbols(
     quote: Optional[str],
     base_address: Optional[str],
     quote_address: Optional[str],
+    allow_reverse: bool,
 ) -> bool:
     if not base and not base_address:
         return False
@@ -526,7 +600,7 @@ def _match_pool_symbols(
         if quote_address and pool_quote_addr:
             return quote_address.lower() == pool_quote_addr
         return True
-    if base_address and quote_address and pool_base_addr and pool_quote_addr:
+    if allow_reverse and base_address and quote_address and pool_base_addr and pool_quote_addr:
         if base_address.lower() == pool_quote_addr and quote_address.lower() == pool_base_addr:
             return True
 
@@ -534,7 +608,7 @@ def _match_pool_symbols(
         if quote and pool_quote:
             return quote.lower() == pool_quote
         return True
-    if base and quote and pool_base and pool_quote:
+    if allow_reverse and base and quote and pool_base and pool_quote:
         if base.lower() == pool_quote and quote.lower() == pool_base:
             return True
 
@@ -589,6 +663,68 @@ def _normalize_connector_name(connector_name: Optional[str]) -> Optional[str]:
     if "/" in connector_name:
         return connector_name.split("/", 1)[0]
     return connector_name
+
+
+def _allow_reverse_pair(connector_name: Optional[str]) -> bool:
+    return connector_name == "uniswap"
+
+
+def _normalize_tokens(tokens: List[dict]) -> List[dict]:
+    normalized = []
+    for token in tokens:
+        if not isinstance(token, dict):
+            continue
+        normalized.append(token)
+    return normalized
+
+
+def _maybe_resolve_pool_address(
+    network_id: Optional[str],
+    connector_name: Optional[str],
+    pool_type: Optional[str],
+    tokens: List[dict],
+    http_client: McpHttpClient,
+    plan: Dict[str, Any],
+) -> Optional[str]:
+    if not network_id:
+        return None
+    if not connector_name:
+        return None
+    token_a = _token_symbol_or_address(tokens[0]) if len(tokens) > 0 else None
+    token_b = _token_symbol_or_address(tokens[1]) if len(tokens) > 1 else None
+    params = _pick_params(
+        {
+            "network_id": network_id,
+            "connector": connector_name,
+            "pool_type": pool_type,
+            "token_a": token_a,
+            "token_b": token_b,
+            "pages": 1,
+            "limit": 50,
+        },
+        ["network_id", "connector", "pool_type", "token_a", "token_b", "pages", "limit"],
+    )
+    try:
+        result = http_client.get("/metadata/pools", params=params)
+        pools = result.get("pools", []) if isinstance(result, dict) else []
+        if pools:
+            plan["checks"].append({
+                "name": "metadata_pools",
+                "status": "ok",
+                "details": {"count": len(pools)},
+            })
+            return pools[0].get("address")
+        plan["checks"].append({"name": "metadata_pools", "status": "ok", "details": {"count": 0}})
+    except Exception as exc:
+        plan["checks"].append({"name": "metadata_pools", "status": "error", "details": str(exc)})
+    return None
+
+
+def _needs_gateway_restart(plan: Dict[str, Any]) -> bool:
+    for action in plan.get("actions", []):
+        if action.get("tool") in {"gateway_token_add", "gateway_pool_add"}:
+            return True
+    return False
 
 
 def _derive_network_from_network_id(network_id: str) -> Optional[str]:

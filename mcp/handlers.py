@@ -358,6 +358,23 @@ def dispatch_tool(name: str, arguments: dict, http_client: McpHttpClient) -> Any
         )
     if name == "deploy_v2_workflow_plan":
         return build_deploy_v2_workflow_plan(arguments, http_client)
+    if name == "metadata_token":
+        network_id = arguments.get("network_id")
+        address = arguments.get("address")
+        if not network_id:
+            raise ValueError("network_id is required")
+        if not address:
+            raise ValueError("address is required")
+        return http_client.get("/metadata/token", params={"network_id": network_id, "address": address})
+    if name == "metadata_pools":
+        network_id = arguments.get("network_id")
+        if not network_id:
+            raise ValueError("network_id is required")
+        params = _pick_params(
+            arguments,
+            ["network_id", "connector", "pool_type", "token_a", "token_b", "search", "pages", "limit"],
+        )
+        return http_client.get("/metadata/pools", params=params)
 
     raise ValueError(f"Unknown tool: {name}")
 

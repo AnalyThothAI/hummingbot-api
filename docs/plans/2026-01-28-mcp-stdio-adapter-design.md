@@ -30,6 +30,7 @@ The adapter is a thin bridge (JSON-RPC over stdio -> HTTP API) and does not expo
 - Script config: list/get/upsert/delete/template
 - Controller config (global): list/get/upsert/delete/template/validate
 - Workflow plan: deploy-v2 read-only planner
+- Metadata: token lookup and pool search tools
 - Bot orchestration: status, instances, start, stop, deploy-v2-script, deploy-v2-controllers, stop-and-archive
 - Controller config: list configs, update config
 
@@ -40,6 +41,7 @@ The adapter is a thin bridge (JSON-RPC over stdio -> HTTP API) and does not expo
 ## Security
 - Basic Auth required via environment variables.
 - Default API URL `http://127.0.0.1:8000`.
+- MCP uses `MCP_HUMMINGBOT_API_*` env vars.
 - No local file reads or service coupling.
 
 ## Validation
