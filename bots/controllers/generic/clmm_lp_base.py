@@ -244,20 +244,51 @@ class CLMMLPBaseController(ControllerBase):
             info["ledger_needs_reconcile"] = self._ledger_status.needs_reconcile
         if current_price is not None:
             info["price"] = float(current_price)
+        rebalance_count_1h = 0
+        if self._ctx.rebalance_timestamps:
+            rebalance_count_1h = sum(1 for ts in self._ctx.rebalance_timestamps if (now - ts) <= 3600)
+        info["rebalance_count_1h"] = rebalance_count_1h
+        info["rebalance_count_total"] = int(self._ctx.rebalance_count)
+        if self._ctx.last_rebalance_ts > 0:
+            info["last_rebalance_ts"] = self._ctx.last_rebalance_ts
         if self._ctx.anchor_value_quote is not None:
             info["anchor_value_quote"] = float(self._ctx.anchor_value_quote)
             info["anchor_basis"] = "budget_cap"
-        if controller_value_quote is not None and self._ctx.anchor_value_quote is not None:
+        if (
+            controller_value_quote is not None
+            or self._ctx.realized_volume_quote > 0
+            or self._ctx.realized_pnl_quote != 0
+        ):
             anchor = self._ctx.anchor_value_quote
-            if anchor > 0:
-                controller_pnl_quote = controller_value_quote - anchor
-                info["controller_pnl_source"] = "controller"
+            realized_pnl_quote = self._ctx.realized_pnl_quote
+            realized_volume_quote = self._ctx.realized_volume_quote
+            unrealized_pnl_quote = Decimal("0")
+            unrealized_volume_quote = Decimal("0")
+            if controller_value_quote is not None and anchor is not None and anchor > 0:
+                unrealized_pnl_quote = controller_value_quote - anchor
+                unrealized_volume_quote = anchor
+            controller_net_pnl_quote = realized_pnl_quote + unrealized_pnl_quote
+            if anchor is not None and anchor > 0:
+                controller_volume_quote = anchor
+                controller_net_pnl_pct = controller_net_pnl_quote / anchor
+            else:
+                controller_volume_quote = realized_volume_quote + unrealized_volume_quote
+                if controller_volume_quote > 0:
+                    controller_net_pnl_pct = controller_net_pnl_quote / controller_volume_quote
+                else:
+                    controller_net_pnl_pct = Decimal("0")
+
+            info["controller_pnl_source"] = "controller"
+            if anchor is not None and anchor > 0:
                 info["controller_anchor_quote"] = float(anchor)
-                info["controller_net_pnl_quote"] = float(controller_pnl_quote)
-                info["controller_unrealized_pnl_quote"] = float(controller_pnl_quote)
-                info["controller_realized_pnl_quote"] = 0.0
-                info["controller_net_pnl_pct"] = float(controller_pnl_quote / anchor)
-                info["controller_volume_quote"] = float(anchor)
+            info["controller_net_pnl_quote"] = float(controller_net_pnl_quote)
+            info["controller_unrealized_pnl_quote"] = float(unrealized_pnl_quote)
+            info["controller_realized_pnl_quote"] = float(realized_pnl_quote)
+            info["controller_net_pnl_pct"] = float(controller_net_pnl_pct)
+            info["controller_volume_quote"] = float(controller_volume_quote)
+            if realized_volume_quote > 0:
+                info["controller_realized_volume_quote"] = float(realized_volume_quote)
+                info["controller_trade_volume_quote"] = float(realized_volume_quote)
         stoploss_trigger_quote: Optional[Decimal] = None
         if self._ctx.anchor_value_quote is not None and self.config.stop_loss_pnl_pct > 0:
             stoploss_trigger_quote = self._ctx.anchor_value_quote * (Decimal("1") - self.config.stop_loss_pnl_pct)

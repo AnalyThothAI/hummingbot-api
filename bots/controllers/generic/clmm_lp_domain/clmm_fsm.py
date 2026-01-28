@@ -120,6 +120,8 @@ class CLMMFSM:
         ctx.pending_swap_id = None
         ctx.pending_swap_since_ts = 0.0
         lp_view = self._select_lp(snapshot, ctx)
+        if ctx.pending_realized_anchor is not None and (lp_view is None or self._is_lp_closed(lp_view)):
+            self._record_realized_on_close(snapshot, ctx, lp_view, reason="idle")
         if ctx.anchor_value_quote is not None:
             stoploss_decision = self._maybe_stoploss(snapshot, ctx, lp_view, now, reason="stop_loss_idle")
             if stoploss_decision is not None:
@@ -231,9 +233,11 @@ class CLMMFSM:
         if stoploss_decision is not None:
             return stoploss_decision
         if ctx.pending_lp_id and self._ledger.has_event(ctx.pending_lp_id, BalanceEventKind.LP_CLOSE, ctx.state_since_ts):
+            self._record_realized_on_close(snapshot, ctx, lp_view, reason="rebalance")
             return self._transition(ctx, ControllerState.REBALANCE_SWAP, now, reason="rebalance_lp_closed")
         if lp_view is None or self._is_lp_closed(lp_view):
             if ledger_status.is_reconciled:
+                self._record_realized_on_close(snapshot, ctx, lp_view, reason="rebalance")
                 return self._transition(ctx, ControllerState.REBALANCE_SWAP, now, reason="rebalance_lp_closed")
             return self._stay(ctx, reason="rebalance_wait_close")
         if self._is_lp_in_transition(lp_view):
@@ -314,9 +318,11 @@ class CLMMFSM:
         now = snapshot.now
         lp_view = self._select_lp(snapshot, ctx)
         if ctx.pending_lp_id and self._ledger.has_event(ctx.pending_lp_id, BalanceEventKind.LP_CLOSE, ctx.state_since_ts):
+            self._record_realized_on_close(snapshot, ctx, lp_view, reason="stop_loss")
             return self._transition(ctx, ControllerState.STOPLOSS_SWAP, now, reason="stoploss_lp_closed")
         if lp_view is None or self._is_lp_closed(lp_view):
             if ledger_status.is_reconciled:
+                self._record_realized_on_close(snapshot, ctx, lp_view, reason="stop_loss")
                 return self._transition(ctx, ControllerState.STOPLOSS_SWAP, now, reason="stoploss_lp_closed")
             return self._stay(ctx, reason="stoploss_wait_close")
         if self._is_lp_in_transition(lp_view):
@@ -365,6 +371,8 @@ class CLMMFSM:
         now = snapshot.now
         if now < ctx.cooldown_until_ts:
             return self._stay(ctx, reason="cooldown")
+        if ctx.pending_realized_anchor is not None:
+            self._record_realized_on_close(snapshot, ctx, None, reason="cooldown")
         return self._transition(ctx, ControllerState.IDLE, now, reason="cooldown_complete")
 
     def _plan_entry_open(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
@@ -512,7 +520,8 @@ class CLMMFSM:
             return None
         ctx.last_exit_reason = "stop_loss"
         ctx.cooldown_until_ts = now + self._config.stop_loss_pause_sec
-        ctx.anchor_value_quote = None
+        if ctx.pending_realized_anchor is None:
+            ctx.pending_realized_anchor = ctx.anchor_value_quote
         if lp_view is None or self._is_lp_closed(lp_view):
             return self._transition(
                 ctx,
@@ -533,7 +542,8 @@ class CLMMFSM:
     def _force_manual_stop(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
         ctx.last_exit_reason = "manual_stop"
-        ctx.anchor_value_quote = None
+        if ctx.pending_realized_anchor is None:
+            ctx.pending_realized_anchor = ctx.anchor_value_quote
         ctx.cooldown_until_ts = 0.0
 
         lp_view = self._select_lp(snapshot, ctx)
@@ -542,6 +552,7 @@ class CLMMFSM:
             actions.append(StopExecutorAction(controller_id=self._config.id, executor_id=swap.executor_id))
 
         if lp_view is None or not self._is_lp_open(lp_view):
+            self._record_realized_on_close(snapshot, ctx, lp_view, reason="manual_stop")
             if actions:
                 return self._transition(ctx, ControllerState.STOPLOSS_SWAP, now, reason="manual_stop", actions=actions)
             if snapshot.wallet_base <= 0:
@@ -582,6 +593,27 @@ class CLMMFSM:
             return
         if ctx.out_of_range_since is None:
             ctx.out_of_range_since = snapshot.now
+
+    def _record_realized_on_close(
+        self,
+        snapshot: Snapshot,
+        ctx: ControllerContext,
+        lp_view: Optional[LPView],
+        *,
+        reason: str,
+    ) -> None:
+        anchor = ctx.anchor_value_quote or ctx.pending_realized_anchor
+        if anchor is None or anchor <= 0:
+            return
+        current_price = self._effective_price(snapshot, lp_view)
+        if current_price is None or current_price <= 0:
+            return
+        equity = self._compute_risk_equity_value(snapshot, lp_view, current_price, anchor)
+        if equity is None:
+            return
+        ctx.realized_pnl_quote += equity - anchor
+        ctx.realized_volume_quote += anchor
+        ctx.pending_realized_anchor = None
 
     def _compute_equity_value(
         self,

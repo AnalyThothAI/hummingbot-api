@@ -13,6 +13,7 @@ initialize_st_page(icon="🦅", show_readme=False)
 backend_api_client = get_backend_api_client()
 
 REFRESH_INTERVAL = 10
+ARCHIVE_PENDING_TIMEOUT_SEC = 120
 
 STATUS_REASON_MAP = {
     "mqtt_disconnected": "MQTT disconnected",
@@ -52,6 +53,20 @@ STRATEGY_LABELS = {
     "stopping": "Stopping",
     "unknown": "Unknown",
 }
+
+
+def _get_archive_pending():
+    if "archive_pending" not in st.session_state:
+        st.session_state["archive_pending"] = {}
+    return st.session_state["archive_pending"]
+
+
+def _mark_archive_pending(bot_name: str):
+    _get_archive_pending()[bot_name] = time.time()
+
+
+def _clear_archive_pending(bot_name: str):
+    _get_archive_pending().pop(bot_name, None)
 
 
 def format_label(value: Optional[str], mapping: Dict[str, str]) -> str:
@@ -211,6 +226,7 @@ def start_container(bot_name: str):
 
 
 def archive_bot(bot_name: str, docker_status: str):
+    _mark_archive_pending(bot_name)
     if docker_status == "running":
         response = backend_api_request("POST", f"/bot-orchestration/stop-and-archive-bot/{bot_name}")
         success_message = f"Stop-and-archive initiated for {bot_name}."
@@ -222,6 +238,7 @@ def archive_bot(bot_name: str, docker_status: str):
 
     if handle_action_response(response, success_message, error_message):
         return
+    _clear_archive_pending(bot_name)
 
 
 def stop_controllers(bot_name: str, controllers: List[str]) -> bool:
@@ -305,6 +322,13 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
         signals.append(f"LP: {lp_active}")
     if swap_active is not None:
         signals.append(f"Swaps: {swap_active}")
+
+    rebalance_1h = custom_info.get("rebalance_count_1h")
+    rebalance_total = custom_info.get("rebalance_count_total")
+    if rebalance_1h is not None:
+        notes.append(f"Reb 1h: {rebalance_1h}")
+    if rebalance_total is not None:
+        notes.append(f"Reb total: {rebalance_total}")
 
     price = custom_info.get("price")
     if price is not None:
@@ -428,7 +452,10 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
             global_pnl_quote = _override_value("controller_net_pnl_quote", global_pnl_quote)
             unrealized_pnl_quote = _override_value("controller_unrealized_pnl_quote", unrealized_pnl_quote)
             realized_pnl_quote = _override_value("controller_realized_pnl_quote", realized_pnl_quote)
-            volume_traded = _override_value("controller_volume_quote", volume_traded)
+            volume_traded = _override_value(
+                "controller_trade_volume_quote",
+                _override_value("controller_volume_quote", volume_traded),
+            )
         nav_quote = custom_info.get("nav_quote")
 
         close_types = controller_performance.get("close_type_counts", {})
@@ -1043,7 +1070,18 @@ def render_overview(instances: List[Dict[str, Any]]):
                 container_label = "➕ Launch New"
                 container_action = lambda: st.switch_page("frontend/pages/orchestration/launch_bot_v2/app.py")
 
-            archive_label = "🧯 Stop & Archive" if docker_status == "running" else "🗃️ Archive"
+            archive_pending = bot_name in _get_archive_pending()
+            if archive_pending:
+                pending_since = _get_archive_pending().get(bot_name, 0)
+                if pending_since and (time.time() - pending_since) > ARCHIVE_PENDING_TIMEOUT_SEC:
+                    _clear_archive_pending(bot_name)
+                    archive_pending = False
+            if archive_pending and docker_status == "missing":
+                _clear_archive_pending(bot_name)
+                archive_pending = False
+            archive_label = "⏳ Archiving..." if archive_pending else (
+                "🧯 Stop & Archive" if docker_status == "running" else "🗃️ Archive"
+            )
 
             action_cols = st.columns(3)
             with action_cols[0]:
@@ -1062,8 +1100,15 @@ def render_overview(instances: List[Dict[str, Any]]):
                     key=f"archive_{bot_name}",
                     use_container_width=True,
                     type="secondary",
+                    disabled=archive_pending,
                 ):
                     archive_bot(bot_name, docker_status)
+                if archive_pending:
+                    pending_since = _get_archive_pending().get(bot_name, 0)
+                    if pending_since:
+                        remaining = max(0, int(ARCHIVE_PENDING_TIMEOUT_SEC - (time.time() - pending_since)))
+                        if remaining > 0:
+                            st.caption(f"Retry in {remaining}s")
             with action_cols[2]:
                 if st.button("📜 Logs Page", key=f"open_logs_{bot_name}", use_container_width=True):
                     st.session_state.logs_selected_container = bot_name

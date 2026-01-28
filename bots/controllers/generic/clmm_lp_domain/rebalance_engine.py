@@ -72,6 +72,7 @@ class RebalanceEngine:
     def record_rebalance(self, now: float, ctx: ControllerContext) -> None:
         ctx.last_rebalance_ts = now
         ctx.rebalance_timestamps.append(now)
+        ctx.rebalance_count += 1
 
     def _can_rebalance_now(self, now: float, ctx: ControllerContext) -> bool:
         if self._config.max_rebalances_per_hour <= 0:

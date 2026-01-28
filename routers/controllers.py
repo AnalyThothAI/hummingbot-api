@@ -101,7 +101,12 @@ async def create_or_update_controller_config(config_name: str, config: Dict):
         HTTPException: 400 if save error occurs
     """
     try:
-        yaml_content = yaml.dump(config, default_flow_style=False)
+        yaml_content = yaml.dump(
+            config,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
         fs_util.add_file('conf/controllers', f"{config_name}.yml", yaml_content, override=True)
         return {"message": f"Configuration '{config_name}' saved successfully"}
     except Exception as e:

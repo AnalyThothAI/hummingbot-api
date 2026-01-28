@@ -6,10 +6,13 @@ from typing import Dict
 
 import pandas as pd
 import streamlit as st
+import yaml
 
 from frontend.st_utils import backend_api_request, get_backend_api_client, initialize_st_page
 
 UNLIMITED_ALLOWANCE_THRESHOLD = Decimal("10000000000")
+APPROVAL_PENDING_TIMEOUT_SEC = 30
+APPROVAL_AUTO_REFRESH_SEC = 30
 
 initialize_st_page(icon="🙌", show_readme=False)
 
@@ -545,6 +548,39 @@ def build_override_config_payload(config: Dict, overrides: Dict) -> Dict:
     return payload
 
 
+def render_effective_config_preview(selected_controllers, controller_configs, overrides):
+    if not selected_controllers:
+        return
+    controller_config_map = build_controller_config_map(controller_configs)
+    effective_config_map = apply_config_overrides(controller_config_map, overrides or {})
+    st.info("📄 **Effective Config Preview:** Final configs that will be deployed (read-only).")
+    for config_id in selected_controllers:
+        config = effective_config_map.get(config_id)
+        if not isinstance(config, dict):
+            continue
+        base_config = controller_config_map.get(config_id) if isinstance(controller_config_map.get(config_id), dict) else {}
+        diff_rows = []
+        for key, value in config.items():
+            base_value = base_config.get(key)
+            if value != base_value:
+                diff_rows.append({
+                    "Key": key,
+                    "Before": base_value,
+                    "After": value,
+                })
+        preview = yaml.dump(
+            config,
+            default_flow_style=False,
+            sort_keys=False,
+            allow_unicode=True,
+        )
+        with st.expander(f"{config_id} · Preview", expanded=False):
+            if diff_rows:
+                st.caption("Overrides Summary")
+                st.dataframe(pd.DataFrame(diff_rows), use_container_width=True, hide_index=True)
+            st.code(preview, language="yaml")
+
+
 def generate_override_config_name(config_id: str) -> str:
     timestamp = time.strftime("%Y%m%d-%H%M%S")
     suffix = secrets.token_hex(2)
@@ -780,6 +816,12 @@ def render_approval_gate(
         st.session_state["approval_cache"] = {}
     if "approval_errors" not in st.session_state:
         st.session_state["approval_errors"] = {}
+    if "approval_pending" not in st.session_state:
+        st.session_state["approval_pending"] = {}
+    if "approval_last_checked_ts" not in st.session_state:
+        st.session_state["approval_last_checked_ts"] = 0.0
+    if "approval_ready_last" not in st.session_state:
+        st.session_state["approval_ready_last"] = None
 
     signature = (
         tuple(sorted(selected_controllers)),
@@ -791,9 +833,17 @@ def render_approval_gate(
         st.session_state["approval_cache"] = {}
         st.session_state["approval_errors"] = {}
         st.session_state["approval_checked"] = False
+        st.session_state["approval_pending"] = {}
+        st.session_state["approval_last_checked_ts"] = 0.0
+        st.session_state["approval_ready_last"] = None
 
     check_clicked = st.button("🔍 Check approvals", use_container_width=True)
-    should_check = check_clicked or not st.session_state.get("approval_checked", False)
+    last_checked = st.session_state.get("approval_last_checked_ts", 0.0)
+    auto_check = False
+    if st.session_state.get("approval_checked", False):
+        if st.session_state.get("approval_ready_last") is False and time.time() - last_checked >= APPROVAL_AUTO_REFRESH_SEC:
+            auto_check = True
+    should_check = check_clicked or not st.session_state.get("approval_checked", False) or auto_check
 
     if should_check:
         with st.spinner("Fetching allowances..."):
@@ -819,6 +869,7 @@ def render_approval_gate(
                     error_msg = response.get("error", "Failed to fetch allowances.")
                     st.session_state["approval_errors"][spender] = error_msg
             st.session_state["approval_checked"] = True
+            st.session_state["approval_last_checked_ts"] = time.time()
 
     errors = st.session_state.get("approval_errors", {})
     for spender, error_msg in errors.items():
@@ -875,6 +926,8 @@ def render_approval_gate(
 
     if missing:
         st.warning("Approvals required before deployment.")
+        if hasattr(st, "autorefresh"):
+            st.autorefresh(interval=APPROVAL_AUTO_REFRESH_SEC * 1000, key="approval_autorefresh")
         for item in missing:
             cols = st.columns([3, 3, 2, 2])
             cols[0].markdown(f"**{item['controller']}**")
@@ -882,13 +935,30 @@ def render_approval_gate(
             cols[2].markdown("Need: unlimited")
             approve_key = f"approve_{item['controller']}_{item['spender']}_{item['token']}"
             approve_key = re.sub(r"[^a-zA-Z0-9_-]+", "_", approve_key)
-            if cols[3].button("Approve", key=approve_key, use_container_width=True):
+            pending_ts = st.session_state["approval_pending"].get(approve_key)
+            pending = False
+            retry_in = 0
+            if pending_ts is not None:
+                elapsed = time.time() - pending_ts
+                if elapsed < APPROVAL_PENDING_TIMEOUT_SEC:
+                    pending = True
+                    retry_in = int(APPROVAL_PENDING_TIMEOUT_SEC - elapsed)
+                else:
+                    st.session_state["approval_pending"].pop(approve_key, None)
+            button_label = "Approving..." if pending else "Approve"
+            if cols[3].button(
+                button_label,
+                key=approve_key,
+                use_container_width=True,
+                disabled=pending,
+            ):
                 approve_payload = {
                     "network_id": gateway_network_id,
                     "address": wallet_address,
                     "token": item["token"],
                     "spender": item["spender"],
                 }
+                st.session_state["approval_pending"][approve_key] = time.time()
                 response = backend_api_request(
                     "POST",
                     "/gateway/approve",
@@ -901,9 +971,13 @@ def render_approval_gate(
                     st.session_state["approval_checked"] = False
                 else:
                     st.error(response.get("error", "Approval failed."))
+                    st.session_state["approval_pending"].pop(approve_key, None)
+            if pending and retry_in > 0:
+                cols[3].caption(f"Retry in {retry_in}s")
     else:
         st.success("All approvals are ready.")
 
+    st.session_state["approval_ready_last"] = not bool(missing)
     return approval_ready
 
 
@@ -1260,6 +1334,11 @@ else:
                     gateway_network_id,
                 )
                 maybe_autoset_gateway_network(
+                    selected_controllers,
+                    all_controllers_config,
+                    controller_overrides,
+                )
+                render_effective_config_preview(
                     selected_controllers,
                     all_controllers_config,
                     controller_overrides,

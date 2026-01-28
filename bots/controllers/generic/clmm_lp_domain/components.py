@@ -214,6 +214,7 @@ class ControllerContext:
     anchor_value_quote: Optional[Decimal] = None
     last_rebalance_ts: float = 0.0
     rebalance_timestamps: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
+    rebalance_count: int = 0
     pending_lp_id: Optional[str] = None
     pending_swap_id: Optional[str] = None
     pending_swap_since_ts: float = 0.0
@@ -224,6 +225,9 @@ class ControllerContext:
     last_exit_reason: Optional[str] = None
     last_decision_reason: Optional[str] = None
     out_of_range_since: Optional[float] = None
+    realized_pnl_quote: Decimal = Decimal("0")
+    realized_volume_quote: Decimal = Decimal("0")
+    pending_realized_anchor: Optional[Decimal] = None
     fee: FeeEstimatorContext = field(default_factory=FeeEstimatorContext)
 
 
