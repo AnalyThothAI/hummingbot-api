@@ -292,6 +292,10 @@ def maybe_autoset_gateway_network(selected_controllers, controller_configs, conf
         return
     target_network = choose_network_for_chain(networks, "solana")
     if target_network:
+        # Do not update widget state after instantiation; defer to next rerun.
+        if "gateway_network_select" in st.session_state:
+            st.session_state["gateway_network_autoselect"] = target_network
+            return
         st.session_state["gateway_network_select"] = target_network
 
 
@@ -724,6 +728,14 @@ def render_gateway_overrides():
 
         if "gateway_network_overridden" not in st.session_state:
             st.session_state["gateway_network_overridden"] = False
+        autoselect = st.session_state.get("gateway_network_autoselect")
+        if (
+            autoselect
+            and not st.session_state.get("gateway_network_overridden")
+            and autoselect in network_options
+        ):
+            st.session_state["gateway_network_select"] = autoselect
+            st.session_state.pop("gateway_network_autoselect", None)
         preset_network = st.session_state.get("gateway_network_select")
         if preset_network in network_options:
             default_network_index = network_options.index(preset_network)

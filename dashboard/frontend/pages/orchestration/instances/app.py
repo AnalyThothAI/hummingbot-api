@@ -498,10 +498,20 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
             def _use_or_default(value: Any, default: Any):
                 return default if value is None else value
 
+            anchor_quote = risk.get("anchor_quote")
+            equity_quote = risk.get("equity_quote")
+            nav_quote = equity_quote
+
             realized_pnl_quote = _use_or_default(risk.get("pnl_realized_quote"), realized_pnl_quote)
             unrealized_pnl_quote = _use_or_default(risk.get("pnl_unrealized_quote"), unrealized_pnl_quote)
             global_pnl_quote = _use_or_default(risk.get("pnl_net_quote"), global_pnl_quote)
-            nav_quote = risk.get("equity_quote")
+
+            if anchor_quote is not None and equity_quote is not None:
+                derived_unrealized = equity_quote - anchor_quote
+                if risk.get("pnl_unrealized_quote") is None:
+                    unrealized_pnl_quote = derived_unrealized
+                if risk.get("pnl_net_quote") is None:
+                    global_pnl_quote = realized_pnl_quote + derived_unrealized
         if nav_quote is None:
             nav_quote = custom_info.get("nav_quote") if isinstance(custom_info, dict) else None
 

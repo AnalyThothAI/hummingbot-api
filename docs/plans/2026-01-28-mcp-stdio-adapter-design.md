@@ -15,13 +15,21 @@ The adapter is a thin bridge (JSON-RPC over stdio -> HTTP API) and does not expo
 - No external exposure or persistent state.
 
 ## Architecture
-- `mcp/mcp_server.py` reads stdin JSON-RPC, writes stdout responses.
+- `mcp/server.py` reads stdin JSON-RPC, writes stdout responses.
+- `mcp/tools.py` holds tool definitions.
+- `mcp/handlers.py` maps tool calls to HTTP endpoints.
+- `mcp/http_client.py` wraps local API calls.
 - `McpHttpClient` wraps local HTTP calls with Basic Auth.
 - Tool handlers map to existing endpoints with minimal validation.
 
 ## Tool coverage
 - Gateway management: status/start/stop/restart/logs
 - Gateway config/meta: connectors, connector config, tokens, pools, allowances, approve
+- Gateway swap: quote/execute
+- Gateway CLMM: pool info, pools, open/close/collect, positions owned, events, search
+- Script config: list/get/upsert/delete/template
+- Controller config (global): list/get/upsert/delete/template/validate
+- Workflow plan: deploy-v2 read-only planner
 - Bot orchestration: status, instances, start, stop, deploy-v2-script, deploy-v2-controllers, stop-and-archive
 - Controller config: list configs, update config
 
