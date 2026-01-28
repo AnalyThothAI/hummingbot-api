@@ -1,4 +1,5 @@
 import re
+import time
 
 import pandas as pd
 import streamlit as st
@@ -263,6 +264,15 @@ def to_float(value) -> float | None:
         return None
 
 
+def to_int(value) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def format_api_error(response, fallback: str):
     data = response.get("data", {})
     if isinstance(data, dict):
@@ -279,6 +289,89 @@ def apply_pending_widget_updates(state_key: str):
         for key, value in pending.items():
             if value is not None:
                 st.session_state[key] = value
+
+
+def resolve_token_address(network_id: str, symbol: str) -> str | None:
+    if not network_id or not symbol:
+        return None
+    symbol_value = symbol.strip()
+    if not symbol_value:
+        return None
+    if symbol_value.startswith("0x") or is_valid_solana_address(symbol_value):
+        return None
+
+    cache = st.session_state.setdefault("token_symbol_cache", {})
+    cache_key = f"{network_id}:{symbol_value.lower()}"
+    if cache_key in cache:
+        return cache.get(cache_key) or None
+
+    response = backend_api_request(
+        "GET",
+        f"/gateway/networks/{network_id}/tokens",
+        params={"search": symbol_value},
+    )
+    if response.get("ok"):
+        payload = response.get("data", {})
+        tokens = payload.get("tokens", [])
+        if isinstance(tokens, list):
+            for token in tokens:
+                if not isinstance(token, dict):
+                    continue
+                token_symbol = token.get("symbol")
+                if token_symbol and token_symbol.lower() == symbol_value.lower():
+                    address = token.get("address")
+                    cache[cache_key] = address or ""
+                    return address
+        cache[cache_key] = ""
+        return None
+
+    return None
+
+
+def auto_fill_token_address(symbol_key: str, address_key: str, network_id: str, auto_key: str):
+    if not network_id:
+        return
+
+    symbol_value = st.session_state.get(symbol_key)
+    if not symbol_value or not symbol_value.strip():
+        return
+
+    address_value = st.session_state.get(address_key)
+    auto_value_key = f"{auto_key}_auto_value"
+    resolved_key_key = f"{auto_key}_resolved_key"
+
+    if address_value and st.session_state.get(auto_value_key) is None and st.session_state.get(resolved_key_key) is None:
+        return
+
+    if address_value and st.session_state.get(auto_value_key) and address_value != st.session_state.get(auto_value_key):
+        st.session_state[auto_value_key] = None
+        st.session_state[resolved_key_key] = None
+
+    lookup_key = f"{network_id}:{symbol_value.strip().lower()}"
+    if address_value and st.session_state.get(resolved_key_key) == lookup_key:
+        return
+
+    last_change_key = f"{auto_key}_last_change"
+    last_symbol_key = f"{auto_key}_last_symbol"
+    last_network_key = f"{auto_key}_last_network"
+    now = time.time()
+    if st.session_state.get(last_symbol_key) != symbol_value or st.session_state.get(last_network_key) != network_id:
+        st.session_state[last_symbol_key] = symbol_value
+        st.session_state[last_network_key] = network_id
+        st.session_state[last_change_key] = now
+
+    elapsed = now - st.session_state.get(last_change_key, now)
+    if elapsed < 0.5:
+        time.sleep(0.5 - elapsed)
+
+    if address_value and st.session_state.get(auto_value_key) and address_value != st.session_state.get(auto_value_key):
+        return
+
+    resolved_address = resolve_token_address(network_id, symbol_value)
+    if resolved_address:
+        st.session_state[address_key] = resolved_address
+        st.session_state[auto_value_key] = resolved_address
+        st.session_state[resolved_key_key] = lookup_key
 
 
 def networks_for_connector(connector_name: str, fallback: list[str]):
@@ -549,7 +642,7 @@ with tabs[1]:
     st.subheader("Pools")
     st.caption("Add custom pools for supported connectors. Restart Gateway after adding pools.")
 
-    st.markdown("**Add Pool**")
+    st.markdown("**Pool Finder**")
     set_default_choice("pool_connector", "uniswap", connectors_list)
     connector_name = select_connector("Connector", "pool_connector", connectors_list)
     pool_network_options = networks_for_connector(connector_name, network_options)
@@ -565,53 +658,33 @@ with tabs[1]:
         set_default_selection("pool_network", "pool_network_ctx", connector_name, default_pool_network)
     network_id = select_network("Network", "pool_network", pool_network_options)
     pool_type = st.selectbox("Pool Type", ["clmm", "amm"], key="pool_type")
+
+    data_source = st.radio(
+        "Data Source",
+        ["Search Results", "Existing Pools"],
+        horizontal=True,
+        key="pool_data_source",
+    )
+
     apply_pending_widget_updates("pool_pending_updates")
     pool_autofill_message = st.session_state.pop("pool_autofill_message", None)
     if pool_autofill_message:
         st.success(pool_autofill_message)
 
-    pool_search_context = f"{connector_name}|{network_id}|{pool_type}"
-    if st.session_state.get("pool_search_context") != pool_search_context:
-        st.session_state["pool_search_context"] = pool_search_context
+    pool_context = f"{connector_name}|{network_id}|{pool_type}"
+    if st.session_state.get("pool_search_context") != pool_context:
+        st.session_state["pool_search_context"] = pool_context
         st.session_state.pop("pool_search_results", None)
+        st.session_state.pop("pool_search_key", None)
+    if st.session_state.get("pool_existing_context") != pool_context:
+        st.session_state["pool_existing_context"] = pool_context
+        st.session_state.pop("pool_existing_results", None)
+        st.session_state.pop("pool_existing_key", None)
+
+    selection_context = f"{connector_name}|{network_id}|{pool_type}|{data_source}"
+    if st.session_state.get("pool_selection_context") != selection_context:
+        st.session_state["pool_selection_context"] = selection_context
         st.session_state.pop("pool_search_choice", None)
-
-    st.markdown("**Search Pools**")
-    search_cols = st.columns(2)
-    with search_cols[0]:
-        token_a = st.text_input("Token A (symbol or address)", key="pool_search_token_a")
-    with search_cols[1]:
-        token_b = st.text_input("Token B (symbol or address)", key="pool_search_token_b")
-
-    search_term = st.text_input(
-        "Search (optional)",
-        key="pool_search_term",
-        help="Used when Token A/B are empty (e.g., SOL or SOL-USDC).",
-    )
-
-    options_cols = st.columns(2)
-    with options_cols[0]:
-        pages = st.number_input("Pages", min_value=1, max_value=10, value=1, step=1, key="pool_search_pages")
-    with options_cols[1]:
-        limit = st.number_input("Limit", min_value=1, max_value=200, value=50, step=1, key="pool_search_limit")
-
-    st.markdown("**Filters & Sorting**")
-    filter_cols = st.columns(4)
-    with filter_cols[0]:
-        min_tvl = st.number_input("Min TVL (USD)", min_value=0.0, step=1000.0, value=0.0, key="pool_filter_min_tvl")
-    with filter_cols[1]:
-        min_volume = st.number_input("Min Volume 24h (USD)", min_value=0.0, step=1000.0, value=0.0, key="pool_filter_min_volume")
-    with filter_cols[2]:
-        min_apy = st.number_input("Min APY %", min_value=0.0, step=1.0, value=0.0, key="pool_filter_min_apy")
-    with filter_cols[3]:
-        sort_options = [
-            "TVL (desc)",
-            "Volume 24h (desc)",
-            "APY (desc)",
-            "APR (desc)",
-            "Fee % (asc)",
-        ]
-        sort_choice = st.selectbox("Sort By", sort_options, key="pool_filter_sort")
 
     def is_search_value_ready(value: str | None) -> bool:
         if not value:
@@ -635,61 +708,214 @@ with tabs[1]:
             return True
         return len(trimmed) >= 2
 
-    should_search = (
-        is_search_value_ready(token_a)
-        or is_search_value_ready(token_b)
-        or is_search_term_ready(search_term)
-    )
+    def normalize_search_pool(pool: dict) -> dict:
+        return {
+            "trading_pair": pool.get("trading_pair"),
+            "base_symbol": pool.get("base_symbol"),
+            "quote_symbol": pool.get("quote_symbol"),
+            "base_address": pool.get("base_address"),
+            "quote_address": pool.get("quote_address"),
+            "fee_tier": pool.get("fee_tier"),
+            "bin_step": pool.get("bin_step"),
+            "volume_24h": pool.get("volume_24h"),
+            "tvl_usd": pool.get("tvl_usd"),
+            "apr": pool.get("apr"),
+            "apy": pool.get("apy"),
+            "address": pool.get("address"),
+        }
 
-    if should_search:
-        if connector_name and network_id and "-" in network_id:
-            search_key = "|".join([
+    def normalize_existing_pool(pool: dict) -> dict:
+        base_symbol = pool.get("base") or pool.get("base_symbol")
+        quote_symbol = pool.get("quote") or pool.get("quote_symbol")
+        trading_pair = pool.get("trading_pair")
+        if not trading_pair and base_symbol and quote_symbol:
+            trading_pair = f"{base_symbol}-{quote_symbol}"
+        return {
+            "trading_pair": trading_pair,
+            "base_symbol": base_symbol,
+            "quote_symbol": quote_symbol,
+            "base_address": pool.get("base_address") or pool.get("base_token_address"),
+            "quote_address": pool.get("quote_address") or pool.get("quote_token_address"),
+            "fee_tier": pool.get("fee_pct") if pool.get("fee_pct") is not None else pool.get("fee_tier"),
+            "bin_step": pool.get("bin_step"),
+            "volume_24h": None,
+            "tvl_usd": None,
+            "apr": None,
+            "apy": None,
+            "address": pool.get("address"),
+        }
+
+    pools_results = []
+    min_tvl = 0.0
+    min_volume = 0.0
+    min_apy = 0.0
+    sort_choice = None
+    prefer_bins = False
+
+    if data_source == "Search Results":
+        st.markdown("**Search Pools**")
+        search_cols = st.columns(2)
+        with search_cols[0]:
+            token_a = st.text_input("Token A (symbol or address)", key="pool_search_token_a")
+        with search_cols[1]:
+            token_b = st.text_input("Token B (symbol or address)", key="pool_search_token_b")
+
+        search_term = st.text_input(
+            "Search (optional)",
+            key="pool_search_term",
+            help="Used when Token A/B are empty (e.g., SOL or SOL-USDC).",
+        )
+
+        with st.expander("Advanced Search", expanded=False):
+            pages = st.number_input("Pages", min_value=1, max_value=10, value=1, step=1, key="pool_search_pages")
+            limit = st.number_input("Limit", min_value=1, max_value=200, value=50, step=1, key="pool_search_limit")
+
+        search_clicked = st.button("Search Pools", key="pool_search_submit", use_container_width=True)
+        if search_clicked:
+            if not connector_name or not network_id:
+                st.error("Connector and network are required.")
+            else:
+                has_any_input = any([
+                    token_a and token_a.strip(),
+                    token_b and token_b.strip(),
+                    search_term and search_term.strip(),
+                ])
+                valid_search = (
+                    is_search_value_ready(token_a)
+                    or is_search_value_ready(token_b)
+                    or is_search_term_ready(search_term)
+                )
+                if has_any_input and not valid_search:
+                    st.error("Search terms are too short or invalid.")
+                else:
+                    search_key = "|".join([
+                        connector_name or "",
+                        network_id or "",
+                        pool_type or "",
+                        token_a.strip() if token_a else "",
+                        token_b.strip() if token_b else "",
+                        search_term.strip() if search_term else "",
+                        str(int(pages)),
+                        str(int(limit)),
+                    ])
+                    st.session_state["pool_search_key"] = search_key
+                    st.session_state.pop("pool_search_choice", None)
+                    with st.spinner("Searching pools..."):
+                        response = backend_api_request(
+                            "GET",
+                            "/metadata/pools",
+                            params={
+                                "connector": connector_name,
+                                "network_id": network_id,
+                                "pool_type": pool_type,
+                                "token_a": token_a or None,
+                                "token_b": token_b or None,
+                                "search": search_term or None,
+                                "pages": int(pages),
+                                "limit": int(limit),
+                            },
+                        )
+                    if response.get("ok"):
+                        payload = response.get("data", {})
+                        pools_results = payload.get("pools", [])
+                        st.session_state["pool_search_results"] = pools_results
+                    else:
+                        status_code = response.get("status_code")
+                        if status_code == 401:
+                            st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+                        else:
+                            st.error(format_api_error(response, "Failed to fetch pools."))
+        elif not st.session_state.get("pool_search_results"):
+            st.caption("Enter tokens and click Search, or leave empty to fetch top pools by network.")
+
+        pools_results = st.session_state.get("pool_search_results", [])
+
+        st.markdown("**Filters & Sorting**")
+        filter_cols = st.columns(4)
+        with filter_cols[0]:
+            min_tvl = st.number_input("Min TVL (USD)", min_value=0.0, step=1000.0, value=0.0, key="pool_filter_min_tvl")
+        with filter_cols[1]:
+            min_volume = st.number_input(
+                "Min Volume 24h (USD)",
+                min_value=0.0,
+                step=1000.0,
+                value=0.0,
+                key="pool_filter_min_volume",
+            )
+        with filter_cols[2]:
+            min_apy = st.number_input("Min APY %", min_value=0.0, step=1.0, value=0.0, key="pool_filter_min_apy")
+        with filter_cols[3]:
+            sort_options = [
+                "Volume 24h (desc)",
+                "TVL (desc)",
+                "APY (desc)",
+                "APR (desc)",
+                "Fee % (asc)",
+            ]
+            sort_choice = st.selectbox("Sort By", sort_options, key="pool_filter_sort")
+
+        if connector_name == "meteora" and pool_type == "clmm":
+            prefer_bins = st.checkbox("Prefer Meteora bins 80/100", value=True, key="pool_filter_prefer_bins")
+
+    else:
+        st.markdown("**Existing Pools**")
+        st.caption("Existing pools are the pools already saved in Gateway (no live volume/TVL).")
+        existing_search = st.text_input("Filter (symbol or address)", key="pool_existing_search")
+        refresh_existing = st.button("Load Pools", key="pool_existing_submit", use_container_width=True)
+
+        if connector_name and network_id:
+            if "-" in network_id:
+                _, network_value = network_id.split("-", 1)
+            else:
+                network_value = network_id
+            existing_key = "|".join([
                 connector_name or "",
                 network_id or "",
                 pool_type or "",
-                token_a.strip() if token_a else "",
-                token_b.strip() if token_b else "",
-                search_term.strip() if search_term else "",
-                str(int(pages)),
-                str(int(limit)),
+                existing_search.strip() if existing_search else "",
             ])
-            if st.session_state.get("pool_search_key") != search_key:
-                st.session_state["pool_search_key"] = search_key
-                with st.spinner("Searching pools..."):
+            if refresh_existing or st.session_state.get("pool_existing_key") != existing_key:
+                st.session_state["pool_existing_key"] = existing_key
+                st.session_state.pop("pool_search_choice", None)
+                with st.spinner("Loading pools..."):
                     response = backend_api_request(
                         "GET",
-                        "/metadata/pools",
+                        "/gateway/pools",
                         params={
-                            "connector": connector_name,
-                            "network_id": network_id,
+                            "connector_name": connector_name,
+                            "network": network_value,
                             "pool_type": pool_type,
-                            "token_a": token_a or None,
-                            "token_b": token_b or None,
-                            "search": search_term or None,
-                            "pages": int(pages),
-                            "limit": int(limit),
+                            "search": existing_search or None,
                         },
                     )
                 if response.get("ok"):
-                    payload = response.get("data", {})
-                    pools_results = payload.get("pools", [])
-                    st.session_state["pool_search_results"] = pools_results
+                    pools_results = response.get("data", [])
+                    st.session_state["pool_existing_results"] = pools_results
                 else:
                     status_code = response.get("status_code")
                     if status_code == 401:
                         st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
                     else:
                         st.error(format_api_error(response, "Failed to fetch pools."))
-    else:
-        st.caption("Enter token symbols or addresses to search pools.")
-        st.session_state.pop("pool_search_results", None)
-        st.session_state.pop("pool_search_key", None)
-        st.session_state.pop("pool_search_choice", None)
+        else:
+            st.info("Select a connector and network to load pools.")
 
-    pools_results = st.session_state.get("pool_search_results", [])
+        pools_results = st.session_state.get("pool_existing_results", [])
+
+        st.markdown("**Sorting**")
+        sort_options = ["Pair (A-Z)", "Fee % (asc)", "Address (A-Z)"]
+        sort_choice = st.selectbox("Sort By", sort_options, key="pool_existing_sort")
+
+    normalized_pools = []
     if pools_results:
-        filtered_pools = []
-        for pool in pools_results:
+        if data_source == "Search Results":
+            normalized_pools = [normalize_search_pool(pool) for pool in pools_results if isinstance(pool, dict)]
+        else:
+            normalized_pools = [normalize_existing_pool(pool) for pool in pools_results if isinstance(pool, dict)]
+
+    filtered_pools = []
+    for pool in normalized_pools:
+        if data_source == "Search Results":
             tvl_value = to_float(pool.get("tvl_usd"))
             volume_value = to_float(pool.get("volume_24h"))
             apy_value = to_float(pool.get("apy"))
@@ -699,16 +925,17 @@ with tabs[1]:
                 continue
             if min_apy > 0 and (apy_value is None or apy_value < min_apy):
                 continue
-            filtered_pools.append(pool)
+        filtered_pools.append(pool)
 
+    if data_source == "Search Results":
         sort_field_map = {
-            "TVL (desc)": ("tvl_usd", True),
             "Volume 24h (desc)": ("volume_24h", True),
+            "TVL (desc)": ("tvl_usd", True),
             "APY (desc)": ("apy", True),
             "APR (desc)": ("apr", True),
             "Fee % (asc)": ("fee_tier", False),
         }
-        sort_field, sort_desc = sort_field_map.get(sort_choice, ("tvl_usd", True))
+        sort_field, sort_desc = sort_field_map.get(sort_choice, ("volume_24h", True))
 
         def sort_key(pool):
             value = to_float(pool.get(sort_field))
@@ -718,12 +945,38 @@ with tabs[1]:
 
         filtered_pools = sorted(filtered_pools, key=sort_key, reverse=sort_desc)
 
-        if filtered_pools:
-            st.caption(f"{len(filtered_pools)} pools match filters.")
-            display_rows = []
-            for pool in filtered_pools:
+        if prefer_bins:
+            def preferred_bin(pool):
+                return 1 if to_int(pool.get("bin_step")) in (80, 100) else 0
+
+            filtered_pools = sorted(filtered_pools, key=preferred_bin, reverse=True)
+    else:
+        sort_field_map = {
+            "Pair (A-Z)": ("trading_pair", False),
+            "Fee % (asc)": ("fee_tier", False),
+            "Address (A-Z)": ("address", False),
+        }
+        sort_field, sort_desc = sort_field_map.get(sort_choice, ("trading_pair", False))
+
+        def sort_key(pool):
+            value = pool.get(sort_field)
+            if sort_field == "fee_tier":
+                numeric = to_float(value)
+                return numeric if numeric is not None else float("inf")
+            if value is None:
+                return ""
+            return str(value)
+
+        filtered_pools = sorted(filtered_pools, key=sort_key, reverse=sort_desc)
+
+    if filtered_pools:
+        st.caption(f"{len(filtered_pools)} pools available.")
+        display_rows = []
+        for pool in filtered_pools:
+            pair = pool.get("trading_pair") or "-"
+            if data_source == "Search Results":
                 display_rows.append({
-                    "Pair": pool.get("trading_pair"),
+                    "Pair": pair,
                     "Fee %": pool.get("fee_tier"),
                     "Bin Step": pool.get("bin_step"),
                     "Volume 24h": pool.get("volume_24h"),
@@ -732,155 +985,136 @@ with tabs[1]:
                     "APY %": pool.get("apy"),
                     "Address": pool.get("address"),
                 })
-
-            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
-
-            options = {}
-            for pool in filtered_pools:
-                address = pool.get("address", "")
-                address_suffix = f"{address[:6]}...{address[-4:]}" if address else "unknown"
-                label = f"{pool.get('trading_pair', 'unknown')} | {address_suffix}"
-                options[label] = pool
-
-            selected_label = st.selectbox("Select Pool to Fill Form", list(options.keys()), key="pool_search_choice")
-            selected_pool = options.get(selected_label, {})
-
-            st.markdown(f"**Selected Pool**: {selected_pool.get('trading_pair', 'unknown')}")
-            summary_cols = st.columns(4)
-            summary_cols[0].metric("TVL (USD)", selected_pool.get("tvl_usd") or "—")
-            summary_cols[1].metric("Volume 24h", selected_pool.get("volume_24h") or "—")
-            summary_cols[2].metric("APR %", selected_pool.get("apr") or "—")
-            summary_cols[3].metric("APY %", selected_pool.get("apy") or "—")
-            st.caption(
-                f"Fee %: {selected_pool.get('fee_tier') or '-'} | Bin Step: {selected_pool.get('bin_step') or '-'}"
-            )
-            st.caption(f"Address: {selected_pool.get('address') or '-'}")
-
-            if st.button("Use Selected Pool", key="pool_search_apply"):
-                updates = {
-                    "pool_base_symbol": selected_pool.get("base_symbol"),
-                    "pool_quote_symbol": selected_pool.get("quote_symbol"),
-                    "pool_base_address": selected_pool.get("base_address"),
-                    "pool_quote_address": selected_pool.get("quote_address"),
-                    "pool_address": selected_pool.get("address"),
-                }
-                fee_tier = selected_pool.get("fee_tier")
-                if fee_tier is not None:
-                    try:
-                        updates["pool_fee_pct"] = float(fee_tier)
-                    except (TypeError, ValueError):
-                        pass
-                st.session_state["pool_pending_updates"] = updates
-                st.session_state["pool_autofill_message"] = "Pool details loaded."
-                st.rerun()
-        else:
-            st.info("No pools match the current filters.")
-
-    with st.form("gateway_add_pool"):
-        col1a, col2a, col3a = st.columns(3)
-        with col1a:
-            base_symbol = st.text_input("Base Symbol", key="pool_base_symbol")
-        with col2a:
-            quote_symbol = st.text_input("Quote Symbol", key="pool_quote_symbol")
-        with col3a:
-            fee_pct_value = st.session_state.get("pool_fee_pct", 0.0)
-            fee_pct = st.number_input(
-                "Fee Pct (optional)",
-                min_value=0.0,
-                step=0.01,
-                format="%.4f",
-                value=fee_pct_value,
-                key="pool_fee_pct",
-            )
-
-        col1b, col2b = st.columns(2)
-        with col1b:
-            base_address = st.text_input("Base Token Address", key="pool_base_address")
-        with col2b:
-            quote_address = st.text_input("Quote Token Address", key="pool_quote_address")
-
-        pool_address = st.text_input("Pool Address", key="pool_address")
-        submit_add_pool = st.form_submit_button("Add Pool")
-
-        if submit_add_pool:
-            if not connector_name or not network_id:
-                st.error("Connector and network are required.")
-            elif not base_symbol or not quote_symbol:
-                st.error("Base and quote symbols are required.")
-            elif not base_address or not quote_address or not pool_address:
-                st.error("Token addresses and pool address are required.")
             else:
-                if "-" in network_id:
-                    _, network_value = network_id.split("-", 1)
-                else:
-                    network_value = network_id
+                display_rows.append({
+                    "Pair": pair,
+                    "Fee %": pool.get("fee_tier"),
+                    "Base Address": pool.get("base_address"),
+                    "Quote Address": pool.get("quote_address"),
+                    "Address": pool.get("address"),
+                })
 
-                payload = {
-                    "connector_name": connector_name,
-                    "type": pool_type,
-                    "network": network_value,
-                    "address": pool_address,
-                    "base": base_symbol,
-                    "quote": quote_symbol,
-                    "base_address": base_address,
-                    "quote_address": quote_address,
-                }
-                if fee_pct and fee_pct > 0:
-                    payload["fee_pct"] = float(fee_pct)
+        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
 
-                response = backend_api_request("POST", "/gateway/pools", json_body=payload)
-                if response.get("ok"):
-                    message = response.get("data", {}).get("message", "Pool added.")
-                    st.success(message)
-                else:
-                    status_code = response.get("status_code")
-                    if status_code == 401:
-                        st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
-                    else:
-                        st.error(format_api_error(response, "Failed to add pool."))
+        options = {}
+        for pool in filtered_pools:
+            address = pool.get("address", "")
+            address_suffix = f"{address[:6]}...{address[-4:]}" if address else "unknown"
+            pair = pool.get("trading_pair") or "unknown"
+            label_parts = [pair]
+            bin_step = pool.get("bin_step")
+            if bin_step:
+                label_parts.append(f"bin {bin_step}")
+            label_parts.append(address_suffix)
+            label = " | ".join(label_parts)
+            options[label] = pool
+
+        selected_label = st.selectbox("Select Pool to Fill Form", list(options.keys()), key="pool_search_choice")
+        selected_pool = options.get(selected_label, {})
+
+        st.markdown(f"**Selected Pool**: {selected_pool.get('trading_pair') or 'unknown'}")
+        summary_cols = st.columns(4)
+        summary_cols[0].metric("TVL (USD)", selected_pool.get("tvl_usd") or "—")
+        summary_cols[1].metric("Volume 24h", selected_pool.get("volume_24h") or "—")
+        summary_cols[2].metric("APR %", selected_pool.get("apr") or "—")
+        summary_cols[3].metric("APY %", selected_pool.get("apy") or "—")
+        st.caption(
+            f"Fee %: {selected_pool.get('fee_tier') or '-'} | Bin Step: {selected_pool.get('bin_step') or '-'}"
+        )
+        st.caption(f"Address: {selected_pool.get('address') or '-' }")
+
+        if st.button("Use Selected Pool", key="pool_search_apply"):
+            updates = {
+                "pool_base_symbol": selected_pool.get("base_symbol"),
+                "pool_quote_symbol": selected_pool.get("quote_symbol"),
+                "pool_base_address": selected_pool.get("base_address"),
+                "pool_quote_address": selected_pool.get("quote_address"),
+                "pool_address": selected_pool.get("address"),
+            }
+            fee_tier = selected_pool.get("fee_tier")
+            if fee_tier is not None:
+                try:
+                    updates["pool_fee_pct"] = float(fee_tier)
+                except (TypeError, ValueError):
+                    pass
+            st.session_state["pool_pending_updates"] = updates
+            st.session_state["pool_autofill_message"] = "Pool details loaded."
+            st.rerun()
+    else:
+        if data_source == "Search Results":
+            if st.session_state.get("pool_search_key") is not None:
+                st.info("No pools match the current filters.")
+        elif connector_name and network_id:
+            st.info("No pools found for this connector/network.")
 
     st.divider()
-    st.markdown("**Pools by Network**")
-    st.caption("Select a connector and network to view pools.")
-    set_default_choice("pool_lookup_connector", "uniswap", connectors_list)
-    browse_connector = select_connector("Connector", "pool_lookup_connector", connectors_list)
-    browse_network_options = networks_for_connector(browse_connector, network_options)
-    preferred_browse_network = preferred_pool_network(browse_connector, browse_network_options)
-    if preferred_browse_network:
-        set_default_selection("pool_lookup_network", "pool_lookup_network_ctx", browse_connector, preferred_browse_network)
-    else:
-        default_browse_network = default_network_id_for_connector(
-            browse_connector,
-            browse_network_options,
-            chain_defaults,
-        )
-        set_default_selection("pool_lookup_network", "pool_lookup_network_ctx", browse_connector, default_browse_network)
-    browse_network = select_network("Network", "pool_lookup_network", browse_network_options)
+    st.markdown("**Add Pool**")
+    st.caption("Auto-fill uses Gateway token list for the selected network. Clear address to re-run.")
 
-    if browse_connector and browse_network:
-        if "-" in browse_network:
-            _, network_value = browse_network.split("-", 1)
-        else:
-            network_value = browse_network
-        response = backend_api_request(
-            "GET",
-            "/gateway/pools",
-            params={"connector_name": browse_connector, "network": network_value},
+    col1a, col2a, col3a = st.columns(3)
+    with col1a:
+        base_symbol = st.text_input("Base Symbol", key="pool_base_symbol")
+    with col2a:
+        quote_symbol = st.text_input("Quote Symbol", key="pool_quote_symbol")
+    with col3a:
+        fee_pct_value = st.session_state.get("pool_fee_pct", 0.0)
+        fee_pct = st.number_input(
+            "Fee Pct (optional)",
+            min_value=0.0,
+            step=0.01,
+            format="%.4f",
+            value=fee_pct_value,
+            key="pool_fee_pct",
         )
-        if response.get("ok"):
-            pools = response.get("data", [])
-            if pools:
-                st.dataframe(pd.DataFrame(pools), use_container_width=True, hide_index=True)
-            else:
-                st.info("No pools found for this connector/network.")
+
+    auto_fill_token_address("pool_base_symbol", "pool_base_address", network_id, "pool_base")
+    auto_fill_token_address("pool_quote_symbol", "pool_quote_address", network_id, "pool_quote")
+
+    col1b, col2b = st.columns(2)
+    with col1b:
+        base_address = st.text_input("Base Token Address", key="pool_base_address")
+    with col2b:
+        quote_address = st.text_input("Quote Token Address", key="pool_quote_address")
+
+    pool_address = st.text_input("Pool Address", key="pool_address")
+    submit_add_pool = st.button("Add Pool", key="pool_add_submit")
+
+    if submit_add_pool:
+        if not connector_name or not network_id:
+            st.error("Connector and network are required.")
+        elif not base_symbol or not quote_symbol:
+            st.error("Base and quote symbols are required.")
+        elif not base_address or not quote_address or not pool_address:
+            st.error("Token addresses and pool address are required.")
         else:
-            status_code = response.get("status_code")
-            if status_code == 401:
-                st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+            if "-" in network_id:
+                _, network_value = network_id.split("-", 1)
             else:
-                st.error(format_api_error(response, "Failed to fetch pools."))
-    else:
-        st.info("Select a connector and network to load pools.")
+                network_value = network_id
+
+            payload = {
+                "connector_name": connector_name,
+                "type": pool_type,
+                "network": network_value,
+                "address": pool_address,
+                "base": base_symbol,
+                "quote": quote_symbol,
+                "base_address": base_address,
+                "quote_address": quote_address,
+            }
+            if fee_pct and fee_pct > 0:
+                payload["fee_pct"] = float(fee_pct)
+
+            response = backend_api_request("POST", "/gateway/pools", json_body=payload)
+            if response.get("ok"):
+                message = response.get("data", {}).get("message", "Pool added.")
+                st.success(message)
+            else:
+                status_code = response.get("status_code")
+                if status_code == 401:
+                    st.error("Unauthorized. Check BACKEND_API_USERNAME and BACKEND_API_PASSWORD.")
+                else:
+                    st.error(format_api_error(response, "Failed to add pool."))
 
 with tabs[2]:
     st.subheader("Wallets")

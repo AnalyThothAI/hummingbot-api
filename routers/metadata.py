@@ -73,6 +73,7 @@ async def get_token_metadata(
 
     chain_network = parse_chain_network(network_id)
     chain, network = split_chain_network(chain_network)
+    chain, network = split_chain_network(chain_network)
 
     result = await accounts_service.gateway_client.find_token(chain_network, address)
     if result is None:
@@ -151,7 +152,19 @@ async def get_pools_metadata(
         pages=pages,
     )
 
-    meteora_by_address = {}
+    warnings: List[str] = []
+    pools_error = None
+    pools_list: Optional[List[Dict]] = None
+    if pools is None:
+        pools_error = {"status": 502, "detail": "Failed to fetch pools from Gateway"}
+    elif isinstance(pools, dict) and "error" in pools:
+        pools_error = {"status": pools.get("status", 502), "detail": f"Gateway error: {pools.get('error')}"}
+    elif not isinstance(pools, list):
+        pools_error = {"status": 502, "detail": "Unexpected Gateway response for pools"}
+    else:
+        pools_list = pools
+
+    meteora_pools = None
     if connector == "meteora" and chain == "solana":
         meteora_pools = await accounts_service.gateway_client.fetch_clmm_pools(
             connector="meteora",
@@ -160,23 +173,26 @@ async def get_pools_metadata(
             token_a=token_a_value,
             token_b=token_b_value,
         )
-        if isinstance(meteora_pools, list):
-            for item in meteora_pools:
-                if isinstance(item, dict) and item.get("address"):
-                    meteora_by_address[item["address"]] = item
+        if isinstance(meteora_pools, dict) and "error" in meteora_pools:
+            warnings.append("meteora_fetch_failed")
+            meteora_pools = None
+        elif not isinstance(meteora_pools, list):
+            meteora_pools = None
 
-    if pools is None:
-        raise HTTPException(status_code=502, detail="Failed to fetch pools from Gateway")
+    if pools_list is None:
+        if not meteora_pools:
+            raise HTTPException(status_code=pools_error["status"], detail=pools_error["detail"])
+        warnings.append("gecko_unavailable_fallback_meteora")
+        pools_list = []
 
-    if isinstance(pools, dict) and "error" in pools:
-        status = pools.get("status", 502)
-        raise HTTPException(status_code=status, detail=f"Gateway error: {pools.get('error')}")
-
-    if not isinstance(pools, list):
-        raise HTTPException(status_code=502, detail="Unexpected Gateway response for pools")
+    meteora_by_address = {}
+    if isinstance(meteora_pools, list):
+        for item in meteora_pools:
+            if isinstance(item, dict) and item.get("address"):
+                meteora_by_address[item["address"]] = item
 
     normalized_pools = []
-    for pool in pools:
+    for pool in pools_list:
         if not isinstance(pool, dict):
             continue
 
@@ -234,6 +250,54 @@ async def get_pools_metadata(
             "network_id": chain_network,
         })
 
+    if isinstance(meteora_pools, list):
+        token_symbol_map: Dict[str, str] = {}
+        if meteora_pools and not normalized_pools:
+            tokens_response = await accounts_service.gateway_client.get_tokens(chain, network)
+            if isinstance(tokens_response, dict):
+                tokens_list = tokens_response.get("tokens", [])
+                if isinstance(tokens_list, list):
+                    token_symbol_map = {
+                        token.get("address", "").lower(): token.get("symbol")
+                        for token in tokens_list
+                        if isinstance(token, dict) and token.get("address") and token.get("symbol")
+                    }
+
+        existing_addresses = {pool.get("address") for pool in normalized_pools if pool.get("address")}
+        for pool in meteora_pools:
+            if not isinstance(pool, dict):
+                continue
+            pool_address = get_field(pool, "address")
+            if not pool_address or pool_address in existing_addresses:
+                continue
+            base_address = get_field(pool, "baseTokenAddress", "base_token_address")
+            quote_address = get_field(pool, "quoteTokenAddress", "quote_token_address")
+            fee_pct_value = to_decimal(get_field(pool, "feePct", "fee_pct"))
+            bin_step = get_field(pool, "binStep", "bin_step")
+            base_symbol = token_symbol_map.get(base_address.lower()) if base_address else None
+            quote_symbol = token_symbol_map.get(quote_address.lower()) if quote_address else None
+            trading_pair = None
+            if base_symbol and quote_symbol:
+                trading_pair = f"{base_symbol}-{quote_symbol}"
+
+            normalized_pools.append({
+                "address": pool_address,
+                "trading_pair": trading_pair,
+                "base_symbol": base_symbol,
+                "quote_symbol": quote_symbol,
+                "base_address": base_address,
+                "quote_address": quote_address,
+                "fee_tier": decimal_to_str(fee_pct_value),
+                "bin_step": bin_step,
+                "volume_24h": None,
+                "tvl_usd": None,
+                "apr": None,
+                "apy": None,
+                "pool_type": pool_type,
+                "connector": connector,
+                "network_id": chain_network,
+            })
+
     if limit and len(normalized_pools) > limit:
         normalized_pools = normalized_pools[:limit]
 
@@ -242,5 +306,5 @@ async def get_pools_metadata(
         "source": "gateway",
         "total": len(normalized_pools),
         "pools": normalized_pools,
-        "warnings": [],
+        "warnings": warnings,
     }
