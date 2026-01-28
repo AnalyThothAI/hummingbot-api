@@ -291,9 +291,17 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
     notes = []
 
     mode = custom_info.get("mode")
-    state = mode or custom_info.get("state") or custom_info.get("controller_state") or custom_info.get("hedge_state")
+    state_payload = custom_info.get("state")
+    if isinstance(state_payload, dict):
+        state = state_payload.get("value")
+        state_reason = state_payload.get("reason")
+    else:
+        state = mode or custom_info.get("state") or custom_info.get("controller_state") or custom_info.get("hedge_state")
+        state_reason = None
     if state:
         signals.append(f"State: {state}")
+    if state_reason:
+        notes.append(str(state_reason))
     mode_rule = custom_info.get("mode_rule")
     if mode_rule:
         notes.append(f"Rule: {mode_rule}")
@@ -309,8 +317,18 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
         if reason:
             notes.append(str(reason))
 
-    lp_active = custom_info.get("active_lp_count")
-    swap_active = custom_info.get("active_swap_count")
+    lp_active = None
+    swap_active = None
+    lp_info = custom_info.get("lp")
+    swaps_info = custom_info.get("swaps")
+    if isinstance(lp_info, dict):
+        lp_active = lp_info.get("active_count")
+    if isinstance(swaps_info, dict):
+        swap_active = swaps_info.get("active_count")
+    if lp_active is None:
+        lp_active = custom_info.get("active_lp_count")
+    if swap_active is None:
+        swap_active = custom_info.get("active_swap_count")
     if lp_active is None or swap_active is None:
         positions = custom_info.get("positions")
         if isinstance(positions, dict):
@@ -323,19 +341,40 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
     if swap_active is not None:
         signals.append(f"Swaps: {swap_active}")
 
-    rebalance_1h = custom_info.get("rebalance_count_1h")
-    rebalance_total = custom_info.get("rebalance_count_total")
+    rebalance_1h = None
+    rebalance_total = None
+    rebalance = custom_info.get("rebalance")
+    if isinstance(rebalance, dict):
+        rebalance_1h = rebalance.get("count_1h")
+        rebalance_total = rebalance.get("count_total")
+    if rebalance_1h is None:
+        rebalance_1h = custom_info.get("rebalance_count_1h")
+    if rebalance_total is None:
+        rebalance_total = custom_info.get("rebalance_count_total")
     if rebalance_1h is not None:
         notes.append(f"Reb 1h: {rebalance_1h}")
     if rebalance_total is not None:
         notes.append(f"Reb total: {rebalance_total}")
 
-    price = custom_info.get("price")
+    price = None
+    price_payload = custom_info.get("price")
+    if isinstance(price_payload, dict):
+        price = price_payload.get("value")
+    if price is None:
+        price = custom_info.get("price")
     if price is not None:
         signals.append(f"Price: {format_number(price, 4)}")
 
-    base = custom_info.get("wallet_base")
-    quote = custom_info.get("wallet_quote")
+    base = None
+    quote = None
+    wallet = custom_info.get("wallet")
+    if isinstance(wallet, dict):
+        base = wallet.get("base")
+        quote = wallet.get("quote")
+    if base is None:
+        base = custom_info.get("wallet_base")
+    if quote is None:
+        quote = custom_info.get("wallet_quote")
     if base is None and quote is None:
         wallet = custom_info.get("wallet")
         if isinstance(wallet, dict):
@@ -346,8 +385,11 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
         quote_str = format_number(quote, 4) if quote is not None else "-"
         signals.append(f"Wallet: {base_str}/{quote_str}")
 
-    stop_loss_active = mode == "STOPLOSS"
-    rebalance_pending = mode == "REBALANCE"
+    stop_loss_active = False
+    rebalance_pending = False
+    if isinstance(state, str):
+        stop_loss_active = state.startswith("STOPLOSS")
+        rebalance_pending = state.startswith("REBALANCE")
     flags = custom_info.get("flags")
     if isinstance(flags, dict):
         stop_loss_active = bool(flags.get("stop_loss_active"))
@@ -375,12 +417,16 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
         else:
             signals.append("Rebalance: on")
 
-    state_reason = custom_info.get("state_reason") or custom_info.get("intent_reason")
-    if state_reason:
-        notes.append(state_reason)
-    cooldown_sec = custom_info.get("stoploss_cooldown_remaining_sec")
+    legacy_state_reason = custom_info.get("state_reason") or custom_info.get("intent_reason")
+    if legacy_state_reason:
+        notes.append(legacy_state_reason)
+    cooldown_sec = None
+    if isinstance(rebalance, dict):
+        cooldown_sec = rebalance.get("cooldown_remaining_sec")
+    if cooldown_sec is None:
+        cooldown_sec = custom_info.get("stoploss_cooldown_remaining_sec")
     if cooldown_sec is not None and cooldown_sec > 0:
-        notes.append(f"StopLoss cooldown: {format_number(cooldown_sec, 0)}s")
+        notes.append(f"Cooldown: {format_number(cooldown_sec, 0)}s")
 
     return {
         "signals": " | ".join(signals),
@@ -405,6 +451,7 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
     total_volume_traded = 0
     total_unrealized_pnl_quote = 0
     total_realized_pnl_quote = 0
+    total_equity_quote = 0
     quote_symbols: set = set()
 
     if not isinstance(performance, dict):
@@ -444,19 +491,19 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         unrealized_pnl_quote = controller_performance.get("unrealized_pnl_quote", 0)
         global_pnl_quote = controller_performance.get("global_pnl_quote", 0)
         volume_traded = controller_performance.get("volume_traded", 0)
-        if isinstance(custom_info, dict) and "controller_net_pnl_quote" in custom_info:
-            def _override_value(key: str, default_value: Any):
-                value = custom_info.get(key)
-                return default_value if value is None else value
+        nav_quote = None
 
-            global_pnl_quote = _override_value("controller_net_pnl_quote", global_pnl_quote)
-            unrealized_pnl_quote = _override_value("controller_unrealized_pnl_quote", unrealized_pnl_quote)
-            realized_pnl_quote = _override_value("controller_realized_pnl_quote", realized_pnl_quote)
-            volume_traded = _override_value(
-                "controller_trade_volume_quote",
-                _override_value("controller_volume_quote", volume_traded),
-            )
-        nav_quote = custom_info.get("nav_quote")
+        risk = custom_info.get("risk") if isinstance(custom_info, dict) else None
+        if isinstance(risk, dict):
+            def _use_or_default(value: Any, default: Any):
+                return default if value is None else value
+
+            realized_pnl_quote = _use_or_default(risk.get("pnl_realized_quote"), realized_pnl_quote)
+            unrealized_pnl_quote = _use_or_default(risk.get("pnl_unrealized_quote"), unrealized_pnl_quote)
+            global_pnl_quote = _use_or_default(risk.get("pnl_net_quote"), global_pnl_quote)
+            nav_quote = risk.get("equity_quote")
+        if nav_quote is None:
+            nav_quote = custom_info.get("nav_quote") if isinstance(custom_info, dict) else None
 
         close_types = controller_performance.get("close_type_counts", {})
         tp = close_types.get("CloseType.TAKE_PROFIT", 0)
@@ -479,7 +526,7 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
             "Realized PNL": format_quote_value(realized_pnl_quote, quote_symbol, 2),
             "Unrealized PNL": format_quote_value(unrealized_pnl_quote, quote_symbol, 2),
             "NET PNL": format_quote_value(global_pnl_quote, quote_symbol, 2),
-            "NAV": format_quote_value(nav_quote, quote_symbol, 2) if nav_quote is not None else "-",
+            "Equity": format_quote_value(nav_quote, quote_symbol, 2) if nav_quote is not None else "-",
             "Volume": format_quote_value(volume_traded, quote_symbol, 2),
             "Close Types": close_types_str,
             "_controller_id": controller,
@@ -489,6 +536,8 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         total_volume_traded += volume_traded
         total_unrealized_pnl_quote += unrealized_pnl_quote
         total_realized_pnl_quote += realized_pnl_quote
+        if nav_quote is not None:
+            total_equity_quote += nav_quote
 
         if kill_switch_status:
             stopped_controllers.append(controller_info)
@@ -503,6 +552,7 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         total_volume_traded,
         total_unrealized_pnl_quote,
         total_realized_pnl_quote,
+        total_equity_quote,
         quote_symbols,
         config_map,
     )
@@ -709,21 +759,31 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
         if not isinstance(inner_dict, dict):
             continue
         custom_info = inner_dict.get("custom_info", {})
-        positions = custom_info.get("lp_positions")
+        lp_payload = custom_info.get("lp") if isinstance(custom_info, dict) else None
+        positions = lp_payload.get("positions") if isinstance(lp_payload, dict) else None
         source = "lp_positions"
+        fee_quote_per_hour = lp_payload.get("fee_rate_quote_per_hour") if isinstance(lp_payload, dict) else None
         if not isinstance(positions, list) or not positions:
-            positions = custom_info.get("active_lp")
-            source = "active_lp"
-        rebalance_pending = custom_info.get("rebalance_plan_count", 0) > 0
-        last_snapshot = custom_info.get("last_lp_snapshot")
-        if (not isinstance(positions, list) or not positions) and rebalance_pending:
-            if isinstance(last_snapshot, list) and last_snapshot:
-                positions = last_snapshot
-                source = "last_lp_snapshot"
+            positions = custom_info.get("lp_positions") if isinstance(custom_info, dict) else None
+            source = "lp_positions_legacy"
         if not isinstance(positions, list) or not positions:
-            anchor_quote = custom_info.get("anchor_value_quote")
-            stoploss_quote = custom_info.get("stoploss_trigger_quote")
-            if anchor_quote is None and stoploss_quote is None:
+            positions = custom_info.get("active_lp") if isinstance(custom_info, dict) else None
+            source = "active_lp_legacy"
+
+        risk = custom_info.get("risk") if isinstance(custom_info, dict) else None
+        anchor_quote = risk.get("anchor_quote") if isinstance(risk, dict) else None
+        stoploss_quote = risk.get("stoploss_trigger_quote") if isinstance(risk, dict) else None
+        equity_quote = risk.get("equity_quote") if isinstance(risk, dict) else None
+
+        price_payload = custom_info.get("price") if isinstance(custom_info, dict) else None
+        current_price = price_payload.get("value") if isinstance(price_payload, dict) else custom_info.get("price")
+
+        wallet_payload = custom_info.get("wallet") if isinstance(custom_info, dict) else None
+        wallet_base = wallet_payload.get("base") if isinstance(wallet_payload, dict) else custom_info.get("wallet_base")
+        wallet_quote = wallet_payload.get("quote") if isinstance(wallet_payload, dict) else custom_info.get("wallet_quote")
+
+        if not isinstance(positions, list) or not positions:
+            if anchor_quote is None and stoploss_quote is None and equity_quote is None:
                 continue
             controller_config = config_map.get(controller_id, {})
             controller_name = controller_config.get("controller_name", controller_id)
@@ -737,16 +797,14 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
                 "position": "-",
                 "lower": None,
                 "upper": None,
-                "price": custom_info.get("price"),
-                "base": custom_info.get("wallet_base"),
-                "quote": custom_info.get("wallet_quote"),
-                "value_quote": custom_info.get("nav_quote"),
+                "price": current_price,
+                "base": wallet_base,
+                "quote": wallet_quote,
+                "value_quote": equity_quote,
                 "anchor_quote": anchor_quote,
                 "stoploss_quote": stoploss_quote,
-                "fee_quote_per_hour": None,
+                "fee_quote_per_hour": fee_quote_per_hour,
                 "out_of_range_since": None,
-                "snapshot_source": None,
-                "snapshot_ts": None,
             })
             continue
 
@@ -754,62 +812,27 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
         controller_name = controller_config.get("controller_name", controller_id)
         trading_pair = controller_config.get("trading_pair")
         _, quote_symbol = split_trading_pair(trading_pair)
-        current_price = custom_info.get("price")
-        snapshot_ts = custom_info.get("last_lp_snapshot_ts") if source == "last_lp_snapshot" else None
+        current_price = current_price
 
         for pos in positions:
             if not isinstance(pos, dict):
-                continue
-            if source in {"active_lp", "last_lp_snapshot"}:
-                in_range = pos.get("in_range")
-                if pos.get("info_unavailable"):
-                    state = "UNKNOWN"
-                elif source == "last_lp_snapshot":
-                    state = "REBALANCE"
-                elif in_range is True:
-                    state = "IN_RANGE"
-                elif in_range is False:
-                    state = "OUT_OF_RANGE"
-                else:
-                    state = "-"
-                rows.append({
-                    "controller": controller_name,
-                    "pair": trading_pair or "-",
-                    "quote_symbol": quote_symbol,
-                    "state": state,
-                    "position": pos.get("executor_id") or "-",
-                    "lower": pos.get("lower_price"),
-                    "upper": pos.get("upper_price"),
-                    "price": current_price,
-                    "base": pos.get("base") if pos.get("base") is not None else pos.get("base_amount"),
-                    "quote": pos.get("quote") if pos.get("quote") is not None else pos.get("quote_amount"),
-                    "value_quote": pos.get("position_value_quote"),
-                    "anchor_quote": pos.get("anchor_value_quote"),
-                    "stoploss_quote": pos.get("stoploss_trigger_quote"),
-                    "fee_quote_per_hour": pos.get("fee_rate_ewma_quote_per_hour"),
-                    "out_of_range_since": pos.get("out_of_range_since"),
-                    "snapshot_source": "rebalance" if source == "last_lp_snapshot" else None,
-                    "snapshot_ts": snapshot_ts,
-                })
                 continue
             rows.append({
                 "controller": controller_name,
                 "pair": trading_pair or "-",
                 "quote_symbol": quote_symbol,
                 "state": pos.get("state") or "-",
-                "position": pos.get("position") or "-",
-                "lower": pos.get("lower"),
-                "upper": pos.get("upper"),
+                "position": pos.get("executor_id") or pos.get("position") or "-",
+                "lower": pos.get("lower_price") if pos.get("lower_price") is not None else pos.get("lower"),
+                "upper": pos.get("upper_price") if pos.get("upper_price") is not None else pos.get("upper"),
                 "price": current_price,
-                "base": pos.get("base"),
-                "quote": pos.get("quote"),
-                "value_quote": pos.get("value_quote"),
-                "anchor_quote": None,
-                "stoploss_quote": None,
-                "fee_quote_per_hour": None,
-                "out_of_range_since": None,
-                "snapshot_source": None,
-                "snapshot_ts": None,
+                "base": pos.get("base_amount") if pos.get("base_amount") is not None else pos.get("base"),
+                "quote": pos.get("quote_amount") if pos.get("quote_amount") is not None else pos.get("quote"),
+                "value_quote": pos.get("position_value_quote") if pos.get("position_value_quote") is not None else pos.get("value_quote"),
+                "anchor_quote": anchor_quote,
+                "stoploss_quote": stoploss_quote,
+                "fee_quote_per_hour": pos.get("fee_rate_quote_per_hour", fee_quote_per_hour),
+                "out_of_range_since": pos.get("out_of_range_since"),
             })
 
     return rows
@@ -1151,11 +1174,20 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
         total_volume_traded,
         total_unrealized_pnl_quote,
         total_realized_pnl_quote,
+        total_equity_quote,
         quote_symbols,
         config_map,
     ) = build_controller_rows(performance, controller_configs)
 
-    total_global_pnl_pct = total_global_pnl_quote / total_volume_traded if total_volume_traded > 0 else 0
+    if total_equity_quote > 0:
+        total_global_pnl_pct = total_global_pnl_quote / total_equity_quote
+        pnl_pct_basis = "equity"
+    elif total_volume_traded > 0:
+        total_global_pnl_pct = total_global_pnl_quote / total_volume_traded
+        pnl_pct_basis = "volume"
+    else:
+        total_global_pnl_pct = 0
+        pnl_pct_basis = "unavailable"
     quote_label = "Quote"
     if len(quote_symbols) == 1:
         quote_label = next(iter(quote_symbols))
@@ -1176,6 +1208,8 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
 
     if len(quote_symbols) > 1:
         st.caption("Totals include mixed quote currencies; per-controller values are in their own quote units.")
+    if pnl_pct_basis == "equity":
+        st.caption("PnL % is calculated against reported equity (risk cap) when available.")
 
     st.caption(
         f"Controllers: {len(active_controllers)} active · {len(stopped_controllers)} paused · {len(error_controllers)} error"

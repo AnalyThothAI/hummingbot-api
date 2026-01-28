@@ -1,4 +1,4 @@
-.PHONY: setup run deploy stop install uninstall build install-pre-commit
+.PHONY: setup run deploy stop install uninstall build install-pre-commit mcp
 
 SETUP_SENTINEL := .setup-complete
 
@@ -12,6 +12,10 @@ $(SETUP_SENTINEL):
 run:
 	docker compose up emqx postgres -d
 	conda run --no-capture-output -n hummingbot-api uvicorn main:app --reload
+
+# Run MCP stdio adapter
+mcp:
+	conda run --no-capture-output -n hummingbot-api python -m mcp.mcp_server
 
 # Deploy with Docker
 deploy: $(SETUP_SENTINEL)

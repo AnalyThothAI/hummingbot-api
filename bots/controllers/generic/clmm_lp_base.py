@@ -13,13 +13,12 @@ from hummingbot.strategy_v2.controllers import ControllerBase, ControllerConfigB
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
 
-from .clmm_lp_domain.components import ControllerContext, ControllerState, LPView, OpenProposal, Snapshot, PoolDomainAdapter
+from .clmm_lp_domain.components import ControllerContext, LPView, OpenProposal, Snapshot, PoolDomainAdapter
 from .clmm_lp_domain.cost_filter import CostFilter
 from .clmm_lp_domain.clmm_fsm import CLMMFSM
 from .clmm_lp_domain.policies import CLMMPolicyBase
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
 from .clmm_lp_domain.exit_policy import ExitPolicy
-from .clmm_lp_domain.ledger import BalanceLedger
 from .clmm_lp_domain.io import ActionFactory, BalanceManager, PoolPriceManager, SnapshotBuilder
 
 
@@ -109,8 +108,6 @@ class CLMMLPBaseController(ControllerBase):
             market_data_provider=self.market_data_provider,
             logger=self.logger,
         )
-        self._ledger = BalanceLedger(logger=self.logger)
-        self._ledger_status = None
         self._action_factory = ActionFactory(
             config=self.config,
             domain=self._domain,
@@ -138,11 +135,8 @@ class CLMMLPBaseController(ControllerBase):
             estimate_position_value=self._estimate_position_value,
             rebalance_engine=self._rebalance_engine,
             exit_policy=self._exit_policy,
-            ledger=self._ledger,
         )
         self._latest_snapshot: Optional[Snapshot] = None
-        self._last_lp_snapshot: Optional[List[Dict[str, Any]]] = None
-        self._last_lp_snapshot_ts: Optional[float] = None
 
         self._last_policy_update_ts: float = 0.0
         self._policy_update_interval_sec: float = 600.0
@@ -182,168 +176,235 @@ class CLMMLPBaseController(ControllerBase):
         if snapshot is None:
             snapshot = self._refresh_snapshot(self.market_data_provider.time())
         self._latest_snapshot = None
-        ledger_status = self._ledger_status
-        if ledger_status is None:
-            ledger_status = self._ledger.update(
-                events=snapshot.balance_events,
-                snapshot_base=snapshot.snapshot_wallet_base,
-                snapshot_quote=snapshot.snapshot_wallet_quote,
-                snapshot_fresh=self._balance_manager.is_fresh(snapshot.now),
-                now=snapshot.now,
-            )
-            self._ledger_status = ledger_status
-        decision = self._fsm.step(snapshot, self._ctx, ledger_status)
+        decision = self._fsm.step(snapshot, self._ctx)
         self._log_decision_actions(decision)
+        self._log_decision_metrics(decision, snapshot)
         return decision.actions
 
     def get_custom_info(self) -> Dict:
         snapshot = self._latest_snapshot or self._refresh_snapshot(self.market_data_provider.time())
-        nav = self._compute_nav(snapshot)
-        current_price = snapshot.current_price
-        if (current_price is None or current_price <= 0) and snapshot.active_lp:
-            fallback_price = snapshot.active_lp[0].current_price
-            if fallback_price is not None and fallback_price > 0:
-                current_price = fallback_price
         now = snapshot.now
 
         def _as_float(value: Optional[Decimal]) -> Optional[float]:
             return float(value) if value is not None else None
 
-        info: Dict[str, Any] = {
-            "state": self._ctx.state.value,
-            "state_since": self._ctx.state_since_ts,
-            "last_reason": self._ctx.last_decision_reason,
-            "wallet_base": float(snapshot.wallet_base),
-            "wallet_quote": float(snapshot.wallet_quote),
-            "snapshot_wallet_base": float(snapshot.snapshot_wallet_base),
-            "snapshot_wallet_quote": float(snapshot.snapshot_wallet_quote),
-            "active_lp_count": len(snapshot.active_lp),
-            "active_swap_count": len(snapshot.active_swaps),
-            "balance_fresh": self._balance_manager.is_fresh(now),
-        }
-        controller_value_quote: Optional[Decimal] = None
-        if current_price is not None and current_price > 0:
-            if snapshot.active_lp:
-                controller_value_quote = sum(
-                    self._estimate_position_value(lp_view, current_price) for lp_view in snapshot.active_lp
-                )
-            else:
-                controller_value_quote = snapshot.wallet_base * current_price + snapshot.wallet_quote
-        if controller_value_quote is not None:
-            info["controller_value_quote"] = float(controller_value_quote)
-        if nav is not None:
-            nav_value, lp_value, wallet_value, budget_value = nav
-            info["nav_quote"] = float(nav_value)
-            info["nav_lp_quote"] = float(lp_value)
-            info["nav_wallet_quote"] = float(wallet_value)
-            if budget_value > 0:
-                info["nav_budget_quote"] = float(budget_value)
-        if self._ledger_status is not None:
-            info["ledger_recent"] = self._ledger_status.is_recent
-            info["ledger_reconciled"] = self._ledger_status.is_reconciled
-            info["ledger_needs_reconcile"] = self._ledger_status.needs_reconcile
-        if current_price is not None:
-            info["price"] = float(current_price)
+        price, price_source = self._resolve_decision_price(snapshot)
+        (
+            risk_cap_quote,
+            risk_equity_quote,
+            risk_wallet_contrib_quote,
+            lp_value_quote,
+            wallet_value_quote,
+        ) = self._compute_risk_values(snapshot, price)
+
+        anchor = self._ctx.anchor_value_quote
+        stoploss_trigger_quote = None
+        if anchor is not None and anchor > 0 and self.config.stop_loss_pnl_pct > 0:
+            stoploss_trigger_quote = anchor * (Decimal("1") - self.config.stop_loss_pnl_pct)
+        take_profit_trigger_quote = None
+        if anchor is not None and anchor > 0 and self.config.take_profit_pnl_pct > 0:
+            take_profit_trigger_quote = anchor * (Decimal("1") + self.config.take_profit_pnl_pct)
+
+        fee_rate_quote_per_hour = None
+        if self._ctx.fee.fee_rate_ewma is not None:
+            fee_rate_quote_per_hour = self._ctx.fee.fee_rate_ewma * Decimal("3600")
+
+        realized_pnl_quote = self._ctx.realized_pnl_quote
+        unrealized_pnl_quote: Optional[Decimal] = None
+        net_pnl_quote: Optional[Decimal] = None
+        net_pnl_pct: Optional[Decimal] = None
+        if anchor is not None and anchor > 0 and risk_equity_quote is not None:
+            unrealized_pnl_quote = risk_equity_quote - anchor
+            net_pnl_quote = realized_pnl_quote + unrealized_pnl_quote
+            net_pnl_pct = net_pnl_quote / anchor
+
         rebalance_count_1h = 0
         if self._ctx.rebalance_timestamps:
             rebalance_count_1h = sum(1 for ts in self._ctx.rebalance_timestamps if (now - ts) <= 3600)
-        info["rebalance_count_1h"] = rebalance_count_1h
-        info["rebalance_count_total"] = int(self._ctx.rebalance_count)
-        if self._ctx.last_rebalance_ts > 0:
-            info["last_rebalance_ts"] = self._ctx.last_rebalance_ts
-        if self._ctx.anchor_value_quote is not None:
-            info["anchor_value_quote"] = float(self._ctx.anchor_value_quote)
-            info["anchor_basis"] = "budget_cap"
-        if (
-            controller_value_quote is not None
-            or self._ctx.realized_volume_quote > 0
-            or self._ctx.realized_pnl_quote != 0
-        ):
-            anchor = self._ctx.anchor_value_quote
-            realized_pnl_quote = self._ctx.realized_pnl_quote
-            realized_volume_quote = self._ctx.realized_volume_quote
-            unrealized_pnl_quote = Decimal("0")
-            unrealized_volume_quote = Decimal("0")
-            if controller_value_quote is not None and anchor is not None and anchor > 0:
-                unrealized_pnl_quote = controller_value_quote - anchor
-                unrealized_volume_quote = anchor
-            controller_net_pnl_quote = realized_pnl_quote + unrealized_pnl_quote
-            if anchor is not None and anchor > 0:
-                controller_volume_quote = anchor
-                controller_net_pnl_pct = controller_net_pnl_quote / anchor
-            else:
-                controller_volume_quote = realized_volume_quote + unrealized_volume_quote
-                if controller_volume_quote > 0:
-                    controller_net_pnl_pct = controller_net_pnl_quote / controller_volume_quote
-                else:
-                    controller_net_pnl_pct = Decimal("0")
-
-            info["controller_pnl_source"] = "controller"
-            if anchor is not None and anchor > 0:
-                info["controller_anchor_quote"] = float(anchor)
-            info["controller_net_pnl_quote"] = float(controller_net_pnl_quote)
-            info["controller_unrealized_pnl_quote"] = float(unrealized_pnl_quote)
-            info["controller_realized_pnl_quote"] = float(realized_pnl_quote)
-            info["controller_net_pnl_pct"] = float(controller_net_pnl_pct)
-            info["controller_volume_quote"] = float(controller_volume_quote)
-            if realized_volume_quote > 0:
-                info["controller_realized_volume_quote"] = float(realized_volume_quote)
-                info["controller_trade_volume_quote"] = float(realized_volume_quote)
-        stoploss_trigger_quote: Optional[Decimal] = None
-        if self._ctx.anchor_value_quote is not None and self.config.stop_loss_pnl_pct > 0:
-            stoploss_trigger_quote = self._ctx.anchor_value_quote * (Decimal("1") - self.config.stop_loss_pnl_pct)
-            info["stoploss_trigger_quote"] = float(stoploss_trigger_quote)
-        fee_rate_ewma_quote_per_hour: Optional[Decimal] = None
-        if self._ctx.fee.fee_rate_ewma is not None:
-            fee_rate_ewma_quote_per_hour = self._ctx.fee.fee_rate_ewma * Decimal("3600")
-            info["fee_rate_ewma_quote_per_hour"] = float(fee_rate_ewma_quote_per_hour)
-
         cooldown_remaining = max(0.0, self._ctx.cooldown_until_ts - now)
-        if cooldown_remaining > 0:
-            info["cooldown_remaining_sec"] = cooldown_remaining
-        if self._ctx.state in {
-            ControllerState.REBALANCE_STOP,
-            ControllerState.REBALANCE_SWAP,
-            ControllerState.REBALANCE_OPEN,
-        }:
-            info["rebalance_plan_count"] = 1
-        else:
-            info["rebalance_plan_count"] = 0
 
-        if snapshot.active_lp:
-            active_positions = []
-            for lp_view in snapshot.active_lp:
-                in_range = None
-                position_value = None
-                if current_price is not None:
-                    position_value = self._estimate_position_value(lp_view, current_price)
-                    if lp_view.lower_price is not None and lp_view.upper_price is not None:
-                        in_range = lp_view.lower_price <= current_price <= lp_view.upper_price
-                active_positions.append({
-                    "executor_id": lp_view.executor_id,
-                    "lower_price": _as_float(lp_view.lower_price),
-                    "upper_price": _as_float(lp_view.upper_price),
-                    "in_range": in_range,
-                    "position_value_quote": _as_float(position_value),
-                    "anchor_value_quote": _as_float(self._ctx.anchor_value_quote),
-                    "stoploss_trigger_quote": _as_float(stoploss_trigger_quote),
-                    "fee_rate_ewma_quote_per_hour": _as_float(fee_rate_ewma_quote_per_hour),
-                    "base": _as_float(abs(lp_view.base_amount)),
-                    "quote": _as_float(abs(lp_view.quote_amount)),
-                    "out_of_range_since": self._ctx.out_of_range_since,
-                    "info_unavailable": (
-                        lp_view.position_address is None
-                        and lp_view.lower_price is None
-                        and lp_view.upper_price is None
-                    ),
-                })
-            info["active_lp"] = active_positions
-            self._last_lp_snapshot = active_positions
-            self._last_lp_snapshot_ts = snapshot.now
-        elif self._last_lp_snapshot:
-            info["last_lp_snapshot"] = self._last_lp_snapshot
-            info["last_lp_snapshot_ts"] = self._last_lp_snapshot_ts
+        positions: List[Dict[str, Any]] = []
+        for lp_view in snapshot.active_lp:
+            position_value = None
+            in_range = None
+            if price is not None and price > 0:
+                position_value = self._estimate_position_value(lp_view, price)
+                if lp_view.lower_price is not None and lp_view.upper_price is not None:
+                    in_range = lp_view.lower_price <= price <= lp_view.upper_price
+            positions.append({
+                "executor_id": lp_view.executor_id,
+                "state": lp_view.state,
+                "position_address": lp_view.position_address,
+                "lower_price": _as_float(lp_view.lower_price),
+                "upper_price": _as_float(lp_view.upper_price),
+                "in_range": in_range,
+                "position_value_quote": _as_float(position_value),
+                "base_amount": _as_float(abs(lp_view.base_amount)),
+                "quote_amount": _as_float(abs(lp_view.quote_amount)),
+                "base_fee": _as_float(abs(lp_view.base_fee)),
+                "quote_fee": _as_float(abs(lp_view.quote_fee)),
+                "fee_rate_quote_per_hour": _as_float(fee_rate_quote_per_hour),
+                "out_of_range_since": self._ctx.out_of_range_since,
+            })
+
+        swaps: List[Dict[str, Any]] = []
+        for swap_view in snapshot.active_swaps:
+            swaps.append({
+                "executor_id": swap_view.executor_id,
+                "purpose": swap_view.purpose.value if swap_view.purpose else None,
+                "amount": _as_float(abs(swap_view.amount)),
+                "is_done": swap_view.is_done,
+            })
+
+        diagnostics: Dict[str, Any] = {
+            "balance_fresh": self._balance_manager.is_fresh(now),
+        }
+
+        info: Dict[str, Any] = {
+            "state": {
+                "value": self._ctx.state.value,
+                "since": self._ctx.state_since_ts,
+                "reason": self._ctx.last_decision_reason,
+            },
+            "price": {
+                "value": _as_float(price),
+                "source": price_source,
+            },
+            "wallet": {
+                "base": _as_float(snapshot.wallet_base),
+                "quote": _as_float(snapshot.wallet_quote),
+                "value_quote": _as_float(wallet_value_quote),
+            },
+            "lp": {
+                "active_count": len(snapshot.active_lp),
+                "value_quote": _as_float(lp_value_quote),
+                "fee_rate_quote_per_hour": _as_float(fee_rate_quote_per_hour),
+                "positions": positions,
+            },
+            "swaps": {
+                "active_count": len(snapshot.active_swaps),
+                "active": swaps,
+            },
+            "risk": {
+                "budget_mode": "soft_cap",
+                "cap_quote": _as_float(risk_cap_quote),
+                "equity_quote": _as_float(risk_equity_quote),
+                "wallet_contrib_quote": _as_float(risk_wallet_contrib_quote),
+                "anchor_quote": _as_float(anchor),
+                "stoploss_trigger_quote": _as_float(stoploss_trigger_quote),
+                "take_profit_trigger_quote": _as_float(take_profit_trigger_quote),
+                "pnl_realized_quote": _as_float(realized_pnl_quote),
+                "pnl_unrealized_quote": _as_float(unrealized_pnl_quote),
+                "pnl_net_quote": _as_float(net_pnl_quote),
+                "pnl_net_pct": _as_float(net_pnl_pct),
+                "stoploss_liquidates_all_base": True,
+            },
+            "rebalance": {
+                "out_of_range_since": self._ctx.out_of_range_since,
+                "cooldown_remaining_sec": cooldown_remaining,
+                "count_1h": rebalance_count_1h,
+                "count_total": int(self._ctx.rebalance_count),
+                "last_ts": self._ctx.last_rebalance_ts if self._ctx.last_rebalance_ts > 0 else None,
+            },
+            "diagnostics": diagnostics,
+        }
         return info
+
+    def _resolve_decision_price(self, snapshot: Snapshot) -> Tuple[Optional[Decimal], str]:
+        pool_price = self._pool_price_manager.get_price()
+        if pool_price is not None and pool_price > 0:
+            return pool_price, "pool"
+        rate = self.market_data_provider.get_rate(self.config.trading_pair)
+        if rate is not None:
+            price = Decimal(str(rate))
+            if price > 0:
+                return price, "router"
+        if snapshot.active_lp:
+            fallback_price = snapshot.active_lp[0].current_price
+            if fallback_price is not None and fallback_price > 0:
+                return fallback_price, "executor"
+        return None, "unavailable"
+
+    def _compute_risk_values(
+        self,
+        snapshot: Snapshot,
+        price: Optional[Decimal],
+    ) -> Tuple[Decimal, Optional[Decimal], Optional[Decimal], Optional[Decimal], Optional[Decimal]]:
+        risk_cap_quote = max(Decimal("0"), self.config.position_value_quote)
+        wallet_value_quote: Optional[Decimal] = None
+        lp_value_quote: Optional[Decimal] = None
+        if price is not None and price > 0:
+            wallet_value_quote = snapshot.wallet_base * price + snapshot.wallet_quote
+            if snapshot.active_lp:
+                lp_value_quote = sum(self._estimate_position_value(lp_view, price) for lp_view in snapshot.active_lp)
+            else:
+                lp_value_quote = Decimal("0")
+
+        risk_wallet_contrib_quote: Optional[Decimal] = None
+        risk_equity_quote: Optional[Decimal] = None
+        if wallet_value_quote is not None and lp_value_quote is not None:
+            if risk_cap_quote > 0:
+                risk_wallet_contrib_quote = max(Decimal("0"), min(wallet_value_quote, risk_cap_quote - lp_value_quote))
+                risk_equity_quote = lp_value_quote + risk_wallet_contrib_quote
+            else:
+                risk_wallet_contrib_quote = wallet_value_quote
+                risk_equity_quote = lp_value_quote + wallet_value_quote
+        return risk_cap_quote, risk_equity_quote, risk_wallet_contrib_quote, lp_value_quote, wallet_value_quote
+
+    def _log_decision_metrics(self, decision, snapshot: Snapshot) -> None:
+        price, price_source = self._resolve_decision_price(snapshot)
+        (
+            _risk_cap,
+            risk_equity,
+            _risk_wallet_contrib,
+            lp_value,
+            wallet_value,
+        ) = self._compute_risk_values(snapshot, price)
+
+        if decision.reason.startswith("stop_loss"):
+            anchor = self._ctx.anchor_value_quote
+            trigger = None
+            if anchor is not None and anchor > 0 and self.config.stop_loss_pnl_pct > 0:
+                trigger = anchor * (Decimal("1") - self.config.stop_loss_pnl_pct)
+            self.logger().info(
+                "stoploss_trigger | price=%s source=%s anchor=%s equity=%s trigger=%s "
+                "wallet_base=%s wallet_quote=%s lp_value=%s",
+                price,
+                price_source,
+                anchor,
+                risk_equity,
+                trigger,
+                snapshot.wallet_base,
+                snapshot.wallet_quote,
+                lp_value,
+            )
+            return
+
+        if decision.reason == "out_of_range_rebalance":
+            lp_view = min(snapshot.active_lp, key=lambda lp: lp.executor_id) if snapshot.active_lp else None
+            lower = lp_view.lower_price if lp_view else None
+            upper = lp_view.upper_price if lp_view else None
+            deviation_pct = None
+            if price is not None and lower is not None and upper is not None and lower > 0 and upper > 0:
+                if price < lower:
+                    deviation_pct = (lower - price) / lower * Decimal("100")
+                elif price > upper:
+                    deviation_pct = (price - upper) / upper * Decimal("100")
+                else:
+                    deviation_pct = Decimal("0")
+            self.logger().info(
+                "rebalance_trigger | price=%s source=%s lower=%s upper=%s deviation_pct=%s "
+                "out_of_range_since=%s rebalance_seconds=%s hysteresis_pct=%s cooldown_seconds=%s",
+                price,
+                price_source,
+                lower,
+                upper,
+                deviation_pct,
+                self._ctx.out_of_range_since,
+                self.config.rebalance_seconds,
+                self.config.hysteresis_pct,
+                self.config.cooldown_seconds,
+            )
 
     def _log_decision_actions(self, decision) -> None:
         if not decision.actions:
@@ -375,23 +436,6 @@ class CLMMLPBaseController(ControllerBase):
             snapshot_wallet_quote=snapshot_wallet_quote,
         )
 
-    @staticmethod
-    def _snapshot_with_ledger(raw_snapshot: Snapshot, ledger_base: Decimal, ledger_quote: Decimal) -> Snapshot:
-        return Snapshot(
-            now=raw_snapshot.now,
-            current_price=raw_snapshot.current_price,
-            balance_fresh=raw_snapshot.balance_fresh,
-            wallet_base=ledger_base,
-            wallet_quote=ledger_quote,
-            snapshot_wallet_base=raw_snapshot.snapshot_wallet_base,
-            snapshot_wallet_quote=raw_snapshot.snapshot_wallet_quote,
-            lp=raw_snapshot.lp,
-            swaps=raw_snapshot.swaps,
-            active_lp=raw_snapshot.active_lp,
-            active_swaps=raw_snapshot.active_swaps,
-            balance_events=raw_snapshot.balance_events,
-        )
-
     def _refresh_snapshot(self, now: float) -> Snapshot:
         self._balance_manager.schedule_refresh(now)
         self._pool_price_manager.schedule_refresh(now)
@@ -404,58 +448,7 @@ class CLMMLPBaseController(ControllerBase):
             snapshot_wallet_base=self._balance_manager.wallet_base,
             snapshot_wallet_quote=self._balance_manager.wallet_quote,
         )
-        ledger_status = self._ledger.update(
-            events=raw_snapshot.balance_events,
-            snapshot_base=raw_snapshot.snapshot_wallet_base,
-            snapshot_quote=raw_snapshot.snapshot_wallet_quote,
-            snapshot_fresh=balance_fresh,
-            now=now,
-        )
-        if (
-            ledger_status is not None
-            and ledger_status.needs_reconcile
-            and balance_fresh
-            and not raw_snapshot.active_lp
-            and not raw_snapshot.active_swaps
-        ):
-            self.logger().warning(
-                "ledger_force_reset | base=%s quote=%s",
-                raw_snapshot.snapshot_wallet_base,
-                raw_snapshot.snapshot_wallet_quote,
-            )
-            self._ledger.force_reset(
-                snapshot_base=raw_snapshot.snapshot_wallet_base,
-                snapshot_quote=raw_snapshot.snapshot_wallet_quote,
-                now=now,
-            )
-            ledger_status = self._ledger.update(
-                events=[],
-                snapshot_base=raw_snapshot.snapshot_wallet_base,
-                snapshot_quote=raw_snapshot.snapshot_wallet_quote,
-                snapshot_fresh=True,
-                now=now,
-            )
-        self._ledger_status = ledger_status
-        ledger_base = raw_snapshot.snapshot_wallet_base
-        ledger_quote = raw_snapshot.snapshot_wallet_quote
-        if self._ledger_status is not None and self._ledger_status.has_balance:
-            ledger_base = self._ledger.balance_base
-            ledger_quote = self._ledger.balance_quote
-        return self._snapshot_with_ledger(raw_snapshot, ledger_base, ledger_quote)
-
-    def _compute_nav(self, snapshot: Snapshot) -> Optional[Tuple[Decimal, Decimal, Decimal, Decimal]]:
-        current_price = snapshot.current_price
-        if current_price is None or current_price <= 0:
-            return None
-        lp_value = sum(self._estimate_position_value(lp, current_price) for lp in snapshot.active_lp)
-        wallet_value = snapshot.wallet_base * current_price + snapshot.wallet_quote
-        budget_value = max(Decimal("0"), self.config.position_value_quote)
-        if budget_value <= 0:
-            nav_value = lp_value + wallet_value
-        else:
-            unallocated_value = max(Decimal("0"), budget_value - lp_value)
-            nav_value = lp_value + min(wallet_value, unallocated_value)
-        return nav_value, lp_value, wallet_value, budget_value
+        return raw_snapshot
 
     def _estimate_position_value(self, lp_view: LPView, current_price: Decimal) -> Decimal:
         base_amount = abs(lp_view.base_amount)

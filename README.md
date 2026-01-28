@@ -72,6 +72,47 @@ Add to your config file:
 
 Restart Claude Desktop after adding.
 
+### Local MCP (stdio, no docker)
+
+If you prefer a local stdio adapter (no extra container), run:
+
+```bash
+HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+HUMMINGBOT_API_USERNAME=admin \
+HUMMINGBOT_API_PASSWORD=admin \
+./hummingbot-api-mcp
+```
+
+Claude CLI config:
+
+```bash
+claude mcp add --transport stdio hummingbot-api -- \
+  env HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+      HUMMINGBOT_API_USERNAME=admin \
+      HUMMINGBOT_API_PASSWORD=admin \
+      ./hummingbot-api-mcp
+```
+
+Claude Desktop config:
+
+```json
+{
+  "mcpServers": {
+    "hummingbot-api": {
+      "command": "env",
+      "args": [
+        "HUMMINGBOT_API_URL=http://127.0.0.1:8000",
+        "HUMMINGBOT_API_USERNAME=admin",
+        "HUMMINGBOT_API_PASSWORD=admin",
+        "./hummingbot-api-mcp"
+      ]
+    }
+  }
+}
+```
+
+See `mcp/README.md` for the full tool list.
+
 ## Gateway (DEX Trading)
 
 Gateway enables decentralized exchange trading. Start it via MCP:
