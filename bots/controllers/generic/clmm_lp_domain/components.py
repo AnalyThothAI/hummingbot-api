@@ -192,6 +192,10 @@ class ControllerContext:
     state: ControllerState = ControllerState.IDLE
     state_since_ts: float = 0.0
     cooldown_until_ts: float = 0.0
+    domain_ready: bool = True
+    domain_error: Optional[str] = None
+    domain_resolved_ts: float = 0.0
+    last_tick_ts: float = 0.0
     anchor_value_quote: Optional[Decimal] = None
     last_rebalance_ts: float = 0.0
     rebalance_timestamps: Deque[float] = field(default_factory=lambda: deque(maxlen=200))

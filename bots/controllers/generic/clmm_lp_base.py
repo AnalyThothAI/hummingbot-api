@@ -14,7 +14,7 @@ from hummingbot.strategy_v2.controllers import ControllerBase, ControllerConfigB
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
 
-from .clmm_lp_domain.components import ControllerContext, LPView, OpenProposal, Snapshot, PoolDomainAdapter
+from .clmm_lp_domain.components import ControllerContext, ControllerState, LPView, OpenProposal, Snapshot, PoolDomainAdapter
 from .clmm_lp_domain.cost_filter import CostFilter
 from .clmm_lp_domain.clmm_fsm import CLMMFSM
 from .clmm_lp_domain.policies import CLMMPolicyBase
@@ -156,18 +156,11 @@ class CLMMLPBaseController(ControllerBase):
                 trading_pair=self.config.trading_pair,
             ),
         ]
-        pool_pair = self.config.pool_trading_pair
-        if pool_pair and pool_pair != self.config.trading_pair:
-            rate_pairs.append(
-                ConnectorPair(
-                    connector_name=rate_connector,
-                    trading_pair=pool_pair,
-                ),
-            )
         self.market_data_provider.initialize_rate_sources(rate_pairs)
 
     async def update_processed_data(self):
         now = self.market_data_provider.time()
+        self._ctx.last_tick_ts = now
         self._detect_lp_position_changes(now)
         force_balance = self._ctx.force_balance_refresh_until_ts > now
         self._balance_manager.schedule_refresh(now, force=force_balance)
@@ -275,13 +268,25 @@ class CLMMLPBaseController(ControllerBase):
 
         diagnostics: Dict[str, Any] = {
             "balance_fresh": self._balance_manager.is_fresh(now),
+            "domain_ready": self._ctx.domain_ready,
+            "domain_error": self._ctx.domain_error,
+            "domain_resolved_ts": self._ctx.domain_resolved_ts if self._ctx.domain_resolved_ts > 0 else None,
         }
+
+        heartbeat_ts = self._ctx.last_tick_ts if self._ctx.last_tick_ts > 0 else None
+        heartbeat_age = None
+        if heartbeat_ts is not None:
+            heartbeat_age = max(0.0, now - heartbeat_ts)
 
         info: Dict[str, Any] = {
             "state": {
                 "value": self._ctx.state.value,
                 "since": self._ctx.state_since_ts,
                 "reason": self._ctx.last_decision_reason,
+            },
+            "heartbeat": {
+                "last_tick_ts": heartbeat_ts,
+                "tick_age_sec": heartbeat_age,
             },
             "price": {
                 "value": _as_float(price),
@@ -370,32 +375,33 @@ class CLMMLPBaseController(ControllerBase):
         return risk_cap_quote, risk_equity_quote, risk_wallet_contrib_quote, lp_value_quote, wallet_value_quote
 
     def _log_decision_metrics(self, decision, snapshot: Snapshot) -> None:
+        if not decision.reason:
+            return
         price = snapshot.current_price
         price_source = self._latest_price_context.source if self._latest_price_context is not None else "snapshot"
-        (
-            _risk_cap,
-            risk_equity,
-            _risk_wallet_contrib,
-            lp_value,
-            wallet_value,
-        ) = self._compute_risk_values(snapshot, price)
 
         if decision.reason.startswith("stop_loss"):
+            (
+                _risk_cap,
+                risk_equity,
+                _risk_wallet_contrib,
+                lp_value,
+                _wallet_value,
+            ) = self._compute_risk_values(snapshot, price)
             anchor = self._ctx.anchor_value_quote
             trigger = None
             if anchor is not None and anchor > 0 and self.config.stop_loss_pnl_pct > 0:
                 trigger = anchor * (Decimal("1") - self.config.stop_loss_pnl_pct)
-            self.logger().info(
-                "stoploss_trigger | price=%s source=%s anchor=%s equity=%s trigger=%s "
-                "wallet_base=%s wallet_quote=%s lp_value=%s",
-                price,
-                price_source,
-                anchor,
-                risk_equity,
-                trigger,
-                snapshot.wallet_base,
-                snapshot.wallet_quote,
-                lp_value,
+            self._log_metric_event(
+                "stoploss_trigger",
+                price=price,
+                source=price_source,
+                anchor=anchor,
+                equity=risk_equity,
+                trigger=trigger,
+                wallet_base=snapshot.wallet_base,
+                wallet_quote=snapshot.wallet_quote,
+                lp_value=lp_value,
             )
             return
 
@@ -411,19 +417,28 @@ class CLMMLPBaseController(ControllerBase):
                     deviation_pct = (price - upper) / upper * Decimal("100")
                 else:
                     deviation_pct = Decimal("0")
-            self.logger().info(
-                "rebalance_trigger | price=%s source=%s lower=%s upper=%s deviation_pct=%s "
-                "out_of_range_since=%s rebalance_seconds=%s hysteresis_pct=%s cooldown_seconds=%s",
-                price,
-                price_source,
-                lower,
-                upper,
-                deviation_pct,
-                self._ctx.out_of_range_since,
-                self.config.rebalance_seconds,
-                self.config.hysteresis_pct,
-                self.config.cooldown_seconds,
+            self._log_metric_event(
+                "rebalance_trigger",
+                price=price,
+                source=price_source,
+                lower=lower,
+                upper=upper,
+                deviation_pct=deviation_pct,
+                out_of_range_since=self._ctx.out_of_range_since,
+                rebalance_seconds=self.config.rebalance_seconds,
+                hysteresis_pct=self.config.hysteresis_pct,
+                cooldown_seconds=self.config.cooldown_seconds,
             )
+
+    def _log_metric_event(self, event: str, **fields: Any) -> None:
+        parts: List[str] = []
+        for key, value in fields.items():
+            if value is None:
+                continue
+            parts.append(f"{key}={value}")
+        payload = " ".join(parts)
+        if payload:
+            self.logger().info("metric_%s | %s", event, payload)
 
     def _log_decision_actions(self, decision) -> None:
         if not decision.actions:

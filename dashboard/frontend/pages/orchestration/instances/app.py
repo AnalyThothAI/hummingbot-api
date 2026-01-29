@@ -150,6 +150,20 @@ def is_not_found_error(error: Exception) -> bool:
     return "404" in message and "not found" in message
 
 
+def should_force_archive(response: Dict[str, Any]) -> bool:
+    if response_ok(response):
+        return False
+    data = response.get("data") if isinstance(response.get("data"), dict) else {}
+    message = (data.get("message") or response.get("error") or "").lower()
+    details = data.get("details") if isinstance(data, dict) else {}
+    reason = str(details.get("reason", "")).lower() if isinstance(details, dict) else ""
+    return (
+        "not found in active bots" in message
+        or "cannot perform graceful shutdown" in message
+        or "must be actively managed via mqtt" in reason
+    )
+
+
 def handle_action_response(
     response: Dict[str, Any],
     success_message: str,
@@ -229,15 +243,28 @@ def archive_bot(bot_name: str, docker_status: str):
     _mark_archive_pending(bot_name)
     if docker_status == "running":
         response = backend_api_request("POST", f"/bot-orchestration/stop-and-archive-bot/{bot_name}")
-        success_message = f"Stop-and-archive initiated for {bot_name}."
-        error_message = f"Failed to archive bot {bot_name}."
+        if response_ok(response):
+            success_message = f"Stop-and-archive initiated for {bot_name}."
+            error_message = f"Failed to archive bot {bot_name}."
+            if handle_action_response(response, success_message, error_message):
+                return
+        elif should_force_archive(response):
+            response = backend_api_request("POST", f"/docker/remove-container/{bot_name}")
+            success_message = f"Bot {bot_name} archived successfully."
+            error_message = f"Failed to archive bot {bot_name}."
+            if handle_action_response(response, success_message, error_message):
+                return
+        else:
+            success_message = f"Stop-and-archive initiated for {bot_name}."
+            error_message = f"Failed to archive bot {bot_name}."
+            if handle_action_response(response, success_message, error_message):
+                return
     else:
         response = backend_api_request("POST", f"/docker/remove-container/{bot_name}")
         success_message = f"Bot {bot_name} archived successfully."
         error_message = f"Failed to archive bot {bot_name}."
-
-    if handle_action_response(response, success_message, error_message):
-        return
+        if handle_action_response(response, success_message, error_message):
+            return
     _clear_archive_pending(bot_name)
 
 
@@ -364,6 +391,14 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
     if cooldown_sec is not None and cooldown_sec > 0:
         notes.append(f"Cooldown: {format_number(cooldown_sec, 0)}s")
 
+    heartbeat = custom_info.get("heartbeat")
+    if isinstance(heartbeat, dict):
+        tick_age = heartbeat.get("tick_age_sec")
+        if tick_age is not None:
+            age_label = format_age(tick_age)
+            if age_label:
+                notes.append(f"Tick: {age_label}")
+
     return {
         "signals": " | ".join(signals),
         "notes": " | ".join(notes),
@@ -459,6 +494,11 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         close_types_str = f"TP: {tp} | SL: {sl} | TS: {ts} | TL: {time_limit} | ES: {refreshed} | F: {failed}"
 
         signals = build_controller_signals(custom_info)
+        heartbeat_ts = None
+        heartbeat = custom_info.get("heartbeat") if isinstance(custom_info, dict) else None
+        if isinstance(heartbeat, dict):
+            heartbeat_ts = heartbeat.get("last_tick_ts")
+        heartbeat_age = format_timestamp_age(heartbeat_ts)
 
         controller_info = {
             "ID": controller_config.get("id"),
@@ -467,6 +507,7 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
             "Trading Pair": trading_pair,
             "Signals": signals.get("signals", ""),
             "Notes": signals.get("notes", ""),
+            "Last Tick": heartbeat_age,
             "Realized PNL": format_quote_value(realized_pnl_quote, quote_symbol, 2),
             "Unrealized PNL": format_quote_value(unrealized_pnl_quote, quote_symbol, 2),
             "NET PNL": format_quote_value(global_pnl_quote, quote_symbol, 2),
