@@ -57,6 +57,10 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     swap_slippage_pct: Decimal = Field(default=Decimal("0.01"), json_schema_extra={"is_updatable": True})
     max_inventory_swap_attempts: int = Field(default=3, json_schema_extra={"is_updatable": True})
     max_stoploss_liquidation_attempts: int = Field(default=5, json_schema_extra={"is_updatable": True})
+    inventory_drift_tolerance_pct: Decimal = Field(default=Decimal("0.01"), json_schema_extra={"is_updatable": True})
+    normalization_cooldown_sec: int = Field(default=30, json_schema_extra={"is_updatable": True})
+    normalization_min_value_pct: Decimal = Field(default=Decimal("0.005"), json_schema_extra={"is_updatable": True})
+    normalization_strict: bool = Field(default=False, json_schema_extra={"is_updatable": True})
 
     cost_filter_enabled: bool = Field(default=False, json_schema_extra={"is_updatable": True})
     cost_filter_fee_rate_bootstrap_quote_per_hour: Decimal = Field(

@@ -23,6 +23,7 @@ class ControllerState(str, Enum):
 
 class SwapPurpose(str, Enum):
     INVENTORY = "inventory"
+    INVENTORY_REBALANCE = "inventory_rebalance"
     STOPLOSS = "liquidate"
 
 
@@ -201,6 +202,8 @@ class ControllerContext:
     pending_swap_since_ts: float = 0.0
     inventory_swap_attempts: int = 0
     last_inventory_swap_ts: float = 0.0
+    normalization_swap_attempts: int = 0
+    last_normalization_swap_ts: float = 0.0
     stoploss_swap_attempts: int = 0
     last_stoploss_swap_ts: float = 0.0
     last_exit_reason: Optional[str] = None

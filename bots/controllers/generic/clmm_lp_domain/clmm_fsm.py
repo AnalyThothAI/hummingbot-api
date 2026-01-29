@@ -151,30 +151,15 @@ class CLMMFSM:
     def _handle_entry_swap(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         if not self._is_entry_triggered(snapshot.current_price):
             return self._transition(ctx, ControllerState.IDLE, snapshot.now, reason="entry_not_triggered")
-        if self._resolve_pending_swap(snapshot, ctx):
-            return self._transition(ctx, ControllerState.ENTRY_OPEN, snapshot.now, reason="swap_done")
-        pending_guard = self._guard_pending_swap(snapshot, ctx)
-        if pending_guard is not None:
-            return pending_guard
-        if self._inventory_attempts_exhausted(ctx, self._config.max_inventory_swap_attempts):
-            return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="swap_attempts_exhausted")
-        if self._swap_cooldown_active(ctx.last_inventory_swap_ts, snapshot.now):
-            return self._stay(ctx, reason="swap_cooldown")
-        if any(snapshot.active_swaps):
-            return self._stay(ctx, reason="swap_in_progress")
-        plan = self._build_open_plan(snapshot, ctx)
-        if plan is None:
-            return self._transition(ctx, ControllerState.IDLE, snapshot.now, reason="entry_unavailable")
-        if plan.delta_quote_value <= 0 or plan.delta_quote_value < plan.min_swap_value_quote:
-            return self._transition(ctx, ControllerState.ENTRY_OPEN, snapshot.now, reason="swap_not_needed")
-        swap_action = self._build_inventory_swap_action(snapshot, plan)
-        if swap_action is None:
-            return self._stay(ctx, reason="swap_required")
-        ctx.pending_swap_id = swap_action.executor_config.id
-        ctx.pending_swap_since_ts = snapshot.now
-        ctx.last_inventory_swap_ts = snapshot.now
-        ctx.inventory_swap_attempts += 1
-        return Decision(actions=[swap_action], reason="entry_inventory_swap")
+        return self._handle_inventory_swap_phase(
+            snapshot,
+            ctx,
+            stage="entry",
+            unavailable_reason="entry_unavailable",
+            next_state_on_done=ControllerState.ENTRY_OPEN,
+            next_state_on_no_swap=ControllerState.ENTRY_OPEN,
+            action_reason="entry_inventory_swap",
+        )
 
     def _handle_active(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
@@ -231,30 +216,15 @@ class CLMMFSM:
         stoploss_decision = self._maybe_stoploss(snapshot, ctx, lp_view, snapshot.now, reason="stop_loss_rebalance")
         if stoploss_decision is not None:
             return stoploss_decision
-        if self._resolve_pending_swap(snapshot, ctx):
-            return self._transition(ctx, ControllerState.REBALANCE_OPEN, snapshot.now, reason="swap_done")
-        pending_guard = self._guard_pending_swap(snapshot, ctx)
-        if pending_guard is not None:
-            return pending_guard
-        if self._inventory_attempts_exhausted(ctx, self._config.max_inventory_swap_attempts):
-            return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="swap_attempts_exhausted")
-        if self._swap_cooldown_active(ctx.last_inventory_swap_ts, snapshot.now):
-            return self._stay(ctx, reason="swap_cooldown")
-        if any(snapshot.active_swaps):
-            return self._stay(ctx, reason="swap_in_progress")
-        plan = self._build_open_plan(snapshot, ctx)
-        if plan is None:
-            return self._transition(ctx, ControllerState.IDLE, snapshot.now, reason="rebalance_unavailable")
-        if plan.delta_quote_value <= 0 or plan.delta_quote_value < plan.min_swap_value_quote:
-            return self._transition(ctx, ControllerState.REBALANCE_OPEN, snapshot.now, reason="swap_not_needed")
-        swap_action = self._build_inventory_swap_action(snapshot, plan)
-        if swap_action is None:
-            return self._stay(ctx, reason="swap_required")
-        ctx.pending_swap_id = swap_action.executor_config.id
-        ctx.pending_swap_since_ts = snapshot.now
-        ctx.last_inventory_swap_ts = snapshot.now
-        ctx.inventory_swap_attempts += 1
-        return Decision(actions=[swap_action], reason="rebalance_inventory_swap")
+        return self._handle_inventory_swap_phase(
+            snapshot,
+            ctx,
+            stage="rebalance",
+            unavailable_reason="rebalance_unavailable",
+            next_state_on_done=ControllerState.REBALANCE_OPEN,
+            next_state_on_no_swap=ControllerState.REBALANCE_OPEN,
+            action_reason="rebalance_inventory_swap",
+        )
 
     def _handle_rebalance_open(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
@@ -396,6 +366,9 @@ class CLMMFSM:
         if not self._config.auto_swap_enabled:
             return None
         delta_base = plan.delta_base
+        return self._build_swap_action_for_delta(snapshot, delta_base, level_id=SwapPurpose.INVENTORY.value)
+
+    def _build_swap_action_for_delta(self, snapshot: Snapshot, delta_base: Decimal, *, level_id: str):
         current_price = snapshot.current_price
         if current_price is None or current_price <= 0:
             return None
@@ -412,7 +385,7 @@ class CLMMFSM:
         else:
             return None
         return self._action_factory.build_swap_action(
-            level_id=SwapPurpose.INVENTORY.value,
+            level_id=level_id,
             now=snapshot.now,
             side=side,
             amount=amount,
@@ -436,8 +409,11 @@ class CLMMFSM:
             ctx.stoploss_swap_attempts = 0
             ctx.stoploss_balance_refresh_attempts = 0
         else:
-            ctx.inventory_swap_attempts = 0
-            self._set_anchor_if_ready(snapshot, ctx, self._select_lp(snapshot, ctx))
+            if swap.purpose == SwapPurpose.INVENTORY_REBALANCE:
+                ctx.normalization_swap_attempts = 0
+            else:
+                ctx.inventory_swap_attempts = 0
+                self._set_anchor_if_ready(snapshot, ctx, self._select_lp(snapshot, ctx))
         self._request_balance_refresh(ctx, snapshot.now, reason="swap_done")
         return True
 
@@ -459,6 +435,13 @@ class CLMMFSM:
         if last_swap_ts <= 0:
             return False
         return (now - last_swap_ts) < self._config.cooldown_seconds
+
+    def _normalization_cooldown_active(self, last_swap_ts: float, now: float) -> bool:
+        if self._config.normalization_cooldown_sec <= 0:
+            return False
+        if last_swap_ts <= 0:
+            return False
+        return (now - last_swap_ts) < self._config.normalization_cooldown_sec
 
     def _open_timeout_sec(self) -> float:
         return float(max(0, self._config.rebalance_open_timeout_sec))
@@ -593,19 +576,6 @@ class CLMMFSM:
         ctx.pending_realized_anchor = None
         self._request_balance_refresh(ctx, snapshot.now, reason="lp_closed")
 
-    def _compute_equity_value(
-        self,
-        snapshot: Snapshot,
-        lp_view: Optional[LPView],
-        current_price: Decimal,
-    ) -> Optional[Decimal]:
-        if current_price <= 0:
-            return None
-        wallet_value = snapshot.wallet_base * current_price + snapshot.wallet_quote
-        if lp_view is None:
-            return wallet_value
-        return self._compute_equity(snapshot, lp_view, current_price)
-
     def _compute_risk_equity_value(
         self,
         snapshot: Snapshot,
@@ -627,11 +597,6 @@ class CLMMFSM:
         budget_wallet = max(Decimal("0"), cap - lp_value)
         return lp_value + min(wallet_value, budget_wallet)
 
-    def _compute_equity(self, snapshot: Snapshot, lp_view: LPView, current_price: Decimal) -> Optional[Decimal]:
-        lp_value = self._estimate_position_value(lp_view, current_price)
-        wallet_value = snapshot.wallet_base * current_price + snapshot.wallet_quote
-        return lp_value + wallet_value
-
     def _select_lp(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[LPView]:
         if ctx.pending_lp_id and ctx.pending_lp_id in snapshot.lp:
             return snapshot.lp[ctx.pending_lp_id]
@@ -645,7 +610,7 @@ class CLMMFSM:
     def _select_swap_to_keep(active_swaps: List[SwapView]) -> Optional[SwapView]:
         if not active_swaps:
             return None
-        for purpose in (SwapPurpose.STOPLOSS, SwapPurpose.INVENTORY):
+        for purpose in (SwapPurpose.STOPLOSS, SwapPurpose.INVENTORY_REBALANCE, SwapPurpose.INVENTORY):
             for swap in active_swaps:
                 if swap.purpose == purpose:
                     return swap
@@ -712,6 +677,7 @@ class CLMMFSM:
                 ctx.inventory_swap_attempts = 0
                 ctx.stoploss_swap_attempts = 0
                 ctx.stoploss_balance_refresh_attempts = 0
+                ctx.normalization_swap_attempts = 0
                 ctx.out_of_range_since = None
         self._record_decision(ctx, reason)
         return Decision(actions=actions or [], next_state=ctx.state, reason=reason)
@@ -746,14 +712,126 @@ class CLMMFSM:
     ) -> Optional[SwapView]:
         if ctx.pending_swap_since_ts <= 0:
             return None
-        purpose = SwapPurpose.STOPLOSS if is_stoploss else SwapPurpose.INVENTORY
+        if is_stoploss:
+            purposes = {SwapPurpose.STOPLOSS}
+        else:
+            purposes = {SwapPurpose.INVENTORY, SwapPurpose.INVENTORY_REBALANCE}
         candidates = [
             swap for swap in snapshot.swaps.values()
-            if swap.purpose == purpose and swap.is_done and swap.timestamp >= ctx.pending_swap_since_ts
+            if swap.purpose in purposes and swap.is_done and swap.timestamp >= ctx.pending_swap_since_ts
         ]
         if not candidates:
             return None
         return max(candidates, key=lambda swap: swap.timestamp)
+
+    def _handle_inventory_swap_phase(
+        self,
+        snapshot: Snapshot,
+        ctx: ControllerContext,
+        *,
+        stage: str,
+        unavailable_reason: str,
+        next_state_on_done: ControllerState,
+        next_state_on_no_swap: ControllerState,
+        action_reason: str,
+    ) -> Decision:
+        if self._resolve_pending_swap(snapshot, ctx):
+            return self._transition(ctx, next_state_on_done, snapshot.now, reason="swap_done")
+        pending_guard = self._guard_pending_swap(snapshot, ctx)
+        if pending_guard is not None:
+            return pending_guard
+        plan = self._build_open_plan(snapshot, ctx)
+        if plan is None:
+            return self._transition(ctx, ControllerState.IDLE, snapshot.now, reason=unavailable_reason)
+        normalization = self._maybe_normalize_inventory(snapshot, ctx, plan, reason=stage)
+        if normalization is not None:
+            return normalization
+        if self._inventory_attempts_exhausted(ctx, self._config.max_inventory_swap_attempts):
+            return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="swap_attempts_exhausted")
+        if self._swap_cooldown_active(ctx.last_inventory_swap_ts, snapshot.now):
+            return self._stay(ctx, reason="swap_cooldown")
+        if any(snapshot.active_swaps):
+            return self._stay(ctx, reason="swap_in_progress")
+        if plan.delta_quote_value <= 0 or plan.delta_quote_value < plan.min_swap_value_quote:
+            return self._transition(ctx, next_state_on_no_swap, snapshot.now, reason="swap_not_needed")
+        swap_action = self._build_inventory_swap_action(snapshot, plan)
+        if swap_action is None:
+            return self._stay(ctx, reason="swap_required")
+        ctx.pending_swap_id = swap_action.executor_config.id
+        ctx.pending_swap_since_ts = snapshot.now
+        ctx.last_inventory_swap_ts = snapshot.now
+        ctx.inventory_swap_attempts += 1
+        return Decision(actions=[swap_action], reason=action_reason)
+
+    def _maybe_normalize_inventory(
+        self,
+        snapshot: Snapshot,
+        ctx: ControllerContext,
+        plan: OpenProposal,
+        *,
+        reason: str,
+    ) -> Optional[Decision]:
+        tol_pct = max(Decimal("0"), self._config.inventory_drift_tolerance_pct)
+        if tol_pct <= 0:
+            return None
+        current_price = snapshot.current_price
+        if current_price is None or current_price <= 0:
+            return None
+        budget_value = (plan.target_base * current_price) + plan.target_quote
+        if budget_value <= 0:
+            return None
+        tolerance_base = (budget_value * tol_pct) / current_price
+        base_diff = snapshot.wallet_base - plan.target_base
+        if abs(base_diff) <= tolerance_base:
+            return None
+        if self._normalization_cooldown_active(ctx.last_normalization_swap_ts, snapshot.now):
+            return self._stay(ctx, reason=f"{reason}_normalization_cooldown")
+        if ctx.normalization_swap_attempts >= self._config.max_inventory_swap_attempts > 0:
+            if self._config.normalization_strict:
+                return self._enter_cooldown(ctx, snapshot.now, reason=f"{reason}_normalization_exhausted")
+            return None
+
+        required_adjust = abs(base_diff) - tolerance_base
+        if required_adjust <= 0:
+            return None
+        delta_base = Decimal("0")
+        if base_diff > 0:
+            delta_base = -required_adjust
+        else:
+            max_buy = snapshot.wallet_quote / current_price if current_price > 0 else Decimal("0")
+            if max_buy <= 0:
+                if self._config.normalization_strict:
+                    return self._enter_cooldown(ctx, snapshot.now, reason=f"{reason}_normalization_no_quote")
+                return None
+            if max_buy < required_adjust:
+                if self._config.normalization_strict:
+                    return self._enter_cooldown(ctx, snapshot.now, reason=f"{reason}_normalization_insufficient")
+                delta_base = max_buy
+            else:
+                delta_base = required_adjust
+
+        if delta_base == 0:
+            return None
+        min_value_pct = max(Decimal("0"), self._config.normalization_min_value_pct)
+        min_value = budget_value * min_value_pct
+        delta_value = abs(delta_base * current_price)
+        if min_value > 0 and delta_value < min_value:
+            return None
+
+        swap_action = self._build_swap_action_for_delta(
+            snapshot,
+            delta_base,
+            level_id=SwapPurpose.INVENTORY_REBALANCE.value,
+        )
+        if swap_action is None:
+            if self._config.normalization_strict:
+                return self._enter_cooldown(ctx, snapshot.now, reason=f"{reason}_normalization_unavailable")
+            return None
+        ctx.pending_swap_id = swap_action.executor_config.id
+        ctx.pending_swap_since_ts = snapshot.now
+        ctx.last_normalization_swap_ts = snapshot.now
+        ctx.normalization_swap_attempts += 1
+        return Decision(actions=[swap_action], reason=f"{reason}_normalization_swap")
 
     def _request_balance_refresh(self, ctx: ControllerContext, now: float, *, reason: str) -> None:
         ttl = max(2, int(self._config.balance_update_timeout_sec))

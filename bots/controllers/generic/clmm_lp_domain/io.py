@@ -113,6 +113,8 @@ class SnapshotBuilder:
     def _swap_purpose(level_id: Optional[str]) -> Optional[SwapPurpose]:
         if level_id == SwapPurpose.INVENTORY.value:
             return SwapPurpose.INVENTORY
+        if level_id == SwapPurpose.INVENTORY_REBALANCE.value:
+            return SwapPurpose.INVENTORY_REBALANCE
         if level_id == SwapPurpose.STOPLOSS.value:
             return SwapPurpose.STOPLOSS
         return None
