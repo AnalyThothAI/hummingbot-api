@@ -209,6 +209,9 @@ class ControllerContext:
     realized_pnl_quote: Decimal = Decimal("0")
     realized_volume_quote: Decimal = Decimal("0")
     pending_realized_anchor: Optional[Decimal] = None
+    force_balance_refresh_until_ts: float = 0.0
+    force_balance_refresh_reason: Optional[str] = None
+    stoploss_balance_refresh_attempts: int = 0
     fee: FeeEstimatorContext = field(default_factory=FeeEstimatorContext)
 
 

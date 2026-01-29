@@ -37,4 +37,3 @@ reenter_enabled: true
 budget_key: clmm_lp_uniswap
 native_token_symbol: BNB
 min_native_balance: 0.0001
-balance_refresh_interval_sec: 20

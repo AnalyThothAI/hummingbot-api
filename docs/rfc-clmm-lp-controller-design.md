@@ -111,8 +111,8 @@ ACTIVE/IDLE → STOPLOSS_STOP → STOPLOSS_SWAP → COOLDOWN → IDLE
 - 新：无 LP/Swap 时 snapshot 为权威，ledger 强制 reset
 
 ### 6.2 价格优先级
-- 旧：router price 优先，pool price 作为 fallback
-- 新：pool price 优先，router price 作为 fallback
+- 旧：多源价格混用，存在口径冲突
+- 新：RateOracle/quote-swap 单口径
 
 ### 6.3 Stoploss 前置条件
 - 旧：price 有就触发 stoploss，不考虑余额是否可靠
@@ -125,14 +125,13 @@ ACTIVE/IDLE → STOPLOSS_STOP → STOPLOSS_SWAP → COOLDOWN → IDLE
 ## 7. 风险与权衡
 - **Ledger reset 风险**：若存在隐藏未结算事件，强制 reset 可能丢失事件影响
   - 通过“无 LP/Swap”条件限制该风险
-- **Pool price 优先**：若 pool-info 不稳定，仍需 router 兜底
+- **Quote-swap 单口径**：不再依赖 pool-info，避免多源口径冲突
 - **Stoploss gating**：在 balance 不 fresh 时，止损会被抑制
   - 这是安全优先的取舍
 
 ## 8. 附录：日志示例与典型故障时间线
 ### 8.1 典型症状（节选）
 - `update_balances failed ... TimeoutError`
-- `pool_price_update_failed ... TimeoutError`
 - `Gateway error: Pool not found ...`（RPC 抖动导致）
 - `State: IDLE | Wallet: 361 / -1314`（ledger 漂移）
 

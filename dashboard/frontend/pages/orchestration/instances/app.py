@@ -759,16 +759,16 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
                 "pair": trading_pair or "-",
                 "quote_symbol": quote_symbol,
                 "state": pos.get("state") or "-",
-                "position": pos.get("executor_id") or pos.get("position") or "-",
-                "lower": pos.get("lower_price") if pos.get("lower_price") is not None else pos.get("lower"),
-                "upper": pos.get("upper_price") if pos.get("upper_price") is not None else pos.get("upper"),
+                "position": pos.get("position_address") or "-",
+                "lower": pos.get("lower_price"),
+                "upper": pos.get("upper_price"),
                 "price": current_price,
-                "base": pos.get("base_amount") if pos.get("base_amount") is not None else pos.get("base"),
-                "quote": pos.get("quote_amount") if pos.get("quote_amount") is not None else pos.get("quote"),
-                "value_quote": pos.get("position_value_quote") if pos.get("position_value_quote") is not None else pos.get("value_quote"),
+                "base": pos.get("base_amount"),
+                "quote": pos.get("quote_amount"),
+                "value_quote": pos.get("position_value_quote"),
                 "anchor_quote": anchor_quote,
                 "stoploss_quote": stoploss_quote,
-                "fee_quote_per_hour": pos.get("fee_rate_quote_per_hour", fee_quote_per_hour),
+                "fee_quote_per_hour": fee_quote_per_hour,
                 "out_of_range_since": pos.get("out_of_range_since"),
             })
 
@@ -779,9 +779,10 @@ def build_range_bar_html(
     lower: Optional[float],
     upper: Optional[float],
     price: Optional[float],
+    state_out_of_range: Optional[bool] = None,
 ) -> Tuple[str, Optional[bool]]:
     if lower is None or upper is None or price is None:
-        return "<div class='lp-range-fallback'>Range or price unavailable</div>", None
+        return "<div class='lp-range-fallback'>Range or price unavailable</div>", state_out_of_range
     try:
         lower_val = float(lower)
         upper_val = float(upper)
@@ -805,7 +806,9 @@ def build_range_bar_html(
     lower_pct = pct(lower_val)
     upper_pct = pct(upper_val)
     price_pct = pct(price_val)
-    out_of_range = price_val < lower_val or price_val > upper_val
+    out_of_range = state_out_of_range if state_out_of_range is not None else (
+        price_val < lower_val or price_val > upper_val
+    )
     track_class = "lp-range-track out" if out_of_range else "lp-range-track"
     price_class = "lp-range-price out" if out_of_range else "lp-range-price"
 
@@ -836,7 +839,17 @@ def render_lp_positions(positions: List[Dict[str, Any]]) -> None:
             state_label = f"Executor {state_label}"
 
         quote_symbol = pos.get("quote_symbol")
-        range_html, out_of_range = build_range_bar_html(pos.get("lower"), pos.get("upper"), pos.get("price"))
+        state_out_of_range = None
+        if state_attr == "OUT_OF_RANGE":
+            state_out_of_range = True
+        elif state_attr == "IN_RANGE":
+            state_out_of_range = False
+        range_html, out_of_range = build_range_bar_html(
+            pos.get("lower"),
+            pos.get("upper"),
+            pos.get("price"),
+            state_out_of_range,
+        )
 
         metrics = [
             {"label": "Value", "value": format_quote_value(pos.get("value_quote"), quote_symbol, 4), "primary": True},

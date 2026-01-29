@@ -298,6 +298,11 @@ class CLMMFSM:
         return self._stay(ctx, reason="stoploss_stop", actions=[stop_action])
 
     def _handle_stoploss_swap(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
+        lp_view = self._select_lp(snapshot, ctx)
+        if not snapshot.balance_fresh and ctx.stoploss_balance_refresh_attempts < 1:
+            self._request_balance_refresh(ctx, snapshot.now, reason="stoploss_refresh")
+            ctx.stoploss_balance_refresh_attempts += 1
+            return self._stay(ctx, reason="stoploss_refresh_balance")
         if self._resolve_pending_swap(snapshot, ctx, is_stoploss=True):
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="stoploss_swap_done")
         pending_guard = self._guard_pending_swap(snapshot, ctx)
@@ -310,6 +315,8 @@ class CLMMFSM:
         if any(snapshot.active_swaps):
             return self._stay(ctx, reason="swap_in_progress")
         base_to_sell = snapshot.wallet_base
+        if base_to_sell <= 0 and lp_view is not None:
+            base_to_sell = abs(lp_view.base_amount) + abs(lp_view.base_fee)
         if base_to_sell <= 0:
             return self._transition(ctx, ControllerState.COOLDOWN, snapshot.now, reason="stoploss_no_base")
         swap_action = self._action_factory.build_swap_action(
@@ -427,9 +434,11 @@ class CLMMFSM:
             return False
         if is_stoploss:
             ctx.stoploss_swap_attempts = 0
+            ctx.stoploss_balance_refresh_attempts = 0
         else:
             ctx.inventory_swap_attempts = 0
             self._set_anchor_if_ready(snapshot, ctx, self._select_lp(snapshot, ctx))
+        self._request_balance_refresh(ctx, snapshot.now, reason="swap_done")
         return True
 
     def _inventory_attempts_exhausted(self, ctx: ControllerContext, max_attempts: int) -> bool:
@@ -582,6 +591,7 @@ class CLMMFSM:
         ctx.realized_pnl_quote += equity - anchor
         ctx.realized_volume_quote += anchor
         ctx.pending_realized_anchor = None
+        self._request_balance_refresh(ctx, snapshot.now, reason="lp_closed")
 
     def _compute_equity_value(
         self,
@@ -701,6 +711,7 @@ class CLMMFSM:
                 ctx.pending_swap_since_ts = 0.0
                 ctx.inventory_swap_attempts = 0
                 ctx.stoploss_swap_attempts = 0
+                ctx.stoploss_balance_refresh_attempts = 0
                 ctx.out_of_range_since = None
         self._record_decision(ctx, reason)
         return Decision(actions=actions or [], next_state=ctx.state, reason=reason)
@@ -743,3 +754,10 @@ class CLMMFSM:
         if not candidates:
             return None
         return max(candidates, key=lambda swap: swap.timestamp)
+
+    def _request_balance_refresh(self, ctx: ControllerContext, now: float, *, reason: str) -> None:
+        ttl = max(2, int(self._config.balance_update_timeout_sec))
+        deadline = now + ttl
+        if deadline > ctx.force_balance_refresh_until_ts:
+            ctx.force_balance_refresh_until_ts = deadline
+            ctx.force_balance_refresh_reason = reason

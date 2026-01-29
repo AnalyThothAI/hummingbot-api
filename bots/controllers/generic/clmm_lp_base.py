@@ -75,7 +75,6 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     native_token_symbol: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
     min_native_balance: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     balance_update_timeout_sec: int = Field(default=10, json_schema_extra={"is_updatable": True})
-    balance_refresh_interval_sec: int = Field(default=20, json_schema_extra={"is_updatable": True})
     balance_refresh_timeout_sec: int = Field(default=30, json_schema_extra={"is_updatable": True})
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
@@ -121,7 +120,6 @@ class CLMMLPBaseController(ControllerBase):
         )
         self._snapshot_builder = SnapshotBuilder(
             controller_id=self.config.id,
-            config=self.config,
             domain=self._domain,
         )
         self._rebalance_engine = RebalanceEngine(
@@ -139,6 +137,7 @@ class CLMMLPBaseController(ControllerBase):
         )
         self._latest_snapshot: Optional[Snapshot] = None
         self._latest_price_context: Optional[PriceContext] = None
+        self._last_lp_position: Dict[str, Optional[str]] = {}
 
         self._last_policy_update_ts: float = 0.0
         self._policy_update_interval_sec: float = 600.0
@@ -147,16 +146,30 @@ class CLMMLPBaseController(ControllerBase):
         self._policy_update_task: Optional[asyncio.Task] = None
 
         rate_connector = self._rate_connector
-        self.market_data_provider.initialize_rate_sources([
+        rate_pairs = [
             ConnectorPair(
                 connector_name=rate_connector,
                 trading_pair=self.config.trading_pair,
             ),
-        ])
+        ]
+        pool_pair = self.config.pool_trading_pair
+        if pool_pair and pool_pair != self.config.trading_pair:
+            rate_pairs.append(
+                ConnectorPair(
+                    connector_name=rate_connector,
+                    trading_pair=pool_pair,
+                ),
+            )
+        self.market_data_provider.initialize_rate_sources(rate_pairs)
 
     async def update_processed_data(self):
         now = self.market_data_provider.time()
-        self._balance_manager.schedule_refresh(now)
+        self._detect_lp_position_changes(now)
+        force_balance = self._ctx.force_balance_refresh_until_ts > now
+        self._balance_manager.schedule_refresh(now, force=force_balance)
+        if force_balance and self._balance_manager.is_fresh(now):
+            self._ctx.force_balance_refresh_until_ts = 0.0
+            self._ctx.force_balance_refresh_reason = None
         snapshot = self._refresh_snapshot(now)
         self._latest_snapshot = snapshot
         self._update_fee_rate_estimates(snapshot)
@@ -231,11 +244,6 @@ class CLMMLPBaseController(ControllerBase):
         positions: List[Dict[str, Any]] = []
         for lp_view in snapshot.active_lp:
             position_value = None
-            in_range = None
-            if lp_view.state == "IN_RANGE":
-                in_range = True
-            elif lp_view.state == "OUT_OF_RANGE":
-                in_range = False
             if price is not None and price > 0:
                 position_value = self._estimate_position_value(lp_view, price)
             positions.append({
@@ -244,13 +252,11 @@ class CLMMLPBaseController(ControllerBase):
                 "position_address": lp_view.position_address,
                 "lower_price": _as_float(lp_view.lower_price),
                 "upper_price": _as_float(lp_view.upper_price),
-                "in_range": in_range,
                 "position_value_quote": _as_float(position_value),
                 "base_amount": _as_float(abs(lp_view.base_amount)),
                 "quote_amount": _as_float(abs(lp_view.quote_amount)),
                 "base_fee": _as_float(abs(lp_view.base_fee)),
                 "quote_fee": _as_float(abs(lp_view.quote_fee)),
-                "fee_rate_quote_per_hour": _as_float(fee_rate_quote_per_hour),
                 "out_of_range_since": lp_view.out_of_range_since,
             })
 
@@ -329,7 +335,7 @@ class CLMMLPBaseController(ControllerBase):
             except (InvalidOperation, ValueError, TypeError):
                 price = None
             if price is not None and price > 0:
-                return PriceContext(value=price, source=f"rate_oracle:{self._rate_connector}", timestamp=0.0)
+                return PriceContext(value=price, source=f"rate_oracle:{self._rate_connector}", timestamp=now)
 
         return PriceContext(value=None, source="unavailable", timestamp=0.0)
 
@@ -444,7 +450,8 @@ class CLMMLPBaseController(ControllerBase):
         )
 
     def _refresh_snapshot(self, now: float) -> Snapshot:
-        self._balance_manager.schedule_refresh(now)
+        force_balance = self._ctx.force_balance_refresh_until_ts > now
+        self._balance_manager.schedule_refresh(now, force=force_balance)
         price_ctx = self._resolve_price_context(now)
         self._latest_price_context = price_ctx
         balance_fresh = self._balance_manager.is_fresh(now)
@@ -456,6 +463,36 @@ class CLMMLPBaseController(ControllerBase):
             current_price=price_ctx.value,
         )
         return raw_snapshot
+
+    def _detect_lp_position_changes(self, now: float) -> None:
+        current_lp_ids = set()
+        for executor in self.executors_info:
+            if executor.controller_id != self.config.id:
+                continue
+            if executor.type != "lp_position_executor":
+                continue
+            current_lp_ids.add(executor.id)
+            custom = executor.custom_info or {}
+            position_address = None
+            if isinstance(custom, dict):
+                position_address = custom.get("position_address")
+            prev_address = self._last_lp_position.get(executor.id)
+            if prev_address != position_address:
+                if prev_address is None and position_address:
+                    self._request_force_balance_refresh(now, "lp_open")
+                elif prev_address and position_address is None:
+                    self._request_force_balance_refresh(now, "lp_close")
+            self._last_lp_position[executor.id] = position_address
+        for executor_id in list(self._last_lp_position.keys()):
+            if executor_id not in current_lp_ids:
+                self._last_lp_position.pop(executor_id, None)
+
+    def _request_force_balance_refresh(self, now: float, reason: str) -> None:
+        ttl = max(2, int(self.config.balance_update_timeout_sec))
+        deadline = now + ttl
+        if deadline > self._ctx.force_balance_refresh_until_ts:
+            self._ctx.force_balance_refresh_until_ts = deadline
+            self._ctx.force_balance_refresh_reason = reason
 
     def _estimate_position_value(self, lp_view: LPView, current_price: Decimal) -> Decimal:
         base_amount = abs(lp_view.base_amount)
@@ -474,10 +511,9 @@ class CLMMLPBaseController(ControllerBase):
         position_address = lp_view.position_address or ""
         if not position_address:
             return
-        # Use controller price + bounds for fee-rate estimation (decisions still use executor state).
-        if lp_view.lower_price is not None and lp_view.upper_price is not None:
-            if current_price < lp_view.lower_price or current_price > lp_view.upper_price:
-                return
+        # Skip fee-rate updates when executor reports out-of-range.
+        if lp_view.state == "OUT_OF_RANGE":
+            return
         CostFilter.update_fee_rate_ewma(
             now=snapshot.now,
             position_address=position_address,

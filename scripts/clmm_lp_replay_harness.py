@@ -220,30 +220,8 @@ def _lp_executor_info(
     out_of_range_since: Optional[float],
     is_active: bool,
     close_type: Optional[CloseType],
-    balance_event: Optional[Dict[str, object]] = None,
 ) -> ExecutorInfo:
     base_token, quote_token = trading_pair.split("-")
-    balance_event_payload = None
-    if balance_event is not None:
-        event_seq = balance_event.get("seq")
-        try:
-            event_seq = int(event_seq) if event_seq is not None else 0
-        except (TypeError, ValueError):
-            event_seq = 0
-        event_type = balance_event.get("type")
-        delta = balance_event.get("delta")
-        if not isinstance(delta, dict):
-            delta = {}
-        base_delta = delta.get("base")
-        quote_delta = delta.get("quote")
-        balance_event_payload = {
-            "seq": event_seq,
-            "type": event_type,
-            "delta": {
-                "base": float(base_delta) if base_delta is not None else None,
-                "quote": float(quote_delta) if quote_delta is not None else None,
-            },
-        }
     config = LPPositionExecutorConfig(
         timestamp=timestamp,
         connector_name=connector_name,
@@ -283,7 +261,6 @@ def _lp_executor_info(
             "base_fee": 0.0,
             "quote_fee": 0.0,
             "out_of_range_since": out_of_range_since,
-            "balance_event": balance_event_payload,
         },
         close_type=close_type,
         controller_id=controller_id,
@@ -522,14 +499,6 @@ def _build_lp_event_missing_delta_scenario(
         out_of_range_since=None,
         is_active=True,
         close_type=None,
-        balance_event={
-            "seq": 1,
-            "type": "close",
-            "delta": {
-                "base": None,
-                "quote": None,
-            },
-        },
     )
     return [
         Step(
@@ -721,14 +690,6 @@ def _build_stoploss_flow_scenario(
         out_of_range_since=None,
         is_active=False,
         close_type=CloseType.COMPLETED,
-        balance_event={
-            "seq": 1,
-            "type": "close",
-            "delta": {
-                "base": Decimal("1"),
-                "quote": price,
-            },
-        },
     )
     liquidation_swap = _swap_executor_info(
         executor_id="swap-liquidation",
@@ -796,7 +757,6 @@ def _scenario_swap_delay(args) -> Scenario:
         trading_pair=args.trading_pair,
         pool_address=args.pool_address,
         position_value_quote=_to_decimal(args.position_value_quote) or Decimal("0"),
-        balance_refresh_interval_sec=args.balance_refresh_interval_sec,
         balance_refresh_timeout_sec=args.balance_refresh_timeout_sec,
     )
     steps = _build_swap_delay_scenario(
@@ -818,7 +778,6 @@ def _scenario_swap_missing_delta(args) -> Scenario:
         trading_pair=args.trading_pair,
         pool_address=args.pool_address,
         position_value_quote=_to_decimal(args.position_value_quote) or Decimal("0"),
-        balance_refresh_interval_sec=args.balance_refresh_interval_sec,
         balance_refresh_timeout_sec=args.balance_refresh_timeout_sec,
     )
     steps = _build_swap_missing_delta_scenario(
@@ -839,7 +798,6 @@ def _scenario_balance_timeout(args) -> Scenario:
         trading_pair=args.trading_pair,
         pool_address=args.pool_address,
         position_value_quote=_to_decimal(args.position_value_quote) or Decimal("0"),
-        balance_refresh_interval_sec=args.balance_refresh_interval_sec,
         balance_refresh_timeout_sec=args.balance_refresh_timeout_sec,
     )
     steps = _build_balance_timeout_scenario(
@@ -861,7 +819,6 @@ def _scenario_lp_event_missing(args) -> Scenario:
         trading_pair=args.trading_pair,
         pool_address=args.pool_address,
         position_value_quote=_to_decimal(args.position_value_quote) or Decimal("0"),
-        balance_refresh_interval_sec=args.balance_refresh_interval_sec,
         balance_refresh_timeout_sec=args.balance_refresh_timeout_sec,
     )
     steps = _build_lp_event_missing_delta_scenario(
@@ -882,7 +839,6 @@ def _scenario_concurrent_swaps(args) -> Scenario:
         trading_pair=args.trading_pair,
         pool_address=args.pool_address,
         position_value_quote=_to_decimal(args.position_value_quote) or Decimal("0"),
-        balance_refresh_interval_sec=args.balance_refresh_interval_sec,
         balance_refresh_timeout_sec=args.balance_refresh_timeout_sec,
     )
     steps = _build_concurrent_swaps_scenario(
@@ -903,7 +859,6 @@ def _scenario_rebalance_loop(args) -> Scenario:
         trading_pair=args.trading_pair,
         pool_address=args.pool_address,
         position_value_quote=_to_decimal(args.position_value_quote) or Decimal("0"),
-        balance_refresh_interval_sec=args.balance_refresh_interval_sec,
         balance_refresh_timeout_sec=args.balance_refresh_timeout_sec,
         config_overrides={
             "rebalance_seconds": 0,
@@ -926,7 +881,6 @@ def _scenario_stoploss_flow(args) -> Scenario:
         trading_pair=args.trading_pair,
         pool_address=args.pool_address,
         position_value_quote=_to_decimal(args.position_value_quote) or Decimal("0"),
-        balance_refresh_interval_sec=args.balance_refresh_interval_sec,
         balance_refresh_timeout_sec=args.balance_refresh_timeout_sec,
         config_overrides={
             "stop_loss_pnl_pct": Decimal("0.02"),
@@ -1025,7 +979,6 @@ def _build_controller(
     trading_pair: str,
     pool_address: str,
     position_value_quote: Decimal,
-    balance_refresh_interval_sec: int,
     balance_refresh_timeout_sec: int,
     config_overrides: Optional[Dict[str, object]] = None,
 ) -> Tuple[CLMMLPMeteoraController, FakeMarketDataProvider, FakeConnector]:
@@ -1036,7 +989,6 @@ def _build_controller(
         "trading_pair": trading_pair,
         "pool_address": pool_address,
         "position_value_quote": position_value_quote,
-        "balance_refresh_interval_sec": balance_refresh_interval_sec,
         "balance_refresh_timeout_sec": balance_refresh_timeout_sec,
     }
     if config_overrides:
@@ -1080,7 +1032,6 @@ async def main_async() -> int:
     parser.add_argument("--position-value-quote", type=float, default=200.0)
     parser.add_argument("--tick-sec", type=float, default=5.0)
     parser.add_argument("--delay-ticks", type=int, default=2)
-    parser.add_argument("--balance-refresh-interval-sec", type=int, default=1)
     parser.add_argument("--balance-refresh-timeout-sec", type=int, default=10)
     args = parser.parse_args()
 

@@ -1,5 +1,4 @@
 auto_swap_enabled: true
-balance_refresh_interval_sec: 20
 budget_key: clmm_lp_meteora
 connector_name: meteora/clmm
 controller_name: clmm_lp_meteora

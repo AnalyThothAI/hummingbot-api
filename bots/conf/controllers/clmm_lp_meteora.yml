@@ -38,4 +38,3 @@ reenter_enabled: true
 budget_key: clmm_lp_meteora
 native_token_symbol: SOL
 min_native_balance: 0.01
-balance_refresh_interval_sec: 20

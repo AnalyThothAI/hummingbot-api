@@ -22,11 +22,9 @@ class SnapshotBuilder:
         self,
         *,
         controller_id: str,
-        config: "CLMMLPBaseConfig",
         domain: PoolDomainAdapter,
     ) -> None:
         self._controller_id = controller_id
-        self._config = config
         self._domain = domain
 
     def build(
@@ -159,15 +157,13 @@ class BalanceManager:
     def has_snapshot(self) -> bool:
         return self._has_balance_snapshot
 
-    def schedule_refresh(self, now: float) -> None:
+    def schedule_refresh(self, now: float, force: bool = False) -> None:
         if self._wallet_update_task is not None and not self._wallet_update_task.done():
             return
         if (now - self._last_balance_attempt_ts) < 1.0:
             return
-        if self._config.balance_refresh_interval_sec > 0:
-            if self._has_balance_snapshot and (
-                (now - self._last_balance_update_ts) < self._config.balance_refresh_interval_sec
-            ):
+        if not force:
+            if self._has_balance_snapshot:
                 return
 
         primary_name = self._config.router_connector or self._config.connector_name
