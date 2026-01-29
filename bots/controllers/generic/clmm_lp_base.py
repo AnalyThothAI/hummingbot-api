@@ -161,24 +161,24 @@ class CLMMLPBaseController(ControllerBase):
 
     async def update_processed_data(self):
         now = self.market_data_provider.time()
-        # Heartbeat + single time source for this tick.
+        # 心跳与本 tick 的统一时间源。
         self._ctx.last_tick_ts = now
-        # Detect LP open/close to trigger balance refresh events.
+        # 监听 LP 开/关仓变化，用于触发余额刷新事件。
         self._detect_lp_position_changes(now)
-        # Schedule balance refresh (event-driven) without blocking the tick.
+        # 事件驱动的余额刷新调度，避免阻塞 tick。
         force_balance = self._ctx.force_balance_refresh_until_ts > now
         self._balance_manager.schedule_refresh(now, force=force_balance)
-        # Clear force-refresh once a fresh snapshot is observed.
+        # 一旦余额快照刷新完成，清理强制刷新标记。
         if force_balance and self._balance_manager.is_fresh(now):
             self._ctx.force_balance_refresh_until_ts = 0.0
             self._ctx.force_balance_refresh_reason = None
-        # Build a consistent snapshot for this tick.
+        # 构建本 tick 的一致性快照。
         snapshot = self._refresh_snapshot(now)
         self._latest_snapshot = snapshot
-        # Update fee-rate estimates from LP fees (used by cost filter).
+        # 基于 LP fee 更新费率估计（供 cost filter 使用）。
         self._update_fee_rate_estimates(snapshot)
 
-        # Periodically refresh policy inputs (e.g., tick spacing) without blocking.
+        # 周期性刷新 policy 输入（如 tick spacing），避免阻塞。
         connector = self.market_data_provider.connectors.get(self.config.connector_name)
         if connector is not None:
             interval = self._policy_bootstrap_interval_sec
