@@ -136,7 +136,6 @@ class LPView:
     quote_fee: Decimal
     lower_price: Optional[Decimal]
     upper_price: Optional[Decimal]
-    current_price: Optional[Decimal]
     out_of_range_since: Optional[float]
 
 

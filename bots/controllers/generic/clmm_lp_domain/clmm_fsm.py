@@ -137,6 +137,8 @@ class CLMMFSM:
         if lp_view and self._is_lp_failed(lp_view):
             ctx.pending_lp_id = None
             return self._enter_cooldown(ctx, now, reason="entry_lp_failed")
+        if ctx.pending_lp_id and self._open_timeout_exceeded(ctx, now):
+            return self._enter_cooldown(ctx, now, reason="entry_open_timeout", actions=self._stop_lp_action(lp_view))
         if not self._is_entry_triggered(snapshot.current_price):
             return self._transition(ctx, ControllerState.IDLE, now, reason="entry_not_triggered")
         if snapshot.active_swaps:
@@ -266,6 +268,8 @@ class CLMMFSM:
         if lp_view and self._is_lp_failed(lp_view):
             ctx.pending_lp_id = None
             return self._enter_cooldown(ctx, now, reason="rebalance_lp_failed")
+        if ctx.pending_lp_id and self._open_timeout_exceeded(ctx, now):
+            return self._enter_cooldown(ctx, now, reason="rebalance_open_timeout", actions=self._stop_lp_action(lp_view))
         if snapshot.active_swaps:
             return self._stay(ctx, reason="swap_in_progress")
         if ctx.pending_lp_id and (now - ctx.state_since_ts) < self._open_timeout_sec():
@@ -332,12 +336,30 @@ class CLMMFSM:
             self._record_realized_on_close(snapshot, ctx, None, reason="cooldown")
         return self._transition(ctx, ControllerState.IDLE, now, reason="cooldown_complete")
 
-    def _enter_cooldown(self, ctx: ControllerContext, now: float, *, reason: str) -> Decision:
+    def _enter_cooldown(
+        self,
+        ctx: ControllerContext,
+        now: float,
+        *,
+        reason: str,
+        actions: Optional[list] = None,
+    ) -> Decision:
         cooldown_sec = max(0, int(self._config.cooldown_seconds))
         if cooldown_sec <= 0:
-            return self._transition(ctx, ControllerState.IDLE, now, reason=reason)
+            return self._transition(ctx, ControllerState.IDLE, now, reason=reason, actions=actions)
         ctx.cooldown_until_ts = now + cooldown_sec
-        return self._transition(ctx, ControllerState.COOLDOWN, now, reason=reason)
+        return self._transition(ctx, ControllerState.COOLDOWN, now, reason=reason, actions=actions)
+
+    def _open_timeout_exceeded(self, ctx: ControllerContext, now: float) -> bool:
+        timeout = self._open_timeout_sec()
+        if timeout <= 0 or ctx.state_since_ts <= 0:
+            return False
+        return (now - ctx.state_since_ts) >= timeout
+
+    def _stop_lp_action(self, lp_view: Optional[LPView]) -> list:
+        if lp_view is None:
+            return []
+        return [StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)]
 
     def _plan_entry_open(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         plan = self._build_open_plan(snapshot, ctx)
@@ -526,26 +548,19 @@ class CLMMFSM:
     def _effective_price(snapshot: Snapshot, lp_view: Optional[LPView]) -> Optional[Decimal]:
         if snapshot.current_price is not None and snapshot.current_price > 0:
             return snapshot.current_price
-        if lp_view is not None and lp_view.current_price is not None and lp_view.current_price > 0:
-            return lp_view.current_price
         return None
 
     def _update_out_of_range_timer(self, snapshot: Snapshot, ctx: ControllerContext, lp_view: LPView) -> None:
         if not self._is_lp_open(lp_view):
             ctx.out_of_range_since = None
             return
-        lower_price = lp_view.lower_price
-        upper_price = lp_view.upper_price
-        if lower_price is None or upper_price is None or lower_price <= 0 or upper_price <= 0:
-            return
-        effective_price = self._effective_price(snapshot, lp_view)
-        if effective_price is None or effective_price <= 0:
-            return
-        if lower_price <= effective_price <= upper_price:
+        if lp_view.state == "IN_RANGE":
             ctx.out_of_range_since = None
             return
-        if ctx.out_of_range_since is None:
-            ctx.out_of_range_since = snapshot.now
+        if lp_view.state == "OUT_OF_RANGE":
+            ctx.out_of_range_since = lp_view.out_of_range_since
+            return
+        ctx.out_of_range_since = None
 
     def _record_realized_on_close(
         self,
@@ -633,6 +648,12 @@ class CLMMFSM:
             LPPositionStates.OUT_OF_RANGE.value,
         }:
             return True
+        if state in {
+            LPPositionStates.COMPLETE.value,
+            LPPositionStates.NOT_ACTIVE.value,
+            LPPositionStates.RETRIES_EXCEEDED.value,
+        }:
+            return False
         return bool(lp_view.position_address)
 
     def _is_lp_closed(self, lp_view: LPView) -> bool:

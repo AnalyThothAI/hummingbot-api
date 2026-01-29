@@ -26,8 +26,8 @@ CLMM LP 策略涉及链上头寸、余额快照与事件账本（ledger）多源
 2) **Stoploss 只有在 balance_fresh + price_valid 时触发**
    - 避免余额不可靠或价格不可用时误触发止损
 
-3) **价格权威顺序：Pool Price > Router Price**
-   - CLMM 的决策应优先使用池内价格，router 价格仅为兜底
+3) **价格权威顺序：RateOracle(quote-swap) 单口径**
+   - CLMM 决策统一使用 quote-swap 报价，不再混用池内价格
 
 4) **LP Executor 数据不可用时必须显式标记**
    - 观察层显示 UNKNOWN，而不是隐式继续使用旧值
@@ -36,12 +36,11 @@ CLMM LP 策略涉及链上头寸、余额快照与事件账本（ledger）多源
 ### 3.1 关键数据源
 - **Wallet snapshot**：connector `update_balances()` 的可用余额
 - **Ledger**：基于 balance events 的增量账本
-- **Pool price**：`connector.get_pool_info(pool)`
-- **Router price**：market_data_provider 的路由报价
+- **Quote price**：RateOracle/quote-swap 报价（唯一决策口径）
 - **LP position info**：`connector.get_position_info()`
 
 ### 3.2 数据流
-1. 每 tick 调用 `BalanceManager.schedule_refresh` 与 `PoolPriceManager.schedule_refresh`
+1. 每 tick 调用 `BalanceManager.schedule_refresh`
 2. 生成 Snapshot（包含 balance_fresh、current_price、lp views、swaps）
 3. Ledger 应用事件并生成 LedgerStatus
 4. FSM 根据 Snapshot 与 LedgerStatus 产生 Decision
@@ -52,10 +51,9 @@ CLMM LP 策略涉及链上头寸、余额快照与事件账本（ledger）多源
 - **无活跃 LP/Swap 且 balance_fresh 时**：snapshot 为主，ledger 必须强制重置
 - 该规则保证异常恢复后不会长期卡死
 
-### 4.2 价格：Pool vs Router
-- pool price 反映 CLMM 当前 tick 状态，为主
-- router price 仅作为 fallback（pool-info 不可用时）
-- 该规则避免 price 漂移导致的策略误判
+### 4.2 价格：Quote-swap 单口径
+- 决策统一使用 RateOracle/quote-swap 报价
+- pool price 不参与决策，避免多源口径冲突
 
 ### 4.3 LP 信息：Executor vs UI
 - FSM 只使用 executor 信息（LPView），不使用 last snapshot

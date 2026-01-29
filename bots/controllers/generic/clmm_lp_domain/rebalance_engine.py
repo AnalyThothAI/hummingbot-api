@@ -26,12 +26,17 @@ class RebalanceEngine:
         if lower_price is None or upper_price is None or lower_price <= 0 or upper_price <= 0:
             return RebalanceSignal(False, "bounds_unavailable")
 
-        effective_price = snapshot.current_price if snapshot.current_price is not None else lp_view.current_price
+        state = lp_view.state
+        if state == "IN_RANGE":
+            return RebalanceSignal(False, "in_range")
+        if state is None:
+            return RebalanceSignal(False, "state_unavailable")
+        if state != "OUT_OF_RANGE":
+            return RebalanceSignal(False, "state_not_out_of_range")
+
+        effective_price = snapshot.current_price
         if effective_price is None or effective_price <= 0:
             return RebalanceSignal(False, "price_unavailable")
-
-        if lower_price <= effective_price <= upper_price:
-            return RebalanceSignal(False, "in_range")
 
         deviation_pct = self._out_of_range_deviation_pct(effective_price, lower_price, upper_price)
         hysteresis_pct = max(Decimal("0"), self._config.hysteresis_pct)
