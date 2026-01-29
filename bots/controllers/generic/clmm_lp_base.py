@@ -142,6 +142,7 @@ class CLMMLPBaseController(ControllerBase):
         self._latest_snapshot: Optional[Snapshot] = None
         self._latest_price_context: Optional[PriceContext] = None
         self._last_lp_position: Dict[str, Optional[str]] = {}
+        self._last_tick_log_ts: float = 0.0
 
         self._last_policy_update_ts: float = 0.0
         self._policy_update_interval_sec: float = 600.0
@@ -160,17 +161,24 @@ class CLMMLPBaseController(ControllerBase):
 
     async def update_processed_data(self):
         now = self.market_data_provider.time()
+        # Heartbeat + single time source for this tick.
         self._ctx.last_tick_ts = now
+        # Detect LP open/close to trigger balance refresh events.
         self._detect_lp_position_changes(now)
+        # Schedule balance refresh (event-driven) without blocking the tick.
         force_balance = self._ctx.force_balance_refresh_until_ts > now
         self._balance_manager.schedule_refresh(now, force=force_balance)
+        # Clear force-refresh once a fresh snapshot is observed.
         if force_balance and self._balance_manager.is_fresh(now):
             self._ctx.force_balance_refresh_until_ts = 0.0
             self._ctx.force_balance_refresh_reason = None
+        # Build a consistent snapshot for this tick.
         snapshot = self._refresh_snapshot(now)
         self._latest_snapshot = snapshot
+        # Update fee-rate estimates from LP fees (used by cost filter).
         self._update_fee_rate_estimates(snapshot)
 
+        # Periodically refresh policy inputs (e.g., tick spacing) without blocking.
         connector = self.market_data_provider.connectors.get(self.config.connector_name)
         if connector is not None:
             interval = self._policy_bootstrap_interval_sec
@@ -375,10 +383,21 @@ class CLMMLPBaseController(ControllerBase):
         return risk_cap_quote, risk_equity_quote, risk_wallet_contrib_quote, lp_value_quote, wallet_value_quote
 
     def _log_decision_metrics(self, decision, snapshot: Snapshot) -> None:
-        if not decision.reason:
-            return
         price = snapshot.current_price
         price_source = self._latest_price_context.source if self._latest_price_context is not None else "snapshot"
+        now = snapshot.now
+        if (now - self._last_tick_log_ts) >= 10:
+            self._last_tick_log_ts = now
+            self._log_metric_event(
+                "tick",
+                state=self._ctx.state.value,
+                price=price,
+                source=price_source,
+                wallet_base=snapshot.wallet_base,
+                wallet_quote=snapshot.wallet_quote,
+            )
+        if not decision.reason:
+            return
 
         if decision.reason.startswith("stop_loss"):
             (
