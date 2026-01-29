@@ -136,7 +136,7 @@ class CLMMFSM:
             return self._transition(ctx, ControllerState.ACTIVE, now, reason="entry_opened")
         if lp_view and self._is_lp_failed(lp_view):
             ctx.pending_lp_id = None
-            return self._transition(ctx, ControllerState.IDLE, now, reason="lp_failed")
+            return self._enter_cooldown(ctx, now, reason="entry_lp_failed")
         if not self._is_entry_triggered(snapshot.current_price):
             return self._transition(ctx, ControllerState.IDLE, now, reason="entry_not_triggered")
         if snapshot.active_swaps:
@@ -193,6 +193,7 @@ class CLMMFSM:
         if current_price is not None and current_price > 0:
             equity = self._compute_risk_equity_value(snapshot, lp_view, current_price, ctx.anchor_value_quote)
         signal = self._rebalance_engine.evaluate(snapshot, ctx, lp_view)
+        ctx.rebalance_signal_reason = signal.reason
         if signal.should_rebalance:
             self._rebalance_engine.record_rebalance(now, ctx)
             ctx.pending_lp_id = lp_view.executor_id
@@ -264,7 +265,7 @@ class CLMMFSM:
             return self._transition(ctx, ControllerState.ACTIVE, now, reason="rebalance_opened")
         if lp_view and self._is_lp_failed(lp_view):
             ctx.pending_lp_id = None
-            return self._transition(ctx, ControllerState.IDLE, now, reason="lp_failed")
+            return self._enter_cooldown(ctx, now, reason="rebalance_lp_failed")
         if snapshot.active_swaps:
             return self._stay(ctx, reason="swap_in_progress")
         if ctx.pending_lp_id and (now - ctx.state_since_ts) < self._open_timeout_sec():
@@ -330,6 +331,13 @@ class CLMMFSM:
         if ctx.pending_realized_anchor is not None:
             self._record_realized_on_close(snapshot, ctx, None, reason="cooldown")
         return self._transition(ctx, ControllerState.IDLE, now, reason="cooldown_complete")
+
+    def _enter_cooldown(self, ctx: ControllerContext, now: float, *, reason: str) -> Decision:
+        cooldown_sec = max(0, int(self._config.cooldown_seconds))
+        if cooldown_sec <= 0:
+            return self._transition(ctx, ControllerState.IDLE, now, reason=reason)
+        ctx.cooldown_until_ts = now + cooldown_sec
+        return self._transition(ctx, ControllerState.COOLDOWN, now, reason=reason)
 
     def _plan_entry_open(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         plan = self._build_open_plan(snapshot, ctx)

@@ -290,32 +290,17 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
     signals = []
     notes = []
 
-    mode = custom_info.get("mode")
     state_payload = custom_info.get("state")
     if isinstance(state_payload, dict):
         state = state_payload.get("value")
         state_reason = state_payload.get("reason")
     else:
-        state = mode or custom_info.get("state") or custom_info.get("controller_state") or custom_info.get("hedge_state")
+        state = None
         state_reason = None
     if state:
         signals.append(f"State: {state}")
     if state_reason:
         notes.append(str(state_reason))
-    mode_rule = custom_info.get("mode_rule")
-    if mode_rule:
-        notes.append(f"Rule: {mode_rule}")
-
-    intent = custom_info.get("intent")
-    if isinstance(intent, dict):
-        flow = intent.get("flow")
-        stage = intent.get("stage")
-        reason = intent.get("reason")
-        if flow or stage:
-            intent_label = "/".join([value for value in [flow, stage] if value])
-            signals.append(f"Intent: {intent_label}")
-        if reason:
-            notes.append(str(reason))
 
     lp_active = None
     swap_active = None
@@ -325,17 +310,6 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
         lp_active = lp_info.get("active_count")
     if isinstance(swaps_info, dict):
         swap_active = swaps_info.get("active_count")
-    if lp_active is None:
-        lp_active = custom_info.get("active_lp_count")
-    if swap_active is None:
-        swap_active = custom_info.get("active_swap_count")
-    if lp_active is None or swap_active is None:
-        positions = custom_info.get("positions")
-        if isinstance(positions, dict):
-            if lp_active is None:
-                lp_active = positions.get("lp_active")
-            if swap_active is None:
-                swap_active = positions.get("swap_active")
     if lp_active is not None:
         signals.append(f"LP: {lp_active}")
     if swap_active is not None:
@@ -343,25 +317,23 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
 
     rebalance_1h = None
     rebalance_total = None
+    rebalance_reason = None
     rebalance = custom_info.get("rebalance")
     if isinstance(rebalance, dict):
         rebalance_1h = rebalance.get("count_1h")
         rebalance_total = rebalance.get("count_total")
-    if rebalance_1h is None:
-        rebalance_1h = custom_info.get("rebalance_count_1h")
-    if rebalance_total is None:
-        rebalance_total = custom_info.get("rebalance_count_total")
+        rebalance_reason = rebalance.get("signal_reason")
     if rebalance_1h is not None:
         notes.append(f"Reb 1h: {rebalance_1h}")
     if rebalance_total is not None:
         notes.append(f"Reb total: {rebalance_total}")
+    if rebalance_reason:
+        notes.append(f"Reb: {rebalance_reason}")
 
     price = None
     price_payload = custom_info.get("price")
     if isinstance(price_payload, dict):
         price = price_payload.get("value")
-    if price is None:
-        price = custom_info.get("price")
     if price is not None:
         signals.append(f"Price: {format_number(price, 4)}")
 
@@ -371,15 +343,6 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
     if isinstance(wallet, dict):
         base = wallet.get("base")
         quote = wallet.get("quote")
-    if base is None:
-        base = custom_info.get("wallet_base")
-    if quote is None:
-        quote = custom_info.get("wallet_quote")
-    if base is None and quote is None:
-        wallet = custom_info.get("wallet")
-        if isinstance(wallet, dict):
-            base = wallet.get("base")
-            quote = wallet.get("quote")
     if base is not None or quote is not None:
         base_str = format_number(base, 4) if base is not None else "-"
         quote_str = format_number(quote, 4) if quote is not None else "-"
@@ -390,41 +353,14 @@ def build_controller_signals(custom_info: Dict[str, Any]) -> Dict[str, str]:
     if isinstance(state, str):
         stop_loss_active = state.startswith("STOPLOSS")
         rebalance_pending = state.startswith("REBALANCE")
-    flags = custom_info.get("flags")
-    if isinstance(flags, dict):
-        stop_loss_active = bool(flags.get("stop_loss_active"))
-        rebalance_pending = flags.get("rebalance_pending")
-
-    if custom_info.get("stop_loss_active") is not None:
-        stop_loss_active = bool(custom_info.get("stop_loss_active"))
-    if custom_info.get("rebalance_pending") is not None:
-        rebalance_pending = custom_info.get("rebalance_pending")
-
-    if custom_info.get("stoploss_pending_liquidation") is True:
-        stop_loss_active = True
-    rebalance_count = custom_info.get("rebalance_plan_count")
-    if rebalance_count is not None:
-        rebalance_pending = rebalance_count
-
-    if custom_info.get("awaiting_balance_refresh") is True:
-        signals.append("Balance: syncing")
 
     if stop_loss_active:
         signals.append("StopLoss: on")
     if rebalance_pending:
-        if isinstance(rebalance_pending, (int, float)) and rebalance_pending is not True:
-            signals.append(f"Rebalance: {rebalance_pending}")
-        else:
-            signals.append("Rebalance: on")
-
-    legacy_state_reason = custom_info.get("state_reason") or custom_info.get("intent_reason")
-    if legacy_state_reason:
-        notes.append(legacy_state_reason)
+        signals.append("Rebalance: on")
     cooldown_sec = None
     if isinstance(rebalance, dict):
         cooldown_sec = rebalance.get("cooldown_remaining_sec")
-    if cooldown_sec is None:
-        cooldown_sec = custom_info.get("stoploss_cooldown_remaining_sec")
     if cooldown_sec is not None and cooldown_sec > 0:
         notes.append(f"Cooldown: {format_number(cooldown_sec, 0)}s")
 
@@ -512,8 +448,6 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
                     unrealized_pnl_quote = derived_unrealized
                 if risk.get("pnl_net_quote") is None:
                     global_pnl_quote = realized_pnl_quote + derived_unrealized
-        if nav_quote is None:
-            nav_quote = custom_info.get("nav_quote") if isinstance(custom_info, dict) else None
 
         close_types = controller_performance.get("close_type_counts", {})
         tp = close_types.get("CloseType.TAKE_PROFIT", 0)
@@ -771,14 +705,7 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
         custom_info = inner_dict.get("custom_info", {})
         lp_payload = custom_info.get("lp") if isinstance(custom_info, dict) else None
         positions = lp_payload.get("positions") if isinstance(lp_payload, dict) else None
-        source = "lp_positions"
         fee_quote_per_hour = lp_payload.get("fee_rate_quote_per_hour") if isinstance(lp_payload, dict) else None
-        if not isinstance(positions, list) or not positions:
-            positions = custom_info.get("lp_positions") if isinstance(custom_info, dict) else None
-            source = "lp_positions_legacy"
-        if not isinstance(positions, list) or not positions:
-            positions = custom_info.get("active_lp") if isinstance(custom_info, dict) else None
-            source = "active_lp_legacy"
 
         risk = custom_info.get("risk") if isinstance(custom_info, dict) else None
         anchor_quote = risk.get("anchor_quote") if isinstance(risk, dict) else None
@@ -786,11 +713,11 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
         equity_quote = risk.get("equity_quote") if isinstance(risk, dict) else None
 
         price_payload = custom_info.get("price") if isinstance(custom_info, dict) else None
-        current_price = price_payload.get("value") if isinstance(price_payload, dict) else custom_info.get("price")
+        current_price = price_payload.get("value") if isinstance(price_payload, dict) else None
 
         wallet_payload = custom_info.get("wallet") if isinstance(custom_info, dict) else None
-        wallet_base = wallet_payload.get("base") if isinstance(wallet_payload, dict) else custom_info.get("wallet_base")
-        wallet_quote = wallet_payload.get("quote") if isinstance(wallet_payload, dict) else custom_info.get("wallet_quote")
+        wallet_base = wallet_payload.get("base") if isinstance(wallet_payload, dict) else None
+        wallet_quote = wallet_payload.get("quote") if isinstance(wallet_payload, dict) else None
 
         if not isinstance(positions, list) or not positions:
             if anchor_quote is None and stoploss_quote is None and equity_quote is None:
@@ -905,6 +832,8 @@ def render_lp_positions(positions: List[Dict[str, Any]]) -> None:
         state = pos.get("state") or "-"
         state_attr = state if isinstance(state, str) else "-"
         state_label = state_attr.replace("_", " ").title() if state_attr != "-" else "Unknown"
+        if state_label != "Unknown":
+            state_label = f"Executor {state_label}"
 
         quote_symbol = pos.get("quote_symbol")
         range_html, out_of_range = build_range_bar_html(pos.get("lower"), pos.get("upper"), pos.get("price"))

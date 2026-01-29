@@ -8,10 +8,9 @@ from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy_v2.executors.gateway_swap_executor.data_types import GatewaySwapExecutorConfig
 from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionExecutorConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction
-from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
-from .components import BalanceEvent, BalanceEventKind, LPView, PoolDomainAdapter, Snapshot, SwapPurpose, SwapView
+from .components import LPView, PoolDomainAdapter, Snapshot, SwapPurpose, SwapView
 
 if TYPE_CHECKING:
     from ..clmm_lp_base import CLMMLPBaseConfig
@@ -42,26 +41,21 @@ class SnapshotBuilder:
         wallet_base: Decimal,
         wallet_quote: Decimal,
         balance_fresh: bool = False,
-        snapshot_wallet_base: Optional[Decimal] = None,
-        snapshot_wallet_quote: Optional[Decimal] = None,
+        current_price_override: Optional[Decimal] = None,
+        use_price_override: bool = False,
     ) -> Snapshot:
-        current_price = self._get_current_price()
-        if snapshot_wallet_base is None:
-            snapshot_wallet_base = wallet_base
-        if snapshot_wallet_quote is None:
-            snapshot_wallet_quote = wallet_quote
+        if use_price_override:
+            current_price = current_price_override
+        else:
+            current_price = self._get_current_price()
 
         lp: Dict[str, LPView] = {}
         swaps: Dict[str, SwapView] = {}
-        balance_events: List[BalanceEvent] = []
         for executor in executors_info:
             if executor.controller_id != self._controller_id:
                 continue
             if executor.type == "lp_position_executor":
                 lp[executor.id] = self._parse_lp_view(executor)
-                lp_event = self._parse_lp_balance_event(executor, now)
-                if lp_event is not None:
-                    balance_events.append(lp_event)
             elif executor.type == "gateway_swap_executor":
                 level_id = getattr(executor.config, "level_id", None)
                 swaps[executor.id] = SwapView(
@@ -74,9 +68,6 @@ class SnapshotBuilder:
                     purpose=self._swap_purpose(level_id),
                     amount=Decimal(str(getattr(executor.config, "amount", 0))),
                 )
-                swap_event = self._parse_swap_balance_event(executor, now)
-                if swap_event is not None:
-                    balance_events.append(swap_event)
 
         active_lp = [v for v in lp.values() if v.is_active]
         active_swaps = [v for v in swaps.values() if v.is_active]
@@ -86,13 +77,10 @@ class SnapshotBuilder:
             balance_fresh=balance_fresh,
             wallet_base=wallet_base,
             wallet_quote=wallet_quote,
-            snapshot_wallet_base=snapshot_wallet_base,
-            snapshot_wallet_quote=snapshot_wallet_quote,
             lp=lp,
             swaps=swaps,
             active_lp=active_lp,
             active_swaps=active_swaps,
-            balance_events=balance_events,
         )
 
     def _parse_lp_view(self, executor: ExecutorInfo) -> LPView:
@@ -137,83 +125,6 @@ class SnapshotBuilder:
             current_price=price,
             out_of_range_since=out_of_range_since,
         )
-
-    def _parse_lp_balance_event(self, executor: ExecutorInfo, now: float) -> Optional[BalanceEvent]:
-        custom = executor.custom_info or {}
-        balance_event = custom.get("balance_event")
-        if not isinstance(balance_event, dict):
-            return None
-        kind = balance_event.get("type")
-        try:
-            kind_enum = BalanceEventKind(kind)
-        except (TypeError, ValueError):
-            return None
-        if kind_enum not in {BalanceEventKind.LP_OPEN, BalanceEventKind.LP_CLOSE}:
-            return None
-        delta = balance_event.get("delta") or {}
-        delta_base = self._to_decimal(delta.get("base")) or Decimal("0")
-        delta_quote = self._to_decimal(delta.get("quote")) or Decimal("0")
-        inverted = self._domain.executor_token_order_inverted(executor)
-        if inverted is None:
-            inverted = self._domain.pool_order_inverted
-        if inverted:
-            delta_base, delta_quote = self._domain.pool_amounts_to_strategy(
-                delta_base,
-                delta_quote,
-                inverted,
-            )
-
-        rent_delta = self._rent_delta(kind_enum, custom)
-        if rent_delta != 0:
-            native_token = self._config.native_token_symbol
-            if native_token == self._domain.base_token:
-                delta_base += rent_delta
-            elif native_token == self._domain.quote_token:
-                delta_quote += rent_delta
-
-        timestamp = balance_event.get("timestamp")
-        if timestamp is None or float(timestamp) <= 0:
-            timestamp = executor.close_timestamp or executor.timestamp or now
-        timestamp = float(timestamp)
-        seq = balance_event.get("seq")
-        event_id = f"{executor.id}:{seq}" if seq is not None else f"{executor.id}:{kind_enum.value}:{int(timestamp * 1000)}"
-        return BalanceEvent(
-            event_id=event_id,
-            executor_id=executor.id,
-            timestamp=timestamp,
-            kind=kind_enum,
-            delta_base=delta_base,
-            delta_quote=delta_quote,
-        )
-
-    def _parse_swap_balance_event(self, executor: ExecutorInfo, now: float) -> Optional[BalanceEvent]:
-        if not executor.is_done or executor.close_type != CloseType.COMPLETED:
-            return None
-        custom = executor.custom_info or {}
-        delta_base = self._to_decimal(custom.get("delta_base"))
-        delta_quote = self._to_decimal(custom.get("delta_quote"))
-        if delta_base is None or delta_quote is None:
-            return None
-        timestamp = float(executor.close_timestamp or executor.timestamp or now)
-        event_id = f"{executor.id}:{BalanceEventKind.SWAP.value}"
-        return BalanceEvent(
-            event_id=event_id,
-            executor_id=executor.id,
-            timestamp=timestamp,
-            kind=BalanceEventKind.SWAP,
-            delta_base=delta_base,
-            delta_quote=delta_quote,
-        )
-
-    @staticmethod
-    def _rent_delta(kind: BalanceEventKind, custom: Dict) -> Decimal:
-        if kind == BalanceEventKind.LP_OPEN:
-            rent = SnapshotBuilder._to_decimal(custom.get("position_rent")) or Decimal("0")
-            return -rent
-        if kind == BalanceEventKind.LP_CLOSE:
-            rent = SnapshotBuilder._to_decimal(custom.get("position_rent_refunded")) or Decimal("0")
-            return rent
-        return Decimal("0")
 
     def _get_current_price(self) -> Optional[Decimal]:
         if self._pool_price_provider is None:
@@ -263,6 +174,7 @@ class BalanceManager:
 
         self._wallet_base: Decimal = Decimal("0")
         self._wallet_quote: Decimal = Decimal("0")
+        self._wallet_source: Optional[str] = None
         self._last_balance_update_ts: float = 0.0
         self._last_balance_attempt_ts: float = 0.0
         self._wallet_update_task: Optional[asyncio.Task] = None
@@ -276,6 +188,10 @@ class BalanceManager:
     @property
     def wallet_quote(self) -> Decimal:
         return self._wallet_quote
+
+    @property
+    def wallet_source(self) -> Optional[str]:
+        return self._wallet_source
 
     @property
     def has_snapshot(self) -> bool:
@@ -292,11 +208,12 @@ class BalanceManager:
             ):
                 return
 
-        connector = self._market_data_provider.connectors.get(self._config.connector_name)
+        primary_name = self._config.router_connector or self._config.connector_name
+        connector = self._market_data_provider.connectors.get(primary_name)
         if connector is None:
             return
         self._last_balance_attempt_ts = now
-        self._wallet_update_task = safe_ensure_future(self._update_wallet_balances(connector))
+        self._wallet_update_task = safe_ensure_future(self._update_wallet_balances())
         self._wallet_update_task.add_done_callback(self._clear_wallet_update_task)
 
     def is_fresh(self, now: float) -> bool:
@@ -311,12 +228,11 @@ class BalanceManager:
         if self._wallet_update_task is task:
             self._wallet_update_task = None
 
-    async def _update_wallet_balances(self, connector) -> None:
+    async def _update_wallet_balances(self) -> None:
         timeout = float(max(1, self._config.balance_update_timeout_sec))
-        router_connector = None
         router_name = self._config.router_connector
-        if router_name and router_name != self._config.connector_name:
-            router_connector = self._market_data_provider.connectors.get(router_name)
+        primary_name = router_name or self._config.connector_name
+        primary_connector = self._market_data_provider.connectors.get(primary_name)
         token_symbols = [self._domain.base_token, self._domain.quote_token]
         if self._config.native_token_symbol:
             token_symbols.append(self._config.native_token_symbol)
@@ -338,27 +254,20 @@ class BalanceManager:
                 )
                 return False
 
-        lp_ok = await _safe_update(connector, self._config.connector_name)
-        router_ok = await _safe_update(router_connector, router_name) if router_connector else False
-
-        source = None
-        if router_connector is not None:
-            source = router_connector if router_ok else connector if lp_ok else None
-        else:
-            source = connector if lp_ok else None
-
-        if source is None:
+        if primary_connector is None:
+            return
+        if not await _safe_update(primary_connector, primary_name):
             return
 
-        self._wallet_base = Decimal(str(source.get_available_balance(self._domain.base_token) or 0))
-        self._wallet_quote = Decimal(str(source.get_available_balance(self._domain.quote_token) or 0))
-        # When a router connector is configured, only mark balances as fresh if its update succeeded.
-        if router_connector is None or router_ok:
-            self._last_balance_update_ts = self._market_data_provider.time()
-            self._has_balance_snapshot = True
+        self._wallet_base = Decimal(str(primary_connector.get_available_balance(self._domain.base_token) or 0))
+        self._wallet_quote = Decimal(str(primary_connector.get_available_balance(self._domain.quote_token) or 0))
+        self._wallet_source = primary_name
+        self._last_balance_update_ts = self._market_data_provider.time()
+        self._has_balance_snapshot = True
         if not self._logged_balance_snapshot:
             self._logger().info(
-                "balance_snapshot_ready | base=%s quote=%s",
+                "balance_snapshot_ready | source=%s base=%s quote=%s",
+                self._wallet_source,
                 self._wallet_base,
                 self._wallet_quote,
             )
@@ -408,6 +317,10 @@ class PoolPriceManager:
             if (now - self._last_price_ts) > timeout:
                 return None
         return self._price
+
+    @property
+    def last_price_ts(self) -> float:
+        return self._last_price_ts
 
     def _clear_price_update_task(self, task: asyncio.Task) -> None:
         if self._price_update_task is task:
@@ -551,7 +464,8 @@ class ActionFactory:
         return 2
 
     def _reserve_budget(self, base_amt: Decimal, quote_amt: Decimal) -> Optional[str]:
-        connector = self._market_data_provider.connectors.get(self._config.connector_name)
+        connector_name = self._config.router_connector or self._config.connector_name
+        connector = self._market_data_provider.connectors.get(connector_name)
         if connector is None:
             return None
         requirements: Dict[str, Decimal] = {}
@@ -560,7 +474,7 @@ class ActionFactory:
         if quote_amt > 0:
             requirements[self._domain.quote_token] = quote_amt
         reservation_id = self._budget_coordinator.reserve(
-            connector_name=self._config.connector_name,
+            connector_name=connector_name,
             connector=connector,
             requirements=requirements,
             native_token=self._config.native_token_symbol,

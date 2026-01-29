@@ -1,6 +1,7 @@
 import asyncio
 import logging
-from decimal import Decimal
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Optional, Tuple
 
 from pydantic import Field
@@ -20,6 +21,13 @@ from .clmm_lp_domain.policies import CLMMPolicyBase
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
 from .clmm_lp_domain.exit_policy import ExitPolicy
 from .clmm_lp_domain.io import ActionFactory, BalanceManager, PoolPriceManager, SnapshotBuilder
+
+
+@dataclass(frozen=True)
+class PriceContext:
+    value: Optional[Decimal]
+    source: str
+    timestamp: float
 
 
 class CLMMLPBaseConfig(ControllerConfigBase):
@@ -137,6 +145,7 @@ class CLMMLPBaseController(ControllerBase):
             exit_policy=self._exit_policy,
         )
         self._latest_snapshot: Optional[Snapshot] = None
+        self._latest_price_context: Optional[PriceContext] = None
 
         self._last_policy_update_ts: float = 0.0
         self._policy_update_interval_sec: float = 600.0
@@ -188,7 +197,11 @@ class CLMMLPBaseController(ControllerBase):
         def _as_float(value: Optional[Decimal]) -> Optional[float]:
             return float(value) if value is not None else None
 
-        price, price_source = self._resolve_decision_price(snapshot)
+        price_ctx = self._latest_price_context
+        price = snapshot.current_price
+        price_source = price_ctx.source if price_ctx is not None else "snapshot"
+        price_ts = price_ctx.timestamp if price_ctx is not None and price_ctx.timestamp > 0 else None
+        price_age = (now - price_ts) if price_ts is not None else None
         (
             risk_cap_quote,
             risk_equity_quote,
@@ -269,11 +282,14 @@ class CLMMLPBaseController(ControllerBase):
             "price": {
                 "value": _as_float(price),
                 "source": price_source,
+                "timestamp": price_ts,
+                "age_sec": float(price_age) if price_age is not None else None,
             },
             "wallet": {
                 "base": _as_float(snapshot.wallet_base),
                 "quote": _as_float(snapshot.wallet_quote),
                 "value_quote": _as_float(wallet_value_quote),
+                "source": self._balance_manager.wallet_source,
             },
             "lp": {
                 "active_count": len(snapshot.active_lp),
@@ -305,25 +321,58 @@ class CLMMLPBaseController(ControllerBase):
                 "count_1h": rebalance_count_1h,
                 "count_total": int(self._ctx.rebalance_count),
                 "last_ts": self._ctx.last_rebalance_ts if self._ctx.last_rebalance_ts > 0 else None,
+                "signal_reason": self._ctx.rebalance_signal_reason,
             },
             "diagnostics": diagnostics,
         }
         return info
 
-    def _resolve_decision_price(self, snapshot: Snapshot) -> Tuple[Optional[Decimal], str]:
+    def _resolve_price_context(self, now: float) -> PriceContext:
         pool_price = self._pool_price_manager.get_price()
         if pool_price is not None and pool_price > 0:
-            return pool_price, "pool"
+            ts = self._pool_price_manager.last_price_ts
+            if ts <= 0:
+                ts = now
+            return PriceContext(value=pool_price, source="pool", timestamp=ts)
+
         rate = self.market_data_provider.get_rate(self.config.trading_pair)
         if rate is not None:
-            price = Decimal(str(rate))
+            try:
+                price = Decimal(str(rate))
+            except (InvalidOperation, ValueError, TypeError):
+                price = None
+            if price is not None and price > 0:
+                return PriceContext(value=price, source="router", timestamp=now)
+
+        executor_price = self._extract_executor_price()
+        if executor_price is not None and executor_price > 0:
+            return PriceContext(value=executor_price, source="executor", timestamp=now)
+
+        return PriceContext(value=None, source="unavailable", timestamp=0.0)
+
+    def _extract_executor_price(self) -> Optional[Decimal]:
+        for executor in self.executors_info:
+            if executor.controller_id != self.config.id:
+                continue
+            if executor.type != "lp_position_executor":
+                continue
+            custom = executor.custom_info or {}
+            raw_price = custom.get("current_price")
+            if raw_price is None:
+                continue
+            try:
+                price = Decimal(str(raw_price))
+            except (InvalidOperation, ValueError, TypeError):
+                continue
+            if price <= 0:
+                continue
+            inverted = self._domain.executor_token_order_inverted(executor)
+            if inverted is None:
+                inverted = self._domain.pool_order_inverted
+            price = self._domain.pool_price_to_strategy(price, inverted)
             if price > 0:
-                return price, "router"
-        if snapshot.active_lp:
-            fallback_price = snapshot.active_lp[0].current_price
-            if fallback_price is not None and fallback_price > 0:
-                return fallback_price, "executor"
-        return None, "unavailable"
+                return price
+        return None
 
     def _compute_risk_values(
         self,
@@ -352,7 +401,8 @@ class CLMMLPBaseController(ControllerBase):
         return risk_cap_quote, risk_equity_quote, risk_wallet_contrib_quote, lp_value_quote, wallet_value_quote
 
     def _log_decision_metrics(self, decision, snapshot: Snapshot) -> None:
-        price, price_source = self._resolve_decision_price(snapshot)
+        price = snapshot.current_price
+        price_source = self._latest_price_context.source if self._latest_price_context is not None else "snapshot"
         (
             _risk_cap,
             risk_equity,
@@ -423,8 +473,8 @@ class CLMMLPBaseController(ControllerBase):
         wallet_base: Decimal,
         wallet_quote: Decimal,
         balance_fresh: bool,
-        snapshot_wallet_base: Decimal,
-        snapshot_wallet_quote: Decimal,
+        current_price_override: Optional[Decimal],
+        use_price_override: bool,
     ) -> Snapshot:
         return self._snapshot_builder.build(
             now=now,
@@ -432,21 +482,23 @@ class CLMMLPBaseController(ControllerBase):
             wallet_base=wallet_base,
             wallet_quote=wallet_quote,
             balance_fresh=balance_fresh,
-            snapshot_wallet_base=snapshot_wallet_base,
-            snapshot_wallet_quote=snapshot_wallet_quote,
+            current_price_override=current_price_override,
+            use_price_override=use_price_override,
         )
 
     def _refresh_snapshot(self, now: float) -> Snapshot:
         self._balance_manager.schedule_refresh(now)
         self._pool_price_manager.schedule_refresh(now)
+        price_ctx = self._resolve_price_context(now)
+        self._latest_price_context = price_ctx
         balance_fresh = self._balance_manager.is_fresh(now)
         raw_snapshot = self._build_snapshot(
             now,
             wallet_base=self._balance_manager.wallet_base,
             wallet_quote=self._balance_manager.wallet_quote,
             balance_fresh=balance_fresh,
-            snapshot_wallet_base=self._balance_manager.wallet_base,
-            snapshot_wallet_quote=self._balance_manager.wallet_quote,
+            current_price_override=price_ctx.value,
+            use_price_override=True,
         )
         return raw_snapshot
 
