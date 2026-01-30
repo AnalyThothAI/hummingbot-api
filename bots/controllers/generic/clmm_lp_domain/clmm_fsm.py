@@ -118,6 +118,14 @@ class CLMMFSM:
         lp_view = self._select_lp(snapshot, ctx)
         if ctx.pending_realized_anchor is not None and (lp_view is None or self._is_lp_closed(lp_view)):
             self._record_realized_on_close(snapshot, ctx, lp_view, reason="idle")
+        if lp_view is not None:
+            if self._is_lp_open(lp_view):
+                self._set_anchor_if_ready(snapshot, ctx, lp_view)
+                return self._transition(ctx, ControllerState.ACTIVE, now, reason="lp_already_open")
+            if self._is_lp_in_transition(lp_view):
+                return self._stay(ctx, reason="lp_in_transition")
+            if self._is_lp_failed(lp_view):
+                return self._stay(ctx, reason="lp_failed")
         if ctx.anchor_value_quote is not None:
             stoploss_decision = self._maybe_stoploss(snapshot, ctx, lp_view, now, reason="stop_loss_idle")
             if stoploss_decision is not None:
@@ -137,6 +145,10 @@ class CLMMFSM:
         if lp_view and self._is_lp_failed(lp_view):
             ctx.pending_lp_id = None
             return self._enter_cooldown(ctx, now, reason="entry_lp_failed")
+        if lp_view and self._is_lp_in_transition(lp_view):
+            if ctx.pending_lp_id and self._open_timeout_exceeded(ctx, now):
+                return self._enter_cooldown(ctx, now, reason="entry_open_timeout", actions=self._stop_lp_action(lp_view))
+            return self._stay(ctx, reason="open_in_progress")
         if ctx.pending_lp_id and self._open_timeout_exceeded(ctx, now):
             return self._enter_cooldown(ctx, now, reason="entry_open_timeout", actions=self._stop_lp_action(lp_view))
         if not self._is_entry_triggered(snapshot.current_price):
@@ -238,6 +250,10 @@ class CLMMFSM:
         if lp_view and self._is_lp_failed(lp_view):
             ctx.pending_lp_id = None
             return self._enter_cooldown(ctx, now, reason="rebalance_lp_failed")
+        if lp_view and self._is_lp_in_transition(lp_view):
+            if ctx.pending_lp_id and self._open_timeout_exceeded(ctx, now):
+                return self._enter_cooldown(ctx, now, reason="rebalance_open_timeout", actions=self._stop_lp_action(lp_view))
+            return self._stay(ctx, reason="open_in_progress")
         if ctx.pending_lp_id and self._open_timeout_exceeded(ctx, now):
             return self._enter_cooldown(ctx, now, reason="rebalance_open_timeout", actions=self._stop_lp_action(lp_view))
         if snapshot.active_swaps:
@@ -413,6 +429,7 @@ class CLMMFSM:
                 ctx.normalization_swap_attempts = 0
             else:
                 ctx.inventory_swap_attempts = 0
+                ctx.inventory_balance_refresh_attempts = 0
                 self._set_anchor_if_ready(snapshot, ctx, self._select_lp(snapshot, ctx))
         self._request_balance_refresh(ctx, snapshot.now, reason="swap_done")
         return True
@@ -675,6 +692,7 @@ class CLMMFSM:
                 ctx.pending_swap_id = None
                 ctx.pending_swap_since_ts = 0.0
                 ctx.inventory_swap_attempts = 0
+                ctx.inventory_balance_refresh_attempts = 0
                 ctx.stoploss_swap_attempts = 0
                 ctx.stoploss_balance_refresh_attempts = 0
                 ctx.normalization_swap_attempts = 0
@@ -735,6 +753,10 @@ class CLMMFSM:
         next_state_on_no_swap: ControllerState,
         action_reason: str,
     ) -> Decision:
+        if not snapshot.balance_fresh and ctx.inventory_balance_refresh_attempts < 1:
+            self._request_balance_refresh(ctx, snapshot.now, reason=f"{stage}_refresh")
+            ctx.inventory_balance_refresh_attempts += 1
+            return self._stay(ctx, reason=f"{stage}_refresh_balance")
         if self._resolve_pending_swap(snapshot, ctx):
             return self._transition(ctx, next_state_on_done, snapshot.now, reason="swap_done")
         pending_guard = self._guard_pending_swap(snapshot, ctx)

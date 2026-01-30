@@ -3,14 +3,16 @@ from decimal import Decimal
 from typing import Callable, Dict, List, Optional, TYPE_CHECKING
 
 from hummingbot.core.data_type.common import TradeType
+from hummingbot.core.gateway.gateway_http_client import GatewayHttpClient
 from hummingbot.core.utils.async_utils import safe_ensure_future
 from hummingbot.logger import HummingbotLogger
+from hummingbot.connector.utils import split_hb_trading_pair
 from hummingbot.strategy_v2.executors.gateway_swap_executor.data_types import GatewaySwapExecutorConfig
 from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionExecutorConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
-from .components import LPView, PoolDomainAdapter, Snapshot, SwapPurpose, SwapView
+from .components import LPView, PoolDomainAdapter, PriceContext, Snapshot, SwapPurpose, SwapView
 
 if TYPE_CHECKING:
     from ..clmm_lp_base import CLMMLPBaseConfig
@@ -164,9 +166,14 @@ class BalanceManager:
             return
         if (now - self._last_balance_attempt_ts) < 1.0:
             return
+        stale = self._has_balance_snapshot and not self.is_fresh(now)
         if not force:
-            if self._has_balance_snapshot:
+            if self._has_balance_snapshot and not stale:
                 return
+            if stale:
+                min_interval = float(max(1, self._config.balance_refresh_timeout_sec))
+                if (now - self._last_balance_attempt_ts) < min_interval:
+                    return
 
         primary_name = self._config.router_connector or self._config.connector_name
         connector = self._market_data_provider.connectors.get(primary_name)
@@ -232,6 +239,112 @@ class BalanceManager:
                 self._wallet_quote,
             )
             self._logged_balance_snapshot = True
+
+
+class PriceProvider:
+    def __init__(
+        self,
+        *,
+        connector_name: str,
+        trading_pair: str,
+        market_data_provider,
+        logger: Callable[[], HummingbotLogger],
+        poll_interval_sec: float = 15.0,
+        retry_interval_sec: float = 5.0,
+        ttl_sec: float = 20.0,
+    ) -> None:
+        self._connector_name = connector_name
+        self._trading_pair = trading_pair
+        self._market_data_provider = market_data_provider
+        self._logger = logger
+        self._poll_interval_sec = poll_interval_sec
+        self._retry_interval_sec = retry_interval_sec
+        self._ttl_sec = ttl_sec
+
+        self._price_ctx: Optional[PriceContext] = None
+        self._price_task: Optional[asyncio.Task] = None
+        self._last_attempt_ts: float = 0.0
+        self._chain: Optional[str] = None
+        self._network: Optional[str] = None
+
+    def stop(self) -> None:
+        if self._price_task is not None and not self._price_task.done():
+            self._price_task.cancel()
+        self._price_task = None
+
+    def get_price_context(self, now: float) -> PriceContext:
+        self._schedule_refresh(now)
+        if self._is_fresh(now):
+            ctx = self._price_ctx
+            return PriceContext(value=ctx.value, source=ctx.source, timestamp=ctx.timestamp)
+        return PriceContext(value=None, source="unavailable", timestamp=0.0)
+
+    def _is_fresh(self, now: float) -> bool:
+        ctx = self._price_ctx
+        if ctx is None or ctx.value is None or ctx.value <= 0:
+            return False
+        return (now - ctx.timestamp) <= self._ttl_sec
+
+    def _schedule_refresh(self, now: float) -> None:
+        if self._price_task is not None and not self._price_task.done():
+            return
+        ctx = self._price_ctx
+        if ctx is None or ctx.timestamp <= 0:
+            if (now - self._last_attempt_ts) < self._retry_interval_sec:
+                return
+        else:
+            if (now - ctx.timestamp) < self._poll_interval_sec:
+                return
+        self._last_attempt_ts = now
+        self._price_task = safe_ensure_future(self._refresh_price())
+        self._price_task.add_done_callback(self._clear_price_task)
+
+    async def _refresh_price(self) -> None:
+        connector = self._connector_name
+        if not connector:
+            return
+        if self._chain is None or self._network is None:
+            chain, network, error = await GatewayHttpClient.get_instance().get_connector_chain_network(connector)
+            if error:
+                self._logger().warning("price_refresh_failed | connector=%s error=%s", connector, error)
+                return
+            self._chain = chain
+            self._network = network
+
+        base, quote = split_hb_trading_pair(trading_pair=self._trading_pair)
+        last_error = None
+        for attempt in range(2):
+            try:
+                response = await GatewayHttpClient.get_instance().get_price(
+                    chain=self._chain,
+                    network=self._network,
+                    connector=connector,
+                    base_asset=base,
+                    quote_asset=quote,
+                    amount=Decimal("1"),
+                    side=TradeType.SELL,
+                )
+                price = None
+                if response and "price" in response:
+                    price = Decimal(str(response["price"]))
+                if price is not None and price > 0:
+                    now = self._market_data_provider.time()
+                    self._price_ctx = PriceContext(
+                        value=price,
+                        source=f"gateway_direct:{connector}",
+                        timestamp=now,
+                    )
+                    return
+            except Exception as exc:
+                last_error = exc
+            if attempt == 0:
+                await asyncio.sleep(self._retry_interval_sec)
+        if last_error is not None:
+            self._logger().warning("price_refresh_failed | connector=%s error=%s", connector, last_error)
+
+    def _clear_price_task(self, task: asyncio.Task) -> None:
+        if self._price_task is task:
+            self._price_task = None
 
 
 class ActionFactory:

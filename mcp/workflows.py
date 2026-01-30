@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from mcp.http_client import McpHttpClient, McpHttpError
+from utils.instance_naming import should_generate_unique_name
 
 
 def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -> Dict[str, Any]:
@@ -19,8 +20,6 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
 
     network_id = _get_str(arguments, "network_id")
     network = _get_str(arguments, "network")
-    if not network and network_id:
-        network = _derive_network_from_network_id(network_id)
 
     connector_name = _normalize_connector_name(_get_str(arguments, "connector_name"))
     pool_type = _get_str(arguments, "pool_type")
@@ -43,6 +42,15 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
     headless = arguments.get("headless")
     gateway_network_id = _get_str(arguments, "gateway_network_id")
     gateway_wallet_address = _get_str(arguments, "gateway_wallet_address")
+    apply_gateway_defaults = arguments.get("apply_gateway_defaults")
+    if apply_gateway_defaults is None:
+        apply_gateway_defaults = True
+    unique_instance_name = arguments.get("unique_instance_name")
+    if unique_instance_name is None:
+        unique_instance_name = True
+    effective_network_id = network_id or gateway_network_id
+    if not network and effective_network_id:
+        network = _derive_network_from_network_id(effective_network_id)
 
     script = _get_str(arguments, "script")
     script_config = _get_str(arguments, "script_config")
@@ -84,16 +92,22 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
         else:
             plan["notes"].append("gateway_start requires gateway_passphrase")
 
+    if gateway_network_id or gateway_wallet_address:
+        if apply_gateway_defaults:
+            plan["notes"].append("Gateway defaultNetwork/defaultWallet will be updated during deploy.")
+        else:
+            plan["notes"].append("apply_gateway_defaults=false; Gateway defaultNetwork/defaultWallet will not be updated.")
+
     # Tokens check (with metadata autofill when needed)
-    if network_id and tokens:
-        tokens = _fill_missing_token_metadata(network_id, tokens, http_client, plan)
-        token_status = _check_tokens(network_id, tokens, http_client, plan)
+    if effective_network_id and tokens:
+        tokens = _fill_missing_token_metadata(effective_network_id, tokens, http_client, plan)
+        token_status = _check_tokens(effective_network_id, tokens, http_client, plan)
         if token_status.get("missing"):
             for token in token_status["missing"]:
                 plan["actions"].append({
                     "tool": "gateway_token_add",
                     "arguments": {
-                        "network_id": network_id,
+                        "network_id": effective_network_id,
                         "address": token.get("address"),
                         "symbol": token.get("symbol"),
                         "name": token.get("name"),
@@ -101,7 +115,7 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
                     },
                     "reason": "token_missing",
                 })
-    elif tokens and not network_id:
+    elif tokens and not effective_network_id:
         plan["blockers"].append("network_id_required_for_tokens")
     elif not tokens:
         plan["notes"].append("tokens not provided; skipping gateway token checks")
@@ -110,7 +124,7 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
     if connector_name:
         if not pool_address and tokens:
             pool_address = _maybe_resolve_pool_address(
-                network_id,
+                effective_network_id,
                 connector_name,
                 pool_type,
                 tokens,
@@ -174,14 +188,22 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
     else:
         plan["blockers"].append("connector_name_required")
 
-    # Allowances check
-    if network_id and wallet_address and spender and tokens:
-        allowance_status = _check_allowances(network_id, wallet_address, spender, tokens, http_client, plan)
+    # Allowances check (EVM only)
+    allowance_chain = _derive_chain_from_network_id(effective_network_id) if effective_network_id else None
+    if allowance_chain and allowance_chain != "ethereum":
+        plan["checks"].append({
+            "name": "gateway_allowances",
+            "status": "skipped",
+            "details": {"chain": allowance_chain},
+        })
+        plan["notes"].append(f"allowance check skipped for non-evm chain '{allowance_chain}'")
+    elif effective_network_id and wallet_address and spender and tokens:
+        allowance_status = _check_allowances(effective_network_id, wallet_address, spender, tokens, http_client, plan)
         for token_symbol in allowance_status.get("missing", []):
             plan["actions"].append({
                 "tool": "gateway_approve",
                 "arguments": {
-                    "network_id": network_id,
+                    "network_id": effective_network_id,
                     "address": wallet_address,
                     "token": token_symbol,
                     "spender": spender,
@@ -190,8 +212,8 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
                 "reason": "allowance_missing",
             })
     else:
-        if not network_id:
-            plan["notes"].append("allowance check requires network_id")
+        if not effective_network_id:
+            plan["notes"].append("allowance check requires network_id or gateway_network_id")
         if not wallet_address:
             plan["notes"].append("allowance check requires wallet_address")
         if not spender:
@@ -202,11 +224,18 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
     # Config existence check
     if deployment_type == "script":
         if script_config:
-            if not _config_exists("/scripts/configs", script_config, http_client, plan, "script_config"):
+            script_config_key = _strip_yaml_suffix(script_config)
+            if script_config_key and not _config_exists(
+                "/scripts/configs",
+                script_config_key,
+                http_client,
+                plan,
+                "script_config",
+            ):
                 plan["actions"].append({
                     "tool": "script_config_upsert",
                     "arguments": {
-                        "config_name": script_config,
+                        "config_name": script_config_key,
                         "config": {},
                     },
                     "reason": "script_config_missing",
@@ -220,8 +249,18 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
         if not controllers_config:
             plan["blockers"].append("controllers_config_required")
         else:
+            normalized_configs = []
             for config_name in controllers_config:
-                if not _config_exists("/controllers/configs", config_name, http_client, plan, "controller_config"):
+                if isinstance(config_name, str):
+                    normalized_configs.append(_strip_yaml_suffix(config_name))
+            for config_name in list(dict.fromkeys([name for name in normalized_configs if name])):
+                if not _config_exists(
+                    "/controllers/configs",
+                    config_name,
+                    http_client,
+                    plan,
+                    "controller_config",
+                ):
                     plan["actions"].append({
                         "tool": "controller_config_upsert",
                         "arguments": {
@@ -232,34 +271,52 @@ def build_deploy_v2_workflow_plan(arguments: dict, http_client: McpHttpClient) -
                         "note": "fill config payload before execute",
                     })
 
+    restart_required = _needs_gateway_restart(plan)
+    if restart_required:
+        plan["blockers"].append("gateway_restart_required")
+        plan["notes"].append("Gateway restart required before deploy; rerun plan after restart.")
+
     # Instance existence check
     if instance_name:
-        exists, instance_info = _instance_exists(instance_name, http_client, plan)
-        if exists:
-            plan["notes"].append(f"instance '{instance_name}' already exists")
+        instance_name_for_check = instance_name
+        if deployment_type == "controllers" and unique_instance_name:
+            if should_generate_unique_name(instance_name, True):
+                plan["notes"].append("instance name will be uniquified; existence check skipped")
+                instance_name_for_check = None
+
+        if instance_name_for_check:
+            exists, instance_info = _instance_exists(instance_name_for_check, http_client, plan)
         else:
-            deploy_tool, deploy_args = _build_deploy_action(
-                deployment_type,
-                instance_name,
-                credentials_profile,
-                image,
-                headless,
-                gateway_network_id,
-                gateway_wallet_address,
-                script,
-                script_config,
-                controllers_config,
-            )
-            if deploy_tool:
-                plan["actions"].append({
-                    "tool": deploy_tool,
-                    "arguments": deploy_args,
-                    "reason": "instance_missing",
-                })
+            exists, instance_info = False, None
+
+        if exists:
+            plan["notes"].append(f"instance '{instance_name_for_check}' already exists")
+        else:
+            if not restart_required:
+                deploy_tool, deploy_args = _build_deploy_action(
+                    deployment_type,
+                    instance_name,
+                    credentials_profile,
+                    image,
+                    headless,
+                    gateway_network_id,
+                    gateway_wallet_address,
+                    apply_gateway_defaults,
+                    unique_instance_name,
+                    script,
+                    script_config,
+                    controllers_config,
+                )
+                if deploy_tool:
+                    plan["actions"].append({
+                        "tool": deploy_tool,
+                        "arguments": deploy_args,
+                        "reason": "instance_missing",
+                    })
     else:
         plan["blockers"].append("instance_name_required")
 
-    if _needs_gateway_restart(plan):
+    if restart_required:
         plan["actions"].append({
             "tool": "gateway_restart",
             "arguments": {},
@@ -483,6 +540,8 @@ def _build_deploy_action(
     headless: Optional[bool],
     gateway_network_id: Optional[str],
     gateway_wallet_address: Optional[str],
+    apply_gateway_defaults: Optional[bool],
+    unique_instance_name: Optional[bool],
     script: Optional[str],
     script_config: Optional[str],
     controllers_config: List[str],
@@ -500,6 +559,7 @@ def _build_deploy_action(
                 "script_config": script_config,
                 "gateway_network_id": gateway_network_id,
                 "gateway_wallet_address": gateway_wallet_address,
+                "apply_gateway_defaults": apply_gateway_defaults,
                 "headless": headless,
             },
             [
@@ -510,6 +570,7 @@ def _build_deploy_action(
                 "script_config",
                 "gateway_network_id",
                 "gateway_wallet_address",
+                "apply_gateway_defaults",
                 "headless",
             ],
         )
@@ -523,6 +584,8 @@ def _build_deploy_action(
             "image": image,
             "gateway_network_id": gateway_network_id,
             "gateway_wallet_address": gateway_wallet_address,
+            "apply_gateway_defaults": apply_gateway_defaults,
+            "unique_instance_name": unique_instance_name,
             "headless": headless,
         },
         [
@@ -532,6 +595,8 @@ def _build_deploy_action(
             "image",
             "gateway_network_id",
             "gateway_wallet_address",
+            "apply_gateway_defaults",
+            "unique_instance_name",
             "headless",
         ],
     )
@@ -731,6 +796,20 @@ def _derive_network_from_network_id(network_id: str) -> Optional[str]:
     if not network_id or "-" not in network_id:
         return None
     return network_id.split("-", 1)[1]
+
+
+def _derive_chain_from_network_id(network_id: Optional[str]) -> Optional[str]:
+    if not network_id or "-" not in network_id:
+        return None
+    return network_id.split("-", 1)[0]
+
+
+def _strip_yaml_suffix(value: Optional[str]) -> Optional[str]:
+    if not value:
+        return None
+    if value.lower().endswith(".yml"):
+        return value[:-4]
+    return value
 
 
 def _pick_params(arguments: dict, keys: Iterable[str]) -> dict:

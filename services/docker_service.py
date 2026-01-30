@@ -17,6 +17,7 @@ from docker.types import LogConfig
 from config import settings
 from models import V2ScriptDeployment
 from utils.file_system import fs_util
+from utils.script_config import normalize_script_config_name
 
 
 class DockerService:
@@ -319,6 +320,7 @@ class DockerService:
         instance_dir = os.path.join("bots", 'instances', instance_name)
         use_host_network, system_platform, in_container = self._resolve_bot_network_mode()
         script_config_content = None
+        script_config_name = normalize_script_config_name(config.script_config)
         if not os.path.exists(instance_dir):
             os.makedirs(instance_dir)
             os.makedirs(os.path.join(instance_dir, 'data'))
@@ -336,7 +338,7 @@ class DockerService:
         shutil.copytree(source_credentials_dir, destination_credentials_dir)
         
         # Copy specific script config and referenced controllers if provided
-        if config.script_config:
+        if script_config_name:
             script_config_dir = os.path.join("bots", 'conf', 'scripts')
             controllers_config_dir = os.path.join("bots", 'conf', 'controllers')
             destination_scripts_config_dir = os.path.join(instance_dir, 'conf', 'scripts')
@@ -345,8 +347,8 @@ class DockerService:
             os.makedirs(destination_scripts_config_dir, exist_ok=True)
             
             # Copy the specific script config file
-            source_script_config_file = os.path.join(script_config_dir, config.script_config)
-            destination_script_config_file = os.path.join(destination_scripts_config_dir, config.script_config)
+            source_script_config_file = os.path.join(script_config_dir, script_config_name)
+            destination_script_config_file = os.path.join(destination_scripts_config_dir, script_config_name)
             
             if os.path.exists(source_script_config_file):
                 shutil.copy2(source_script_config_file, destination_script_config_file)
@@ -354,7 +356,7 @@ class DockerService:
                 # Load the script config to find referenced controllers
                 try:
                     # Path relative to fs_util base_path (which is "bots")
-                    script_config_relative_path = f"conf/scripts/{config.script_config}"
+                    script_config_relative_path = f"conf/scripts/{script_config_name}"
                     script_config_content = fs_util.read_yaml_file(script_config_relative_path)
                     controllers_list = script_config_content.get('controllers_config', [])
                     
@@ -373,9 +375,9 @@ class DockerService:
                                 logger.warning(f"Controller config file {controller_file} not found in {controllers_config_dir}")
                                 
                 except Exception as e:
-                    logger.error(f"Error reading script config file {config.script_config}: {e}")
+                    logger.error(f"Error reading script config file {script_config_name}: {e}")
             else:
-                logger.warning(f"Script config file {config.script_config} not found in {script_config_dir}")
+                logger.warning(f"Script config file {script_config_name} not found in {script_config_dir}")
         # Path relative to fs_util base_path (which is "bots")
         conf_file_path = f"instances/{instance_name}/conf/conf_client.yml"
         client_config = fs_util.read_yaml_file(conf_file_path)
@@ -446,8 +448,8 @@ class DockerService:
         if config.script:
             if password:
                 environment['CONFIG_FILE_NAME'] = config.script
-                if config.script_config:
-                    environment['SCRIPT_CONFIG'] = config.script_config
+                if script_config_name:
+                    environment['SCRIPT_CONFIG'] = script_config_name
             else:
                 return {"success": False, "message": "Password not provided. We cannot start the bot without a password."}
 

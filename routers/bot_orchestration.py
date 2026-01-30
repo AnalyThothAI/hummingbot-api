@@ -1,10 +1,7 @@
 import asyncio
 import logging
 import os
-import re
-import secrets
 import time
-from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks, Query
@@ -30,40 +27,10 @@ from database import AsyncDatabaseManager, BotRunRepository
 from services.accounts_service import AccountsService
 from services.gateway_client import GatewayClient
 from config import settings
+from utils.gateway_defaults import should_apply_gateway_defaults
+from utils.instance_naming import build_controller_instance_name, sanitize_instance_name
 
 router = APIRouter(tags=["Bot Orchestration"], prefix="/bot-orchestration")
-
-_INSTANCE_TIMESTAMP_RE = re.compile(r"\d{8}-\d{4}(\d{2})?")
-_INSTANCE_SUFFIX_RE = re.compile(r"-[0-9a-f]{4}$")
-_INSTANCE_INVALID_CHARS_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
-
-
-def _sanitize_instance_name(instance_name: str) -> str:
-    if not instance_name:
-        return "bot"
-    normalized = instance_name.strip().replace(" ", "-")
-    normalized = _INSTANCE_INVALID_CHARS_RE.sub("-", normalized)
-    normalized = re.sub(r"-{2,}", "-", normalized)
-    normalized = normalized.strip("-.")
-    normalized = re.sub(r"^[^a-zA-Z0-9]+", "", normalized)
-    if not normalized:
-        return "bot"
-    return normalized
-
-
-def _build_controller_instance_names(instance_name: str) -> tuple[str, str]:
-    normalized_name = _sanitize_instance_name(instance_name)
-    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    suffix = secrets.token_hex(2)
-    has_timestamp = bool(_INSTANCE_TIMESTAMP_RE.search(normalized_name))
-    has_suffix = bool(_INSTANCE_SUFFIX_RE.search(normalized_name))
-
-    if has_timestamp:
-        unique_instance_name = normalized_name if has_suffix else f"{normalized_name}-{suffix}"
-    else:
-        unique_instance_name = f"{normalized_name}-{timestamp}-{suffix}"
-
-    return unique_instance_name, f"{unique_instance_name}.yml"
 
 
 async def _resolve_chain_for_wallet(
@@ -932,7 +899,11 @@ async def deploy_v2_script(
     Returns:
         Dictionary with creation response and instance details
     """
-    if config.gateway_network_id or config.gateway_wallet_address:
+    if should_apply_gateway_defaults(
+        config.apply_gateway_defaults,
+        config.gateway_network_id,
+        config.gateway_wallet_address,
+    ):
         await _apply_gateway_defaults(
             accounts_service,
             config.gateway_network_id,
@@ -940,7 +911,7 @@ async def deploy_v2_script(
         )
 
     original_instance_name = config.instance_name
-    normalized_instance_name = _sanitize_instance_name(config.instance_name)
+    normalized_instance_name = sanitize_instance_name(config.instance_name)
     config.instance_name = normalized_instance_name
 
     logging.info(f"Creating hummingbot instance with config: {config}")
@@ -997,7 +968,11 @@ async def deploy_v2_controllers(
         HTTPException: 500 if deployment fails
     """
     try:
-        if deployment.gateway_network_id or deployment.gateway_wallet_address:
+        if should_apply_gateway_defaults(
+            deployment.apply_gateway_defaults,
+            deployment.gateway_network_id,
+            deployment.gateway_wallet_address,
+        ):
             await _apply_gateway_defaults(
                 accounts_service,
                 deployment.gateway_network_id,
@@ -1005,7 +980,10 @@ async def deploy_v2_controllers(
             )
 
         original_instance_name = deployment.instance_name
-        unique_instance_name, script_config_filename = _build_controller_instance_names(deployment.instance_name)
+        unique_instance_name, script_config_filename, _ = build_controller_instance_name(
+            deployment.instance_name,
+            unique=deployment.unique_instance_name,
+        )
 
         # Ensure controller config names have .yml extension
         controllers_with_extension = []

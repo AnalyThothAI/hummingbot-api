@@ -187,6 +187,13 @@ class FeeEstimatorContext:
     last_position_address: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class PriceContext:
+    value: Optional[Decimal]
+    source: str
+    timestamp: float
+
+
 @dataclass
 class ControllerContext:
     state: ControllerState = ControllerState.IDLE
@@ -219,6 +226,7 @@ class ControllerContext:
     force_balance_refresh_until_ts: float = 0.0
     force_balance_refresh_reason: Optional[str] = None
     stoploss_balance_refresh_attempts: int = 0
+    inventory_balance_refresh_attempts: int = 0
     fee: FeeEstimatorContext = field(default_factory=FeeEstimatorContext)
 
 

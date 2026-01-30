@@ -11,23 +11,15 @@ from hummingbot.core.utils.async_utils import safe_ensure_future
 from hummingbot.logger import HummingbotLogger
 from hummingbot.strategy_v2.budget.budget_coordinator import BudgetCoordinatorRegistry
 from hummingbot.strategy_v2.controllers import ControllerBase, ControllerConfigBase
-from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
-
-from .clmm_lp_domain.components import ControllerContext, ControllerState, LPView, OpenProposal, Snapshot, PoolDomainAdapter
+from hummingbot.strategy_v2.executors.data_types import ConnectorPair
+from .clmm_lp_domain.components import ControllerContext, ControllerState, LPView, OpenProposal, Snapshot, PoolDomainAdapter, PriceContext
 from .clmm_lp_domain.cost_filter import CostFilter
 from .clmm_lp_domain.clmm_fsm import CLMMFSM
 from .clmm_lp_domain.policies import CLMMPolicyBase
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
 from .clmm_lp_domain.exit_policy import ExitPolicy
-from .clmm_lp_domain.io import ActionFactory, BalanceManager, SnapshotBuilder
-
-
-@dataclass(frozen=True)
-class PriceContext:
-    value: Optional[Decimal]
-    source: str
-    timestamp: float
+from .clmm_lp_domain.io import ActionFactory, BalanceManager, SnapshotBuilder, PriceProvider
 
 
 class CLMMLPBaseConfig(ControllerConfigBase):
@@ -49,7 +41,7 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     hysteresis_pct: Decimal = Field(default=Decimal("0.002"), json_schema_extra={"is_updatable": True})
     cooldown_seconds: int = Field(default=30, json_schema_extra={"is_updatable": True})
     max_rebalances_per_hour: int = Field(default=20, json_schema_extra={"is_updatable": True})
-    rebalance_open_timeout_sec: int = Field(default=120, json_schema_extra={"is_updatable": True})
+    rebalance_open_timeout_sec: int = Field(default=300, json_schema_extra={"is_updatable": True})
 
     auto_swap_enabled: bool = Field(default=True, json_schema_extra={"is_updatable": True})
     swap_min_value_pct: Decimal = Field(default=Decimal("0.005"), json_schema_extra={"is_updatable": True})
@@ -138,6 +130,12 @@ class CLMMLPBaseController(ControllerBase):
             estimate_position_value=self._estimate_position_value,
             rebalance_engine=self._rebalance_engine,
             exit_policy=self._exit_policy,
+        )
+        self._price_provider = PriceProvider(
+            connector_name=self._rate_connector,
+            trading_pair=self.config.trading_pair,
+            market_data_provider=self.market_data_provider,
+            logger=self.logger,
         )
         self._latest_snapshot: Optional[Snapshot] = None
         self._latest_price_context: Optional[PriceContext] = None
@@ -345,16 +343,7 @@ class CLMMLPBaseController(ControllerBase):
         return info
 
     def _resolve_price_context(self, now: float) -> PriceContext:
-        rate = self.market_data_provider.get_rate(self.config.trading_pair)
-        if rate is not None:
-            try:
-                price = Decimal(str(rate))
-            except (InvalidOperation, ValueError, TypeError):
-                price = None
-            if price is not None and price > 0:
-                return PriceContext(value=price, source=f"rate_oracle:{self._rate_connector}", timestamp=now)
-
-        return PriceContext(value=None, source="unavailable", timestamp=0.0)
+        return self._price_provider.get_price_context(now)
 
     def _compute_risk_values(
         self,
@@ -640,6 +629,9 @@ class CLMMLPBaseController(ControllerBase):
     def _clear_policy_update_task(self, task: asyncio.Task) -> None:
         if self._policy_update_task is task:
             self._policy_update_task = None
+
+    def on_stop(self):
+        self._price_provider.stop()
 
     async def _safe_policy_update(self, connector) -> None:
         try:

@@ -109,6 +109,10 @@ class V2ScriptDeployment(BaseModel):
         default=None,
         description="Gateway wallet address override for connector config",
     )
+    apply_gateway_defaults: bool = Field(
+        default=True,
+        description="Update Gateway default network/wallet before deployment",
+    )
     headless: bool = Field(default=False, description="Run in headless mode (no UI)")
 
 
@@ -126,6 +130,14 @@ class V2ControllerDeployment(BaseModel):
     gateway_wallet_address: Optional[str] = Field(
         default=None,
         description="Gateway wallet address override for connector config",
+    )
+    apply_gateway_defaults: bool = Field(
+        default=True,
+        description="Update Gateway default network/wallet before deployment",
+    )
+    unique_instance_name: bool = Field(
+        default=True,
+        description="Append timestamp suffix to instance name to avoid collisions",
     )
     image: str = Field(default="qinghuanlyke/hummingbot-lp:latest", description="Docker image for the Hummingbot instance")
     headless: bool = Field(default=False, description="Run in headless mode (no UI)")

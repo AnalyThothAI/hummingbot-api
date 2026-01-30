@@ -33,6 +33,11 @@ The MCP process reads `.env` automatically if present (simple loader, no extra d
 - `gateway_logs`
 - `gateway_connectors`
 - `gateway_connector_config`
+- `gateway_connector_config_update`
+- `gateway_chains`
+- `gateway_networks`
+- `gateway_network_config_get`
+- `gateway_network_config_update`
 - `gateway_tokens_list`
 - `gateway_token_add`
 - `gateway_token_delete`
@@ -43,6 +48,9 @@ The MCP process reads `.env` automatically if present (simple loader, no extra d
 - `gateway_approve`
 - `gateway_swap_quote`
 - `gateway_swap_execute`
+- `gateway_swaps_status`
+- `gateway_swaps_search`
+- `gateway_swaps_summary`
 - `gateway_clmm_pool_info`
 - `gateway_clmm_pools`
 - `gateway_clmm_open`
@@ -91,8 +99,9 @@ Notes:
 - Uniswap pools can have token0/token1 ordering opposite to your trading pair; planner treats this as a valid match.
 - For other connectors (e.g., Meteora), pool order is not reversed.
 - If `pool_trading_pair` order differs from `trading_pair`, provide `pool_address` or token addresses to avoid ambiguity.
-- Allowance checks only apply to EVM chains (e.g., BSC/Uniswap). Solana connectors will skip allowances.
-- If tokens/pools are missing, the plan will include `gateway_restart` (required for changes to take effect).
+- Allowance checks only apply to EVM chains (`chain == ethereum`). Solana connectors will skip allowances.
+- If tokens/pools are missing, the plan will include `gateway_restart` and **block deploy** until you restart and re-run the plan.
+- If `network_id` is omitted but `gateway_network_id` is provided, the planner uses it for Gateway checks.
 
 ## Agent usage (recommended)
 This MCP module is intended for **plan-first** automation. Agents should build a plan, then execute actions step-by-step.
@@ -114,7 +123,8 @@ This MCP module is intended for **plan-first** automation. Agents should build a
 
 ### 4) Execute the plan (optional, step-by-step)
 - Run each `actions[]` tool in order.
-- When `gateway_token_add` / `gateway_pool_add` appears, **restart Gateway** using `gateway_restart`.
+- When `gateway_token_add` / `gateway_pool_add` appears, **restart Gateway** using `gateway_restart`, then **re-run the planner**.
+- Deploy actions will only appear after the restart+replan step.
 
 ### 5) Re-run the planner to validate
 - If `summary.ready` is true and `blockers` is empty, the chain is consistent.
