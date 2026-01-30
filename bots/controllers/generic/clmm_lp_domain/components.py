@@ -208,7 +208,8 @@ class ControllerContext:
     rebalance_timestamps: Deque[float] = field(default_factory=lambda: deque(maxlen=200))
     rebalance_count: int = 0
     rebalance_signal_reason: Optional[str] = None
-    pending_lp_id: Optional[str] = None
+    pending_close_lp_id: Optional[str] = None
+    pending_open_lp_id: Optional[str] = None
     pending_swap_id: Optional[str] = None
     pending_swap_since_ts: float = 0.0
     inventory_swap_attempts: int = 0

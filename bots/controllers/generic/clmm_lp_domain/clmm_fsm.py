@@ -112,7 +112,8 @@ class CLMMFSM:
 
     def _handle_idle(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
-        ctx.pending_lp_id = None
+        ctx.pending_close_lp_id = None
+        ctx.pending_open_lp_id = None
         ctx.pending_swap_id = None
         ctx.pending_swap_since_ts = 0.0
         lp_view = self._select_lp(snapshot, ctx)
@@ -141,23 +142,24 @@ class CLMMFSM:
         lp_view = self._select_lp(snapshot, ctx)
         if lp_view and self._is_lp_open(lp_view):
             self._set_anchor_if_ready(snapshot, ctx, lp_view)
+            ctx.pending_open_lp_id = None
             return self._transition(ctx, ControllerState.ACTIVE, now, reason="entry_opened")
         if lp_view and self._is_lp_failed(lp_view):
-            ctx.pending_lp_id = None
+            ctx.pending_open_lp_id = None
             return self._enter_cooldown(ctx, now, reason="entry_lp_failed")
         if lp_view and self._is_lp_in_transition(lp_view):
-            if ctx.pending_lp_id and self._open_timeout_exceeded(ctx, now):
+            if ctx.pending_open_lp_id and self._open_timeout_exceeded(ctx, now):
                 return self._enter_cooldown(ctx, now, reason="entry_open_timeout", actions=self._stop_lp_action(lp_view))
             return self._stay(ctx, reason="open_in_progress")
-        if ctx.pending_lp_id and self._open_timeout_exceeded(ctx, now):
+        if ctx.pending_open_lp_id and self._open_timeout_exceeded(ctx, now):
             return self._enter_cooldown(ctx, now, reason="entry_open_timeout", actions=self._stop_lp_action(lp_view))
         if not self._is_entry_triggered(snapshot.current_price):
             return self._transition(ctx, ControllerState.IDLE, now, reason="entry_not_triggered")
         if snapshot.active_swaps:
             return self._stay(ctx, reason="swap_in_progress")
-        if ctx.pending_lp_id and (now - ctx.state_since_ts) < self._open_timeout_sec():
+        if ctx.pending_open_lp_id and (now - ctx.state_since_ts) < self._open_timeout_sec():
             return self._stay(ctx, reason="open_in_progress")
-        ctx.pending_lp_id = None
+        ctx.pending_open_lp_id = None
         return self._plan_entry_open(snapshot, ctx)
 
     def _handle_entry_swap(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
@@ -195,7 +197,8 @@ class CLMMFSM:
         ctx.rebalance_signal_reason = signal.reason
         if signal.should_rebalance:
             self._rebalance_engine.record_rebalance(now, ctx)
-            ctx.pending_lp_id = lp_view.executor_id
+            ctx.pending_open_lp_id = None
+            ctx.pending_close_lp_id = lp_view.executor_id
             stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
             return self._transition(
                 ctx,
@@ -216,11 +219,12 @@ class CLMMFSM:
             return stoploss_decision
         if lp_view is None or self._is_lp_closed(lp_view):
             self._record_realized_on_close(snapshot, ctx, lp_view, reason="rebalance")
+            ctx.pending_close_lp_id = None
             return self._transition(ctx, ControllerState.REBALANCE_SWAP, now, reason="rebalance_lp_closed")
         if self._is_lp_in_transition(lp_view):
             return self._stay(ctx, reason="rebalance_stop_in_transition")
         stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
-        ctx.pending_lp_id = lp_view.executor_id
+        ctx.pending_close_lp_id = lp_view.executor_id
         return self._stay(ctx, reason="rebalance_stop", actions=[stop_action])
 
     def _handle_rebalance_swap(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
@@ -246,28 +250,29 @@ class CLMMFSM:
             return stoploss_decision
         if lp_view and self._is_lp_open(lp_view):
             self._set_anchor_if_ready(snapshot, ctx, lp_view)
+            ctx.pending_open_lp_id = None
             return self._transition(ctx, ControllerState.ACTIVE, now, reason="rebalance_opened")
         if lp_view and self._is_lp_failed(lp_view):
-            ctx.pending_lp_id = None
+            ctx.pending_open_lp_id = None
             return self._enter_cooldown(ctx, now, reason="rebalance_lp_failed")
         if lp_view and self._is_lp_in_transition(lp_view):
-            if ctx.pending_lp_id and self._open_timeout_exceeded(ctx, now):
+            if ctx.pending_open_lp_id and self._open_timeout_exceeded(ctx, now):
                 return self._enter_cooldown(ctx, now, reason="rebalance_open_timeout", actions=self._stop_lp_action(lp_view))
             return self._stay(ctx, reason="open_in_progress")
-        if ctx.pending_lp_id and self._open_timeout_exceeded(ctx, now):
+        if ctx.pending_open_lp_id and self._open_timeout_exceeded(ctx, now):
             return self._enter_cooldown(ctx, now, reason="rebalance_open_timeout", actions=self._stop_lp_action(lp_view))
         if snapshot.active_swaps:
             return self._stay(ctx, reason="swap_in_progress")
-        if ctx.pending_lp_id and (now - ctx.state_since_ts) < self._open_timeout_sec():
+        if ctx.pending_open_lp_id and (now - ctx.state_since_ts) < self._open_timeout_sec():
             return self._stay(ctx, reason="open_in_progress")
-        ctx.pending_lp_id = None
+        ctx.pending_open_lp_id = None
         plan = self._build_open_plan(snapshot, ctx)
         if plan is None:
             return self._transition(ctx, ControllerState.IDLE, now, reason="rebalance_unavailable")
         open_action = self._action_factory.build_open_lp_action(plan, now)
         if open_action is None:
             return self._stay(ctx, reason="budget_unavailable")
-        ctx.pending_lp_id = open_action.executor_config.id
+        ctx.pending_open_lp_id = open_action.executor_config.id
         ctx.state_since_ts = now
         return self._stay(ctx, reason="rebalance_open", actions=[open_action])
 
@@ -276,11 +281,12 @@ class CLMMFSM:
         lp_view = self._select_lp(snapshot, ctx)
         if lp_view is None or self._is_lp_closed(lp_view):
             self._record_realized_on_close(snapshot, ctx, lp_view, reason="stop_loss")
+            ctx.pending_close_lp_id = None
             return self._transition(ctx, ControllerState.STOPLOSS_SWAP, now, reason="stoploss_lp_closed")
         if self._is_lp_in_transition(lp_view):
             return self._stay(ctx, reason="stoploss_stop_in_transition")
         stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
-        ctx.pending_lp_id = lp_view.executor_id
+        ctx.pending_close_lp_id = lp_view.executor_id
         return self._stay(ctx, reason="stoploss_stop", actions=[stop_action])
 
     def _handle_stoploss_swap(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
@@ -365,7 +371,7 @@ class CLMMFSM:
         open_action = self._action_factory.build_open_lp_action(plan, snapshot.now)
         if open_action is None:
             return self._stay(ctx, reason="budget_unavailable")
-        ctx.pending_lp_id = open_action.executor_config.id
+        ctx.pending_open_lp_id = open_action.executor_config.id
         ctx.state_since_ts = snapshot.now
         return self._transition(ctx, ControllerState.ENTRY_OPEN, snapshot.now, reason="entry_open", actions=[open_action])
 
@@ -513,7 +519,8 @@ class CLMMFSM:
                 now,
                 reason=reason,
             )
-        ctx.pending_lp_id = lp_view.executor_id
+        ctx.pending_open_lp_id = None
+        ctx.pending_close_lp_id = lp_view.executor_id
         stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
         return self._transition(
             ctx,
@@ -529,6 +536,7 @@ class CLMMFSM:
         if ctx.pending_realized_anchor is None:
             ctx.pending_realized_anchor = ctx.anchor_value_quote
         ctx.cooldown_until_ts = 0.0
+        ctx.pending_open_lp_id = None
 
         lp_view = self._select_lp(snapshot, ctx)
         actions = []
@@ -537,13 +545,14 @@ class CLMMFSM:
 
         if lp_view is None or not self._is_lp_open(lp_view):
             self._record_realized_on_close(snapshot, ctx, lp_view, reason="manual_stop")
+            ctx.pending_close_lp_id = None
             if actions:
                 return self._transition(ctx, ControllerState.STOPLOSS_SWAP, now, reason="manual_stop", actions=actions)
             if snapshot.wallet_base <= 0:
                 return self._transition(ctx, ControllerState.IDLE, now, reason="manual_stop_complete")
             return self._transition(ctx, ControllerState.STOPLOSS_SWAP, now, reason="manual_stop")
 
-        ctx.pending_lp_id = lp_view.executor_id
+        ctx.pending_close_lp_id = lp_view.executor_id
         actions.insert(0, StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id))
         return self._transition(ctx, ControllerState.STOPLOSS_STOP, now, reason="manual_stop", actions=actions)
 
@@ -615,8 +624,10 @@ class CLMMFSM:
         return lp_value + min(wallet_value, budget_wallet)
 
     def _select_lp(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[LPView]:
-        if ctx.pending_lp_id and ctx.pending_lp_id in snapshot.lp:
-            return snapshot.lp[ctx.pending_lp_id]
+        if ctx.pending_open_lp_id and ctx.pending_open_lp_id in snapshot.lp:
+            return snapshot.lp[ctx.pending_open_lp_id]
+        if ctx.pending_close_lp_id and ctx.pending_close_lp_id in snapshot.lp:
+            return snapshot.lp[ctx.pending_close_lp_id]
         if snapshot.active_lp:
             return min(snapshot.active_lp, key=lambda lp: lp.executor_id)
         if snapshot.lp:
@@ -688,7 +699,8 @@ class CLMMFSM:
             ctx.state = next_state
             ctx.state_since_ts = now
             if next_state in {ControllerState.IDLE, ControllerState.COOLDOWN}:
-                ctx.pending_lp_id = None
+                ctx.pending_close_lp_id = None
+                ctx.pending_open_lp_id = None
                 ctx.pending_swap_id = None
                 ctx.pending_swap_since_ts = 0.0
                 ctx.inventory_swap_attempts = 0
