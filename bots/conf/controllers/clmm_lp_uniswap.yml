@@ -5,7 +5,6 @@ id: clmm_lp_uniswap
 connector_name: uniswap/clmm
 router_connector: uniswap/router
 trading_pair: MEMES-USDT
-pool_trading_pair: USDT-MEMES
 pool_address: "0x7231d17Fa843e5516Bf1d7d6f6c87147d279C2bA"
 
 target_price: 0

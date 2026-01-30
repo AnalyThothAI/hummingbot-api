@@ -5,7 +5,6 @@ id: clmm_lp_meteora
 connector_name: meteora/clmm
 router_connector: jupiter/router
 trading_pair: PENGU-SOL
-pool_trading_pair: PENGU-SOL
 pool_address: "FCL8pjNQsDAggZVczYfnn6tfbYoMnJykGT2cpdTULAxB"
 
 target_price: 0

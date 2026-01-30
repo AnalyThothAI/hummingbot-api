@@ -12,6 +12,7 @@ from .clmm_lp_domain.policies import UniswapV3Policy
 from hummingbot.core.gateway.gateway_http_client import GatewayHttpClient
 from hummingbot.core.utils.async_utils import safe_ensure_future
 from hummingbot.connector.utils import split_hb_trading_pair
+from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 
 
 class CLMMLPUniswapConfig(clmm_lp_base.CLMMLPBaseConfig):
@@ -163,6 +164,8 @@ class CLMMLPUniswapController(clmm_lp_base.CLMMLPBaseController):
         domain = PoolDomainAdapter.from_config(config.trading_pair, config.pool_trading_pair)
         super().__init__(config, UniswapV3Policy(config, domain), domain, *args, **kwargs)
         self._domain_resolver: Optional[_UniswapPoolDomainResolver] = None
+        if config.pool_trading_pair:
+            self._initialize_rate_sources(domain)
         if not config.pool_trading_pair:
             self._ctx.domain_ready = False
             self._ctx.domain_error = "awaiting_pool_order"
@@ -177,6 +180,7 @@ class CLMMLPUniswapController(clmm_lp_base.CLMMLPBaseController):
         self._domain = domain
         if hasattr(self._policy, "_domain"):
             self._policy._domain = domain
+        self._initialize_rate_sources(domain)
         self._balance_manager = BalanceManager(
             config=self.config,
             domain=self._domain,
@@ -203,6 +207,17 @@ class CLMMLPUniswapController(clmm_lp_base.CLMMLPBaseController):
             rebalance_engine=self._rebalance_engine,
             exit_policy=self._exit_policy,
         )
+
+    def _initialize_rate_sources(self, domain: PoolDomainAdapter) -> None:
+        rate_connector = self.config.router_connector or self.config.connector_name
+        if not rate_connector:
+            return
+        trading_pair = domain.pool_trading_pair
+        if not trading_pair:
+            return
+        self.market_data_provider.initialize_rate_sources([
+            ConnectorPair(connector_name=rate_connector, trading_pair=trading_pair),
+        ])
 
     async def update_processed_data(self):
         if self._domain_resolver is not None and not self._ctx.domain_ready:
