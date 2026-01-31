@@ -97,6 +97,18 @@ def _gateway_network_config_update(arguments: dict, http_client: McpHttpClient) 
     return http_client.post(f"/gateway/networks/{network_id}", json_body=config_updates)
 
 
+def _gateway_wallets_list(arguments: dict, http_client: McpHttpClient) -> Any:
+    return http_client.get("/accounts/gateway/wallets")
+
+
+def _gateway_wallet_create(arguments: dict, http_client: McpHttpClient) -> Any:
+    chain = arguments.get("chain")
+    if not chain:
+        raise ValueError("chain is required")
+    payload = _pick_params(arguments, ["chain", "set_default"])
+    return http_client.post("/gateway/wallets/create", json_body=payload)
+
+
 def _gateway_tokens_list(arguments: dict, http_client: McpHttpClient) -> Any:
     network_id = arguments.get("network_id")
     if not network_id:
@@ -672,6 +684,25 @@ _TOOL_SPECS: List[ToolSpec] = [
             "required": ["network_id", "config_updates"],
         },
         handler=_gateway_network_config_update,
+    ),
+    ToolSpec(
+        name="gateway_wallets_list",
+        description="List Gateway wallets (includes default wallet flags).",
+        input_schema={"type": "object", "properties": {}},
+        handler=_gateway_wallets_list,
+    ),
+    ToolSpec(
+        name="gateway_wallet_create",
+        description="Create a new Gateway wallet (no private key required).",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "chain": {"type": "string"},
+                "set_default": {"type": "boolean"},
+            },
+            "required": ["chain"],
+        },
+        handler=_gateway_wallet_create,
     ),
     ToolSpec(
         name="gateway_tokens_list",

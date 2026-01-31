@@ -34,6 +34,8 @@ The MCP process reads `.env` automatically if present (simple loader, no extra d
 - `gateway_connectors`
 - `gateway_connector_config`
 - `gateway_connector_config_update`
+- `gateway_wallets_list`
+- `gateway_wallet_create`
 - `gateway_chains`
 - `gateway_networks`
 - `gateway_network_config_get`
