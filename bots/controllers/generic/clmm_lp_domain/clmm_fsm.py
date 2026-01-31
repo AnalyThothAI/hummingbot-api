@@ -63,6 +63,9 @@ class CLMMFSM:
             decision = self._force_manual_stop(snapshot, ctx)
             self._record_decision(ctx, decision.reason)
             return decision
+        decision = self._guard_price(snapshot, ctx)
+        if decision is not None:
+            return decision
         if state == ControllerState.IDLE:
             return self._handle_idle(snapshot, ctx)
         if state == ControllerState.ENTRY_OPEN:
@@ -578,13 +581,36 @@ class CLMMFSM:
         if not self._is_lp_open(lp_view):
             ctx.out_of_range_since = None
             return
-        if lp_view.state == "IN_RANGE":
+        current_price = snapshot.current_price
+        lower_price = lp_view.lower_price
+        upper_price = lp_view.upper_price
+        if current_price is None or current_price <= 0:
             ctx.out_of_range_since = None
             return
-        if lp_view.state == "OUT_OF_RANGE":
-            ctx.out_of_range_since = lp_view.out_of_range_since
+        if lower_price is None or upper_price is None or lower_price <= 0 or upper_price <= 0:
+            ctx.out_of_range_since = None
             return
+        if lower_price <= current_price <= upper_price:
+            ctx.out_of_range_since = None
+            return
+        if ctx.out_of_range_since is None:
+            ctx.out_of_range_since = snapshot.now
+
+    def _guard_price(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[Decision]:
+        current_price = snapshot.current_price
+        if current_price is not None and current_price > 0:
+            return None
         ctx.out_of_range_since = None
+        if ctx.state in {
+            ControllerState.IDLE,
+            ControllerState.ENTRY_OPEN,
+            ControllerState.ENTRY_SWAP,
+            ControllerState.ACTIVE,
+            ControllerState.REBALANCE_SWAP,
+            ControllerState.REBALANCE_OPEN,
+        }:
+            return self._stay(ctx, reason="price_unavailable")
+        return None
 
     def _record_realized_on_close(
         self,
