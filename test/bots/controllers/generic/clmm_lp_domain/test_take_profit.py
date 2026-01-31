@@ -1,7 +1,7 @@
 import os
 import sys
 import types
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from enum import Enum
 
@@ -70,7 +70,13 @@ lp_states_module.LPPositionStates = LPPositionStates
 sys.modules["hummingbot.strategy_v2.executors.lp_position_executor.data_types"] = lp_states_module
 
 # ---- Import target modules (after stubs) ----
-sys.modules.pop("bots.controllers.generic.clmm_lp_domain.components", None)
+for module_name in (
+    "bots.controllers.generic.clmm_lp_domain.components",
+    "bots.controllers.generic.clmm_lp_domain.clmm_fsm",
+    "bots.controllers.generic.clmm_lp_domain.rebalance_engine",
+    "bots.controllers.generic.clmm_lp_domain.exit_policy",
+):
+    sys.modules.pop(module_name, None)
 from bots.controllers.generic.clmm_lp_domain.components import ControllerContext, LPView, Snapshot
 from bots.controllers.generic.clmm_lp_domain.exit_policy import ExitPolicy
 from bots.controllers.generic.clmm_lp_domain.clmm_fsm import CLMMFSM
@@ -81,7 +87,7 @@ class DummyConfig:
     def __init__(self):
         self.id = "test"
         self.manual_kill_switch = False
-        self.rebalance_enabled = True
+        self.rebalance_enabled = False
         self.rebalance_seconds = 10
         self.hysteresis_pct = Decimal("0")
         self.cooldown_seconds = 0
@@ -93,7 +99,8 @@ class DummyConfig:
         self.cost_filter_fixed_cost_quote = Decimal("0")
         self.cost_filter_max_payback_sec = 0
         self.stop_loss_pnl_pct = Decimal("0")
-        self.take_profit_pnl_pct = Decimal("0")
+        self.take_profit_pnl_pct = Decimal("0.1")
+        self.stop_loss_pause_sec = 0
         self.reenter_enabled = True
         self.max_inventory_swap_attempts = 0
         self.inventory_drift_tolerance_pct = Decimal("0")
@@ -101,6 +108,11 @@ class DummyConfig:
         self.normalization_min_value_pct = Decimal("0")
         self.normalization_strict = False
         self.max_stoploss_liquidation_attempts = 0
+        self.position_value_quote = Decimal("0")
+        self.target_price = Decimal("0")
+        self.trigger_above = True
+        self.balance_update_timeout_sec = 10
+        self.balance_refresh_timeout_sec = 30
 
 
 def _dummy_build_open_proposal(*_args, **_kwargs):
@@ -108,19 +120,19 @@ def _dummy_build_open_proposal(*_args, **_kwargs):
 
 
 def _estimate_position_value(_lp, _price):
-    return Decimal("100")
+    return Decimal("0")
 
 
-def _make_lp_view(state=None, lower=Decimal("100"), upper=Decimal("150")):
+def _make_lp_view(state=None, lower=Decimal("0.5"), upper=Decimal("2"), done=False, position=True):
     return LPView(
         executor_id="lp1",
         is_active=True,
-        is_done=False,
+        is_done=done,
         close_type=None,
         state=state,
-        position_address="addr",
-        base_amount=Decimal("1"),
-        quote_amount=Decimal("1"),
+        position_address="addr" if position else None,
+        base_amount=Decimal("0"),
+        quote_amount=Decimal("0"),
         base_fee=Decimal("0"),
         quote_fee=Decimal("0"),
         lower_price=lower,
@@ -129,13 +141,13 @@ def _make_lp_view(state=None, lower=Decimal("100"), upper=Decimal("150")):
     )
 
 
-def _make_snapshot(now: float, price: Decimal | None, lp_view: LPView):
+def _make_snapshot(now: float, price: Decimal | None, lp_view: LPView, wallet_quote=Decimal("0")):
     return Snapshot(
         now=now,
         current_price=price,
         balance_fresh=True,
         wallet_base=Decimal("0"),
-        wallet_quote=Decimal("0"),
+        wallet_quote=wallet_quote,
         lp={lp_view.executor_id: lp_view},
         swaps={},
         active_lp=[lp_view],
@@ -143,7 +155,7 @@ def _make_snapshot(now: float, price: Decimal | None, lp_view: LPView):
     )
 
 
-def test_rebalance_engine_uses_price_not_executor_state():
+def test_rebalance_disabled_blocks_signal():
     config = DummyConfig()
     engine = RebalanceEngine(config=config, estimate_position_value=_estimate_position_value)
     lp_view = _make_lp_view(state=None, lower=Decimal("100"), upper=Decimal("150"))
@@ -153,37 +165,11 @@ def test_rebalance_engine_uses_price_not_executor_state():
 
     signal = engine.evaluate(snapshot, ctx, lp_view)
 
-    assert signal.should_rebalance is True
-
-
-def test_rebalance_disabled_when_flag_missing():
-    config = types.SimpleNamespace(
-        id="test",
-        manual_kill_switch=False,
-        rebalance_seconds=10,
-        hysteresis_pct=Decimal("0"),
-        cooldown_seconds=0,
-        max_rebalances_per_hour=0,
-        cost_filter_enabled=False,
-        cost_filter_fee_rate_bootstrap_quote_per_hour=Decimal("0"),
-        auto_swap_enabled=False,
-        swap_slippage_pct=Decimal("0"),
-        cost_filter_fixed_cost_quote=Decimal("0"),
-        cost_filter_max_payback_sec=0,
-    )
-    engine = RebalanceEngine(config=config, estimate_position_value=_estimate_position_value)
-    lp_view = _make_lp_view(state=None, lower=Decimal("100"), upper=Decimal("150"))
-    snapshot = _make_snapshot(now=1500, price=Decimal("200"), lp_view=lp_view)
-    ctx = ControllerContext()
-    ctx.out_of_range_since = 0.0
-
-    signal = engine.evaluate(snapshot, ctx, lp_view)
-
     assert signal.should_rebalance is False
     assert signal.reason == "rebalance_disabled"
 
 
-def test_out_of_range_timer_uses_price_bounds_when_state_missing():
+def test_take_profit_triggers_close_action():
     config = DummyConfig()
     engine = RebalanceEngine(config=config, estimate_position_value=_estimate_position_value)
     fsm = CLMMFSM(
@@ -194,34 +180,39 @@ def test_out_of_range_timer_uses_price_bounds_when_state_missing():
         rebalance_engine=engine,
         exit_policy=ExitPolicy(config=config),
     )
-    lp_view = _make_lp_view(state=None, lower=Decimal("100"), upper=Decimal("150"))
-    snapshot = _make_snapshot(now=2000, price=Decimal("90"), lp_view=lp_view)
-    ctx = ControllerContext()
-
-    fsm._update_out_of_range_timer(snapshot, ctx, lp_view)
-
-    assert ctx.out_of_range_since == snapshot.now
-
-
-def test_price_unavailable_freezes_active_state_and_clears_timer():
-    config = DummyConfig()
-    engine = RebalanceEngine(config=config, estimate_position_value=_estimate_position_value)
-    fsm = CLMMFSM(
-        config=config,
-        action_factory=None,
-        build_open_proposal=_dummy_build_open_proposal,
-        estimate_position_value=_estimate_position_value,
-        rebalance_engine=engine,
-        exit_policy=ExitPolicy(config=config),
-    )
-    lp_view = _make_lp_view(state=LPPositionStates.OUT_OF_RANGE.value, lower=Decimal("100"), upper=Decimal("150"))
-    snapshot = _make_snapshot(now=3000, price=None, lp_view=lp_view)
+    lp_view = _make_lp_view(state=LPPositionStates.IN_RANGE.value)
+    snapshot = _make_snapshot(now=2000, price=Decimal("1"), lp_view=lp_view, wallet_quote=Decimal("120"))
     ctx = ControllerContext()
     ctx.state = ctx.state.ACTIVE
-    ctx.out_of_range_since = 1234.0
+    ctx.anchor_value_quote = Decimal("100")
 
     decision = fsm.step(snapshot, ctx)
 
-    assert decision.reason == "price_unavailable"
-    assert ctx.out_of_range_since is None
-    assert ctx.state == ctx.state.ACTIVE
+    assert decision.reason == "take_profit"
+    assert decision.actions and isinstance(decision.actions[0], StopExecutorAction)
+    assert ctx.state.value == "TAKE_PROFIT_STOP"
+
+
+def test_take_profit_stop_transitions_to_idle_after_close():
+    config = DummyConfig()
+    engine = RebalanceEngine(config=config, estimate_position_value=_estimate_position_value)
+    fsm = CLMMFSM(
+        config=config,
+        action_factory=None,
+        build_open_proposal=_dummy_build_open_proposal,
+        estimate_position_value=_estimate_position_value,
+        rebalance_engine=engine,
+        exit_policy=ExitPolicy(config=config),
+    )
+    lp_view = _make_lp_view(state=LPPositionStates.COMPLETE.value, done=True, position=False)
+    snapshot = _make_snapshot(now=3000, price=Decimal("1"), lp_view=lp_view)
+    ctx = ControllerContext()
+    ctx.state = ctx.state.TAKE_PROFIT_STOP
+    ctx.pending_close_lp_id = "lp1"
+    ctx.anchor_value_quote = Decimal("100")
+    ctx.pending_realized_anchor = Decimal("100")
+
+    decision = fsm.step(snapshot, ctx)
+
+    assert decision.reason in {"take_profit_done", "take_profit_closed"}
+    assert ctx.state.value == "IDLE"

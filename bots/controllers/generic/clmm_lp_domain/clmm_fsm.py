@@ -80,6 +80,8 @@ class CLMMFSM:
             return self._handle_rebalance_swap(snapshot, ctx)
         if state == ControllerState.REBALANCE_OPEN:
             return self._handle_rebalance_open(snapshot, ctx)
+        if state == ControllerState.TAKE_PROFIT_STOP:
+            return self._handle_take_profit_stop(snapshot, ctx)
         if state == ControllerState.STOPLOSS_STOP:
             return self._handle_stoploss_stop(snapshot, ctx)
         if state == ControllerState.STOPLOSS_SWAP:
@@ -195,8 +197,10 @@ class CLMMFSM:
         self._update_out_of_range_timer(snapshot, ctx, lp_view)
         current_price = self._effective_price(snapshot, lp_view)
         equity = None
+        total_equity = None
         if current_price is not None and current_price > 0:
             equity = self._compute_risk_equity_value(snapshot, lp_view, current_price, ctx.anchor_value_quote)
+            total_equity = self._compute_total_equity_value(snapshot, lp_view, current_price)
         signal = self._rebalance_engine.evaluate(snapshot, ctx, lp_view)
         ctx.rebalance_signal_reason = signal.reason
         if signal.should_rebalance:
@@ -211,8 +215,20 @@ class CLMMFSM:
                 reason=signal.reason,
                 actions=[stop_action],
             )
-        if self._exit_policy.should_take_profit(ctx.anchor_value_quote, equity):
-            return self._stay(ctx, reason="take_profit_signal")
+        if self._exit_policy.should_take_profit(ctx.anchor_value_quote, total_equity):
+            ctx.last_exit_reason = "take_profit"
+            if ctx.pending_realized_anchor is None:
+                ctx.pending_realized_anchor = ctx.anchor_value_quote
+            ctx.pending_open_lp_id = None
+            ctx.pending_close_lp_id = lp_view.executor_id
+            stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
+            return self._transition(
+                ctx,
+                ControllerState.TAKE_PROFIT_STOP,
+                now,
+                reason="take_profit",
+                actions=[stop_action],
+            )
         return self._stay(ctx, reason="active")
 
     def _handle_rebalance_stop(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
@@ -279,6 +295,19 @@ class CLMMFSM:
         ctx.pending_open_lp_id = open_action.executor_config.id
         ctx.state_since_ts = now
         return self._stay(ctx, reason="rebalance_open", actions=[open_action])
+
+    def _handle_take_profit_stop(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
+        now = snapshot.now
+        lp_view = self._select_lp(snapshot, ctx)
+        if lp_view is None or self._is_lp_closed(lp_view):
+            self._record_realized_on_close(snapshot, ctx, lp_view, reason="take_profit")
+            ctx.pending_close_lp_id = None
+            return self._transition(ctx, ControllerState.IDLE, now, reason="take_profit_closed")
+        if self._is_lp_in_transition(lp_view):
+            return self._stay(ctx, reason="take_profit_stop_in_transition")
+        stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
+        ctx.pending_close_lp_id = lp_view.executor_id
+        return self._stay(ctx, reason="take_profit_stop", actions=[stop_action])
 
     def _handle_stoploss_stop(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
@@ -654,6 +683,20 @@ class CLMMFSM:
             return lp_value + wallet_value
         budget_wallet = max(Decimal("0"), cap - lp_value)
         return lp_value + min(wallet_value, budget_wallet)
+
+    def _compute_total_equity_value(
+        self,
+        snapshot: Snapshot,
+        lp_view: Optional[LPView],
+        current_price: Decimal,
+    ) -> Optional[Decimal]:
+        if current_price <= 0:
+            return None
+        wallet_value = snapshot.wallet_base * current_price + snapshot.wallet_quote
+        lp_value = Decimal("0")
+        if lp_view is not None:
+            lp_value = self._estimate_position_value(lp_view, current_price)
+        return lp_value + wallet_value
 
     def _select_lp(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[LPView]:
         if ctx.pending_open_lp_id and ctx.pending_open_lp_id in snapshot.lp:

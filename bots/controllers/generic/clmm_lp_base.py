@@ -37,6 +37,7 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     position_value_quote: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
 
     position_width_pct: Decimal = Field(default=Decimal("12"), json_schema_extra={"is_updatable": True})
+    rebalance_enabled: bool = Field(default=False, json_schema_extra={"is_updatable": True})
     rebalance_seconds: int = Field(default=60, json_schema_extra={"is_updatable": True})
     hysteresis_pct: Decimal = Field(default=Decimal("0.002"), json_schema_extra={"is_updatable": True})
     cooldown_seconds: int = Field(default=30, json_schema_extra={"is_updatable": True})

@@ -120,6 +120,8 @@ Controller 维护的钱包与派生数据：
 ## 8. Rebalance 触发条件与阶段
 
 ### 8.1 触发条件（全部满足）
+- `rebalance_enabled` 为 `false` 时 **不会触发**（默认关闭，需显式开启）
+- `rebalance_seconds <= 0` 视为禁用 rebalance
 - 当前价落在 `[lower, upper]` 外（按策略语义）
 - 偏离度 `deviation_pct >= hysteresis_pct`
 - `now - out_of_range_since >= rebalance_seconds`
@@ -145,7 +147,10 @@ Controller 维护的钱包与派生数据：
   - equity = deployed_value（含 fees） + wallet_value
   - 低于阈值则触发：stop LP，进入 `stop_loss_pause_sec` 冷却。
 - LP stop 完成后，触发一次全额 base -> quote 清算（按钱包快照）。
-- Take-profit（`take_profit_pnl_pct`）仅发信号，不改变 LP 状态。
+- Take-profit（`take_profit_pnl_pct`）触发后进入 `TAKE_PROFIT_STOP`：
+  - 发送 `StopExecutorAction` 关闭 LP
+  - LP 关闭完成后回到 `IDLE`
+  - 不做 swap（只平仓 LP）
 
 ## 11. `processed_data`（对外观测字段）
 
@@ -164,6 +169,10 @@ Controller 维护的钱包与派生数据：
 - swap 按 `trading_pair`（策略 BASE-QUOTE）理解；
 - LP 按 `pool_trading_pair`（池子 token0-token1）理解；
 - 两者必须由 `pool_trading_pair` 明确桥接，不能靠猜。
+
+补充配置：
+- `rebalance_enabled` 默认 `false`，需要时显式设为 `true`
+- `rebalance_seconds <= 0` 等价于禁用 rebalance
 
 示例：`bots/conf/controllers/clmm_lp_uniswap.yml` / `bots/conf/controllers/clmm_lp_meteora.yml`（已给出）。
 

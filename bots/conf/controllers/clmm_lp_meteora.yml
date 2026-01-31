@@ -15,6 +15,7 @@ position_width_pct: 8
 ratio_edge_buffer_pct: 0.02
 strategy_type: 0
 
+rebalance_enabled: false
 rebalance_seconds: 60
 hysteresis_pct: 0.002
 cooldown_seconds: 30

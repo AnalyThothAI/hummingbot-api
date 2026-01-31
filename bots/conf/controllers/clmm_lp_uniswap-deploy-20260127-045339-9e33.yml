@@ -18,6 +18,7 @@ pool_trading_pair: "潜龙勿用-USDT"
 position_value_quote: 40
 position_width_pct: 50
 ratio_clamp_tick_multiplier: 2
+rebalance_enabled: false
 rebalance_seconds: 60
 reenter_enabled: true
 router_connector: uniswap/router

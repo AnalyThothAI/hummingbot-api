@@ -21,6 +21,10 @@ class RebalanceEngine:
 
     def evaluate(self, snapshot: Snapshot, ctx: ControllerContext, lp_view: LPView) -> RebalanceSignal:
         now = snapshot.now
+        if not getattr(self._config, "rebalance_enabled", False):
+            return RebalanceSignal(False, "rebalance_disabled")
+        if getattr(self._config, "rebalance_seconds", 0) <= 0:
+            return RebalanceSignal(False, "rebalance_disabled")
         lower_price = lp_view.lower_price
         upper_price = lp_view.upper_price
         if lower_price is None or upper_price is None or lower_price <= 0 or upper_price <= 0:

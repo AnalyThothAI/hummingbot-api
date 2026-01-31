@@ -241,17 +241,14 @@ class BalanceManager:
                 missing_tokens.append(self._domain.base_token)
             if not quote_present:
                 missing_tokens.append(self._domain.quote_token)
-            if self._has_balance_snapshot and (
-                (not base_present and self._wallet_base > 0) or (not quote_present and self._wallet_quote > 0)
-            ):
-                self._logger().warning(
-                    "balance_snapshot_ignored | source=%s missing=%s last_base=%s last_quote=%s",
-                    primary_name,
-                    ",".join(missing_tokens),
-                    self._wallet_base,
-                    self._wallet_quote,
-                )
-                return
+            self._logger().warning(
+                "balance_snapshot_ignored | source=%s missing=%s last_base=%s last_quote=%s",
+                primary_name,
+                ",".join(missing_tokens),
+                self._wallet_base,
+                self._wallet_quote,
+            )
+            return
 
         self._wallet_base = new_wallet_base
         self._wallet_quote = new_wallet_quote

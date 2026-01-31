@@ -18,6 +18,7 @@ pool_trading_pair: DALE-SOL
 position_value_quote: 0.3
 position_width_pct: 45
 ratio_edge_buffer_pct: 0.02
+rebalance_enabled: false
 rebalance_seconds: 60
 reenter_enabled: true
 router_connector: jupiter/router

@@ -148,7 +148,7 @@ async def test_balance_snapshot_ignored_when_missing_token_and_previous_positive
 
 
 @pytest.mark.asyncio
-async def test_balance_snapshot_accepts_missing_token_when_previous_zero():
+async def test_balance_snapshot_ignored_when_missing_token_even_if_previous_zero():
     connector = FakeConnector([{ "QUOTE": Decimal("2") }])
     mdp = FakeMarketDataProvider(connector, now=200.0)
     config = DummyConfig()
@@ -168,6 +168,6 @@ async def test_balance_snapshot_accepts_missing_token_when_previous_zero():
     await manager._update_wallet_balances()
 
     assert manager.wallet_base == Decimal("0")
-    assert manager.wallet_quote == Decimal("2")
-    assert manager._last_balance_update_ts == 200.0
+    assert manager.wallet_quote == Decimal("0")
+    assert manager._last_balance_update_ts == 100.0
     assert manager.wallet_source == "router"
