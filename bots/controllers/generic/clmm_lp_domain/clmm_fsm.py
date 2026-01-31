@@ -116,6 +116,7 @@ class CLMMFSM:
         ctx.pending_open_lp_id = None
         ctx.pending_swap_id = None
         ctx.pending_swap_since_ts = 0.0
+        ctx.pending_swap_purpose = None
         lp_view = self._select_lp(snapshot, ctx)
         if ctx.pending_realized_anchor is not None and (lp_view is None or self._is_lp_closed(lp_view)):
             self._record_realized_on_close(snapshot, ctx, lp_view, reason="idle")
@@ -323,6 +324,7 @@ class CLMMFSM:
             return self._stay(ctx, reason="stoploss_swap_unavailable")
         ctx.pending_swap_id = swap_action.executor_config.id
         ctx.pending_swap_since_ts = snapshot.now
+        ctx.pending_swap_purpose = SwapPurpose.STOPLOSS
         ctx.last_stoploss_swap_ts = snapshot.now
         ctx.stoploss_swap_attempts += 1
         return Decision(actions=[swap_action], reason="stoploss_swap")
@@ -423,8 +425,12 @@ class CLMMFSM:
             swap = self._find_recent_completed_swap(snapshot, ctx, is_stoploss)
         if swap is None or not swap.is_done:
             return False
+        expected_purpose = ctx.pending_swap_purpose
+        if expected_purpose is not None and swap.purpose != expected_purpose:
+            return False
         ctx.pending_swap_id = None
         ctx.pending_swap_since_ts = 0.0
+        ctx.pending_swap_purpose = None
         if swap.close_type != CloseType.COMPLETED:
             return False
         if is_stoploss:
@@ -703,6 +709,7 @@ class CLMMFSM:
                 ctx.pending_open_lp_id = None
                 ctx.pending_swap_id = None
                 ctx.pending_swap_since_ts = 0.0
+                ctx.pending_swap_purpose = None
                 ctx.inventory_swap_attempts = 0
                 ctx.inventory_balance_refresh_attempts = 0
                 ctx.stoploss_swap_attempts = 0
@@ -732,6 +739,7 @@ class CLMMFSM:
             return self._stay(ctx, reason="swap_pending")
         ctx.pending_swap_id = None
         ctx.pending_swap_since_ts = 0.0
+        ctx.pending_swap_purpose = None
         return None
 
     def _find_recent_completed_swap(
@@ -793,6 +801,7 @@ class CLMMFSM:
             return self._stay(ctx, reason="swap_required")
         ctx.pending_swap_id = swap_action.executor_config.id
         ctx.pending_swap_since_ts = snapshot.now
+        ctx.pending_swap_purpose = SwapPurpose.INVENTORY
         ctx.last_inventory_swap_ts = snapshot.now
         ctx.inventory_swap_attempts += 1
         return Decision(actions=[swap_action], reason=action_reason)
@@ -863,6 +872,7 @@ class CLMMFSM:
             return None
         ctx.pending_swap_id = swap_action.executor_config.id
         ctx.pending_swap_since_ts = snapshot.now
+        ctx.pending_swap_purpose = SwapPurpose.INVENTORY_REBALANCE
         ctx.last_normalization_swap_ts = snapshot.now
         ctx.normalization_swap_attempts += 1
         return Decision(actions=[swap_action], reason=f"{reason}_normalization_swap")

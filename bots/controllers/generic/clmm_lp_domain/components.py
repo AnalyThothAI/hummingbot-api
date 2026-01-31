@@ -212,6 +212,7 @@ class ControllerContext:
     pending_open_lp_id: Optional[str] = None
     pending_swap_id: Optional[str] = None
     pending_swap_since_ts: float = 0.0
+    pending_swap_purpose: Optional[SwapPurpose] = None
     inventory_swap_attempts: int = 0
     last_inventory_swap_ts: float = 0.0
     normalization_swap_attempts: int = 0
