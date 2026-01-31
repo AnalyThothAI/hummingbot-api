@@ -226,8 +226,35 @@ class BalanceManager:
         if not await _safe_update(primary_connector, primary_name):
             return
 
-        self._wallet_base = Decimal(str(primary_connector.get_available_balance(self._domain.base_token) or 0))
-        self._wallet_quote = Decimal(str(primary_connector.get_available_balance(self._domain.quote_token) or 0))
+        available_balances = getattr(primary_connector, "available_balances", None)
+        base_present = True
+        quote_present = True
+        if isinstance(available_balances, dict):
+            base_present = self._domain.base_token in available_balances
+            quote_present = self._domain.quote_token in available_balances
+
+        new_wallet_base = Decimal(str(primary_connector.get_available_balance(self._domain.base_token) or 0))
+        new_wallet_quote = Decimal(str(primary_connector.get_available_balance(self._domain.quote_token) or 0))
+        if not base_present or not quote_present:
+            missing_tokens = []
+            if not base_present:
+                missing_tokens.append(self._domain.base_token)
+            if not quote_present:
+                missing_tokens.append(self._domain.quote_token)
+            if self._has_balance_snapshot and (
+                (not base_present and self._wallet_base > 0) or (not quote_present and self._wallet_quote > 0)
+            ):
+                self._logger().warning(
+                    "balance_snapshot_ignored | source=%s missing=%s last_base=%s last_quote=%s",
+                    primary_name,
+                    ",".join(missing_tokens),
+                    self._wallet_base,
+                    self._wallet_quote,
+                )
+                return
+
+        self._wallet_base = new_wallet_base
+        self._wallet_quote = new_wallet_quote
         self._wallet_source = primary_name
         self._last_balance_update_ts = self._market_data_provider.time()
         self._has_balance_snapshot = True
