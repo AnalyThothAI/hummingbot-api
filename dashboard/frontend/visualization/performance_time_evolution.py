@@ -7,43 +7,38 @@ from frontend.visualization.theme import get_color_scheme
 
 
 def create_combined_subplots(executors: pd.DataFrame):
-    fig = make_subplots(rows=4, cols=1, shared_xaxes=True, vertical_spacing=0.1,
+    fig = make_subplots(rows=3, cols=1, shared_xaxes=True, vertical_spacing=0.1,
                         subplot_titles=["Cumulative PnL",
-                                        "Cumulative Volume",
                                         "Cumulative Positions",
                                         "Win/Loss Ratio"])
 
     pnl_trace = get_pnl_traces(executors)
     fig.add_trace(pnl_trace, row=1, col=1)
 
-    volume_trace = get_volume_bar_traces(executors)
-    fig.add_trace(volume_trace, row=2, col=1)
-
     activity_trace = get_total_executions_with_position_bar_traces(executors)
-    fig.add_trace(activity_trace, row=3, col=1)
+    fig.add_trace(activity_trace, row=2, col=1)
 
     win_loss_fig = get_win_loss_ratio_fig(executors)
     for trace in win_loss_fig.data:
-        fig.add_trace(trace, row=4, col=1)
+        fig.add_trace(trace, row=3, col=1)
 
     fig.update_layout(
         showlegend=True,
-        yaxis4=dict(
+        yaxis3=dict(
             type='linear',
             range=[1, 100],
             ticksuffix='%'
         )
     )
 
-    fig.update_layout(height=1000, width=800,
+    fig.update_layout(height=900, width=800,
                       title_text="Global Aggregated Performance Metrics",
                       plot_bgcolor='rgba(0,0,0,0)',
                       paper_bgcolor='rgba(0,0,0,0)',
                       font=dict(color='white'))
 
     fig.update_yaxes(title_text="$ Quote", row=1, col=1)
-    fig.update_yaxes(title_text="$ Quote", row=2, col=1)
-    fig.update_yaxes(title_text="# Executors", row=3, col=1)
+    fig.update_yaxes(title_text="# Executors", row=2, col=1)
 
     return fig
 
@@ -59,20 +54,6 @@ def get_pnl_traces(executors: pd.DataFrame):
                                     lambda x: color_scheme["buy"] if x > 0 else color_scheme["sell"]),
                                 showlegend=False,
                                 line_shape='hv',
-                                fill="tozeroy")
-    return scatter_traces
-
-
-def get_volume_bar_traces(executors: pd.DataFrame):
-    color_scheme = get_color_scheme()
-    executors.sort_values("close_timestamp", inplace=True)
-    executors["cum_filled_amount_quote"] = executors["filled_amount_quote"].cumsum() * 2
-    scatter_traces = go.Scatter(name="Cum Volume",
-                                x=executors["close_datetime"],
-                                y=executors["cum_filled_amount_quote"],
-                                marker_color=executors["cum_filled_amount_quote"].apply(
-                                    lambda x: color_scheme["buy"] if x > 0 else color_scheme["sell"]),
-                                showlegend=False,
                                 fill="tozeroy")
     return scatter_traces
 

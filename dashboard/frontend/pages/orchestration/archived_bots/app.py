@@ -309,7 +309,6 @@ def create_bot_runs_scatterplot(bot_runs: List[Dict], healthy_databases: List[st
             
             # Extract performance metrics
             global_pnl = 0
-            volume_traded = 0
             realized_pnl = 0
             unrealized_pnl = 0
             
@@ -317,7 +316,6 @@ def create_bot_runs_scatterplot(bot_runs: List[Dict], healthy_databases: List[st
                 if isinstance(controller_perf, dict) and "performance" in controller_perf:
                     perf_data = controller_perf["performance"]
                     global_pnl += perf_data.get("global_pnl_quote", 0)
-                    volume_traded += perf_data.get("volume_traded", 0)
                     realized_pnl += perf_data.get("realized_pnl_quote", 0)
                     unrealized_pnl += perf_data.get("unrealized_pnl_quote", 0)
             
@@ -333,7 +331,6 @@ def create_bot_runs_scatterplot(bot_runs: List[Dict], healthy_databases: List[st
                 "bot_name": run.get("bot_name", "Unknown"),
                 "strategy": run.get("strategy_name", "Unknown"),
                 "global_pnl": global_pnl,
-                "volume_traded": volume_traded,
                 "realized_pnl": realized_pnl,
                 "unrealized_pnl": unrealized_pnl,
                 "duration_hours": duration_hours,
@@ -363,7 +360,7 @@ def create_bot_runs_scatterplot(bot_runs: List[Dict], healthy_databases: List[st
         subset = df[df["has_database"] == has_db]
         if not subset.empty:
             fig.add_trace(go.Scatter(
-                x=subset["volume_traded"],
+                x=subset["duration_hours"],
                 y=subset["global_pnl"],
                 mode="markers",
                 name=label,
@@ -378,25 +375,24 @@ def create_bot_runs_scatterplot(bot_runs: List[Dict], healthy_databases: List[st
                     "<b>%{customdata[0]}</b><br>" +
                     "Strategy: %{customdata[1]}<br>" +
                     "Global PnL: $%{y:.4f}<br>" +
-                    "Volume: $%{x:,.0f}<br>" +
+                    "Duration: %{x:.1f}h<br>" +
                     "Realized PnL: $%{customdata[2]:.4f}<br>" +
                     "Unrealized PnL: $%{customdata[3]:.4f}<br>" +
-                    "Duration: %{customdata[4]:.1f}h<br>" +
-                    "Deployed: %{customdata[5]}<br>" +
-                    "Stopped: %{customdata[6]}<br>" +
-                    "Status: %{customdata[7]} / %{customdata[8]}<br>" +
-                    "Account: %{customdata[9]}<br>" +
+                    "Deployed: %{customdata[4]}<br>" +
+                    "Stopped: %{customdata[5]}<br>" +
+                    "Status: %{customdata[6]} / %{customdata[7]}<br>" +
+                    "Account: %{customdata[8]}<br>" +
                     "<extra></extra>"
                 ),
                 customdata=subset[["bot_name", "strategy", "realized_pnl", "unrealized_pnl", 
-                                 "duration_hours", "deployed_at", "stopped_at", "run_status", 
+                                 "deployed_at", "stopped_at", "run_status",
                                  "deployment_status", "account"]].values
             ))
     
     # Update layout
     fig.update_layout(
         title="Bot Runs Performance Overview",
-        xaxis_title="Volume Traded ($)",
+        xaxis_title="Duration (Hours)",
         yaxis_title="Global PnL ($)",
         template="plotly_dark",
         plot_bgcolor='rgba(0, 0, 0, 0)',
@@ -836,7 +832,7 @@ if st.session_state.bot_runs:
         st.plotly_chart(fig, use_container_width=True)
         
         # Summary statistics
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         with col1:
             total_runs = len(runs_df)
             st.metric("Total Runs", total_runs)
@@ -850,9 +846,6 @@ if st.session_state.bot_runs:
             total_pnl = runs_df["global_pnl"].sum()
             st.metric("Total PnL", f"${total_pnl:,.2f}")
         
-        with col4:
-            total_volume = runs_df["volume_traded"].sum()
-            st.metric("Total Volume", f"${total_volume:,.0f}")
     else:
         st.warning("No bot runs data available for visualization.")
 else:
@@ -948,7 +941,7 @@ if st.session_state.selected_database:
         analysis = st.session_state.trade_analysis
         
         # Performance metrics
-        col1, col2, col3, col4 = st.columns(4)
+        col1, col2, col3 = st.columns(3)
         
         with col1:
             net_pnl = summary.get('final_net_pnl_quote', 0)
@@ -971,13 +964,6 @@ if st.session_state.selected_database:
                 "Realized PnL",
                 value=f"${realized_pnl:,.6f}",
                 delta=f"{realized_pnl:+.6f}" if realized_pnl != 0 else None
-            )
-        
-        with col4:
-            volume = summary.get('total_volume_quote', 0)
-            st.metric(
-                "Total Volume",
-                value=f"${volume:,.2f}"
             )
         
         st.divider()

@@ -23,7 +23,7 @@ The Bot Instances page provides centralized control for deploying, managing, and
 - **Log Access**: View broker logs for debugging
 
 ### 📊 Instance Monitoring
-- **Performance Metrics**: Real-time P&L, trade count, and volume
+- **Performance Metrics**: Real-time P&L and trade count
 - **Active Orders**: View open orders across all instances
 - **Error Tracking**: Centralized error logs and alerts
 - **Resource Monitoring**: CPU, memory, and network usage per instance

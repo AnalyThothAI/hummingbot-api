@@ -119,11 +119,18 @@ def _dummy_build_open_proposal(*_args, **_kwargs):
     return None, "price_unavailable"
 
 
-def _estimate_position_value(_lp, _price):
-    return Decimal("0")
+def _estimate_position_value(lp, _price):
+    return lp.base_amount
 
 
-def _make_lp_view(state=None, lower=Decimal("0.5"), upper=Decimal("2"), done=False, position=True):
+def _make_lp_view(
+    state=None,
+    lower=Decimal("0.5"),
+    upper=Decimal("2"),
+    done=False,
+    position=True,
+    base_amount=Decimal("0"),
+):
     return LPView(
         executor_id="lp1",
         is_active=True,
@@ -131,7 +138,7 @@ def _make_lp_view(state=None, lower=Decimal("0.5"), upper=Decimal("2"), done=Fal
         close_type=None,
         state=state,
         position_address="addr" if position else None,
-        base_amount=Decimal("0"),
+        base_amount=base_amount,
         quote_amount=Decimal("0"),
         base_fee=Decimal("0"),
         quote_fee=Decimal("0"),
@@ -180,8 +187,8 @@ def test_take_profit_triggers_close_action():
         rebalance_engine=engine,
         exit_policy=ExitPolicy(config=config),
     )
-    lp_view = _make_lp_view(state=LPPositionStates.IN_RANGE.value)
-    snapshot = _make_snapshot(now=2000, price=Decimal("1"), lp_view=lp_view, wallet_quote=Decimal("120"))
+    lp_view = _make_lp_view(state=LPPositionStates.IN_RANGE.value, base_amount=Decimal("120"))
+    snapshot = _make_snapshot(now=2000, price=Decimal("1"), lp_view=lp_view, wallet_quote=Decimal("0"))
     ctx = ControllerContext()
     ctx.state = ctx.state.ACTIVE
     ctx.anchor_value_quote = Decimal("100")
@@ -192,6 +199,28 @@ def test_take_profit_triggers_close_action():
     assert decision.actions and isinstance(decision.actions[0], StopExecutorAction)
     assert ctx.state.value == "TAKE_PROFIT_STOP"
 
+
+def test_take_profit_ignores_wallet_excess_under_risk_cap():
+    config = DummyConfig()
+    engine = RebalanceEngine(config=config, estimate_position_value=_estimate_position_value)
+    fsm = CLMMFSM(
+        config=config,
+        action_factory=None,
+        build_open_proposal=_dummy_build_open_proposal,
+        estimate_position_value=_estimate_position_value,
+        rebalance_engine=engine,
+        exit_policy=ExitPolicy(config=config),
+    )
+    lp_view = _make_lp_view(state=LPPositionStates.IN_RANGE.value, base_amount=Decimal("80"))
+    snapshot = _make_snapshot(now=2500, price=Decimal("1"), lp_view=lp_view, wallet_quote=Decimal("50"))
+    ctx = ControllerContext()
+    ctx.state = ctx.state.ACTIVE
+    ctx.anchor_value_quote = Decimal("100")
+
+    decision = fsm.step(snapshot, ctx)
+
+    assert decision.reason == "active"
+    assert ctx.state.value == "ACTIVE"
 
 def test_take_profit_stop_transitions_to_idle_after_close():
     config = DummyConfig()

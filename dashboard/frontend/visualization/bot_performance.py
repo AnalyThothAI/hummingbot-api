@@ -33,8 +33,7 @@ def display_performance_summary_table(executors, executors_with_orders: pd.DataF
             net_pnl_quote=("net_pnl_quote", "sum"),
             id=("id", "count"),
             timestamp=("timestamp", "min"),
-            close_timestamp=("close_timestamp", "max"),
-            filled_amount_quote=("filled_amount_quote", "sum")
+            close_timestamp=("close_timestamp", "max")
         ).reset_index()
         grouped_executors["net_pnl_over_time"] = grouped_executors.apply(
             lambda row: executors[
@@ -50,16 +49,13 @@ def display_performance_summary_table(executors, executors_with_orders: pd.DataF
         grouped_executors["duration"] = (grouped_executors["close_timestamp"] - grouped_executors["timestamp"]).apply(
             format_duration
         )
-        grouped_executors["filled_amount_quote_sum"] = grouped_executors["filled_amount_quote"].apply(
-            lambda x: f"$ {x:.2f}"
-        )
         grouped_executors["net_pnl_quote"] = grouped_executors["net_pnl_quote"].apply(lambda x: f"$ {x:.2f}")
         grouped_executors.rename(columns={"datetime": "start_datetime_utc",
                                           "id": "total_executors"}, inplace=True)
         all_pnl_values = [value for sublist in grouped_executors["net_pnl_over_time"] for value in sublist]
         y_min = min(all_pnl_values) if all_pnl_values else -1e10
         y_max = max(all_pnl_values) if all_pnl_values else 1e10
-        cols_to_show = ["exchange", "trading_pair", "net_pnl_quote", "net_pnl_over_time", "filled_amount_quote",
+        cols_to_show = ["exchange", "trading_pair", "net_pnl_quote", "net_pnl_over_time",
                         "controller_id", "controller_type", "total_executors", "duration"]
 
         st.dataframe(grouped_executors[cols_to_show],
@@ -74,7 +70,6 @@ def display_performance_summary_table(executors, executors_with_orders: pd.DataF
                          "controller_id": st.column_config.TextColumn("Controller ID"),
                          "controller_type": st.column_config.TextColumn("Controller Type"),
                          "total_executors": st.column_config.NumberColumn("Total Positions"),
-                         "filled_amount_quote": st.column_config.NumberColumn("Total Volume", format="$ %.2f"),
                          "net_pnl_quote": st.column_config.NumberColumn("Net PnL", format="$ %.2f"),
                          "duration": st.column_config.TextColumn("Duration")
                      })
@@ -131,10 +126,9 @@ def display_side_analysis(data_source: PerformanceDataSource,
         col1, col2, col3 = st.columns(3)
         col1.metric(label="Net PnL (Quote)", value=f"{results['net_pnl_quote']:.2f}")
         col2.metric(label="Max Drawdown (USD)", value=f"{results['max_drawdown_usd']:.2f}")
-        col3.metric(label="Total Volume (Quote)", value=f"{results['total_volume']:.2f}")
-        col1.metric(label="Sharpe Ratio", value=f"{results['sharpe_ratio']:.2f}")
-        col2.metric(label="Profit Factor", value=f"{results['profit_factor']:.2f}")
-        col3.metric(label="Total Executors with Position", value=results['total_executors_with_position'])
+        col3.metric(label="Sharpe Ratio", value=f"{results['sharpe_ratio']:.2f}")
+        col1.metric(label="Profit Factor", value=f"{results['profit_factor']:.2f}")
+        col2.metric(label="Total Executors with Position", value=results['total_executors_with_position'])
         fig = go.Figure(data=[go.Pie(labels=list(results["close_types"].keys()),
                                      values=list(results["close_types"].values()), hole=.3)])
         fig.update_layout(title="Close Types")

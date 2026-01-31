@@ -419,7 +419,6 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
             config_map[config_id] = config
 
     total_global_pnl_quote = 0
-    total_volume_traded = 0
     total_unrealized_pnl_quote = 0
     total_realized_pnl_quote = 0
     total_equity_quote = 0
@@ -431,9 +430,10 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
             stopped_controllers,
             error_controllers,
             total_global_pnl_quote,
-            total_volume_traded,
             total_unrealized_pnl_quote,
             total_realized_pnl_quote,
+            total_equity_quote,
+            quote_symbols,
             config_map,
         )
 
@@ -461,7 +461,6 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         realized_pnl_quote = controller_performance.get("realized_pnl_quote", 0)
         unrealized_pnl_quote = controller_performance.get("unrealized_pnl_quote", 0)
         global_pnl_quote = controller_performance.get("global_pnl_quote", 0)
-        volume_traded = controller_performance.get("volume_traded", 0)
         nav_quote = None
 
         risk = custom_info.get("risk") if isinstance(custom_info, dict) else None
@@ -512,13 +511,11 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
             "Unrealized PNL": format_quote_value(unrealized_pnl_quote, quote_symbol, 2),
             "NET PNL": format_quote_value(global_pnl_quote, quote_symbol, 2),
             "Equity": format_quote_value(nav_quote, quote_symbol, 2) if nav_quote is not None else "-",
-            "Volume": format_quote_value(volume_traded, quote_symbol, 2),
             "Close Types": close_types_str,
             "_controller_id": controller,
         }
 
         total_global_pnl_quote += global_pnl_quote
-        total_volume_traded += volume_traded
         total_unrealized_pnl_quote += unrealized_pnl_quote
         total_realized_pnl_quote += realized_pnl_quote
         if nav_quote is not None:
@@ -534,7 +531,6 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         stopped_controllers,
         error_controllers,
         total_global_pnl_quote,
-        total_volume_traded,
         total_unrealized_pnl_quote,
         total_realized_pnl_quote,
         total_equity_quote,
@@ -1164,7 +1160,6 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
         stopped_controllers,
         error_controllers,
         total_global_pnl_quote,
-        total_volume_traded,
         total_unrealized_pnl_quote,
         total_realized_pnl_quote,
         total_equity_quote,
@@ -1175,9 +1170,6 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
     if total_equity_quote > 0:
         total_global_pnl_pct = total_global_pnl_quote / total_equity_quote
         pnl_pct_basis = "equity"
-    elif total_volume_traded > 0:
-        total_global_pnl_pct = total_global_pnl_quote / total_volume_traded
-        pnl_pct_basis = "volume"
     else:
         total_global_pnl_pct = 0
         pnl_pct_basis = "unavailable"
@@ -1187,7 +1179,7 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
     elif len(quote_symbols) > 1:
         quote_label = "Mixed"
 
-    metric_cols = st.columns(5)
+    metric_cols = st.columns(4)
     with metric_cols[0]:
         st.metric("🏦 NET PNL", f"{total_global_pnl_quote:.2f} {quote_label}")
     with metric_cols[1]:
@@ -1196,9 +1188,6 @@ def render_controller_tables(bot_name: str, performance: Dict[str, Any], control
         st.metric("✅ Realized PNL", f"{total_realized_pnl_quote:.2f} {quote_label}")
     with metric_cols[3]:
         st.metric("📊 NET PNL (%)", f"{total_global_pnl_pct:.2%}")
-    with metric_cols[4]:
-        st.metric("💸 Volume Traded", f"{total_volume_traded:.2f} {quote_label}")
-
     if len(quote_symbols) > 1:
         st.caption("Totals include mixed quote currencies; per-controller values are in their own quote units.")
     if pnl_pct_basis == "equity":
