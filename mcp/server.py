@@ -184,8 +184,6 @@ def main() -> None:
     run_stdio(server)
 
 
-if __name__ == "__main__":
-    main()
 
 
 def _load_dotenv(path: str = ".env") -> None:
@@ -209,3 +207,7 @@ def _load_dotenv(path: str = ".env") -> None:
                     os.environ[key] = value
     except Exception:
         return
+
+
+if __name__ == "__main__":
+    main()
