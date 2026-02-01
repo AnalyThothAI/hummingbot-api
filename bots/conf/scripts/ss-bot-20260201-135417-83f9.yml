@@ -1,0 +1,5 @@
+candles_config: []
+controllers_config:
+- clmm_lp_uniswap_uniswap-bsc-恶俗企鹅.yml
+markets: {}
+script_file_name: v2_with_controllers.py

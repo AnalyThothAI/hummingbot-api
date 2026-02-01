@@ -14,6 +14,12 @@ def public_pages():
 def private_pages():
     orchestration_pages = [
         st.Page("frontend/pages/orchestration/instances/app.py", title="Instances", icon="🦅", url_path="instances"),
+        st.Page(
+            "frontend/pages/orchestration/config_generator/app.py",
+            title="Config Generator",
+            icon="🧩",
+            url_path="config_generator",
+        ),
         st.Page("frontend/pages/orchestration/launch_bot_v2/app.py", title="Deploy V2", icon="🚀", url_path="launch_bot_v2"),
         st.Page("frontend/pages/orchestration/credentials/app.py", title="Credentials", icon="🔑", url_path="credentials"),
         st.Page("frontend/pages/orchestration/portfolio/app.py", title="Portfolio", icon="💰", url_path="portfolio"),
