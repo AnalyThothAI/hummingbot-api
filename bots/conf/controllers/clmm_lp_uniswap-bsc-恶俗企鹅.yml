@@ -1,21 +1,20 @@
-controller_name: clmm_lp_meteora
+controller_name: clmm_lp_uniswap
 controller_type: generic
-id: clmm_lp_meteora
+id: clmm_lp_uniswap
 
-connector_name: meteora/clmm
-router_connector: jupiter/router
-trading_pair: PENGU-SOL
-pool_address: "FCL8pjNQsDAggZVczYfnn6tfbYoMnJykGT2cpdTULAxB"
+connector_name: uniswap/clmm
+router_connector: uniswap/router
+trading_pair: 恶俗企鹅-USDT
+pool_address: "0xEC9A0F0d2F749A0bA2454D2139B3942c3265E1DF"
 
 target_price: 0
 trigger_above: true
 
-position_value_quote: 0.3
-position_width_pct: 8
-ratio_edge_buffer_pct: 0.02
-strategy_type: 0
+position_value_quote: 30
+position_width_pct: 28
+ratio_clamp_tick_multiplier: 2
 
-rebalance_enabled: false
+rebalance_enabled: true
 rebalance_seconds: 60
 hysteresis_pct: 0.002
 cooldown_seconds: 30
@@ -24,7 +23,7 @@ max_rebalances_per_hour: 20
 auto_swap_enabled: true
 swap_min_value_pct: 0.005
 swap_safety_buffer_pct: 0.02
-swap_slippage_pct: 0.03
+swap_slippage_pct: 0.01
 inventory_drift_tolerance_pct: 0.01
 normalization_cooldown_sec: 30
 normalization_min_value_pct: 0.005
@@ -35,10 +34,10 @@ cost_filter_fee_rate_bootstrap_quote_per_hour: 0
 cost_filter_fixed_cost_quote: 0
 cost_filter_max_payback_sec: 3600
 
-stop_loss_pnl_pct: 0.1
+stop_loss_pnl_pct: 0.2
 stop_loss_pause_sec: 1800
 reenter_enabled: false
 
-budget_key: clmm_lp_meteora
-native_token_symbol: SOL
-min_native_balance: 0.01
+budget_key: clmm_lp_uniswap
+native_token_symbol: BNB
+min_native_balance: 0.0001

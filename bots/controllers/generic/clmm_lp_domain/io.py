@@ -25,9 +25,12 @@ class SnapshotBuilder:
         *,
         controller_id: str,
         domain: PoolDomainAdapter,
+        logger: Optional[Callable[[], HummingbotLogger]] = None,
     ) -> None:
         self._controller_id = controller_id
         self._domain = domain
+        self._logger = logger
+        self._logged_lp_inversion: set[str] = set()
 
     def build(
         self,
@@ -81,10 +84,34 @@ class SnapshotBuilder:
         lp_quote_fee = Decimal(str(custom.get("quote_fee", 0)))
 
         inverted = self._domain.executor_token_order_inverted(executor)
+        inverted_source = "executor"
         if inverted is None:
             inverted = self._domain.pool_order_inverted
+            inverted_source = "domain"
         base_amount, quote_amount = self._domain.pool_amounts_to_strategy(lp_base_amount, lp_quote_amount, inverted)
         base_fee, quote_fee = self._domain.pool_amounts_to_strategy(lp_base_fee, lp_quote_fee, inverted)
+        if self._logger is not None and executor.id not in self._logged_lp_inversion:
+            config = getattr(executor, "config", None)
+            exec_base = getattr(config, "base_token", None)
+            exec_quote = getattr(config, "quote_token", None)
+            exec_pair = getattr(config, "trading_pair", None)
+            self._logger().info(
+                "lp_inversion | executor_id=%s source=%s inverted=%s pool_trading_pair=%s pool_inverted=%s "
+                "exec_base=%s exec_quote=%s exec_pair=%s raw_base=%s raw_quote=%s mapped_base=%s mapped_quote=%s",
+                executor.id,
+                inverted_source,
+                inverted,
+                self._domain.pool_trading_pair,
+                self._domain.pool_order_inverted,
+                exec_base,
+                exec_quote,
+                exec_pair,
+                lp_base_amount,
+                lp_quote_amount,
+                base_amount,
+                quote_amount,
+            )
+            self._logged_lp_inversion.add(executor.id)
 
         lower = custom.get("lower_price")
         upper = custom.get("upper_price")

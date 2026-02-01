@@ -66,7 +66,7 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     stop_loss_pnl_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     take_profit_pnl_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     stop_loss_pause_sec: int = Field(default=1800, json_schema_extra={"is_updatable": True})
-    reenter_enabled: bool = Field(default=True, json_schema_extra={"is_updatable": True})
+    reenter_enabled: bool = Field(default=False, json_schema_extra={"is_updatable": True})
 
     budget_key: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
     native_token_symbol: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
@@ -118,6 +118,7 @@ class CLMMLPBaseController(ControllerBase):
         self._snapshot_builder = SnapshotBuilder(
             controller_id=self.config.id,
             domain=self._domain,
+            logger=self.logger,
         )
         self._rebalance_engine = RebalanceEngine(
             config=self.config,

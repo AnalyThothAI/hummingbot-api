@@ -114,30 +114,14 @@ class _UniswapPoolDomainResolver:
         if err or not chain or not network:
             return None, "gateway_network_error"
 
-        response = await gateway.api_request(
-            "get",
-            "pools/",
-            params={
-                "connector": "uniswap",
-                "network": network,
-                "type": "clmm",
-                "search": pool_address,
-            },
+        pool_info = await gateway.pool_info(
+            connector=self._config.connector_name,
+            network=network,
+            pool_address=pool_address,
             fail_silently=True,
         )
-        if response is None:
-            return None, "pool_lookup_failed"
-        if isinstance(response, dict):
-            if response.get("error"):
-                return None, "pool_lookup_failed"
-            if response.get("message") and response.get("statusCode"):
-                return None, "pool_lookup_failed"
-        if not isinstance(response, list) or not response:
-            return None, "pool_not_found"
-
-        pool = response[0]
-        base_addr = str(pool.get("baseTokenAddress") or "").lower()
-        quote_addr = str(pool.get("quoteTokenAddress") or "").lower()
+        base_addr = str(pool_info.get("baseTokenAddress") or "").lower() if isinstance(pool_info, dict) else ""
+        quote_addr = str(pool_info.get("quoteTokenAddress") or "").lower() if isinstance(pool_info, dict) else ""
         if not base_addr or not quote_addr:
             return None, "pool_data_invalid"
 
@@ -198,6 +182,7 @@ class CLMMLPUniswapController(clmm_lp_base.CLMMLPBaseController):
         self._snapshot_builder = SnapshotBuilder(
             controller_id=self.config.id,
             domain=self._domain,
+            logger=self.logger,
         )
         self._fsm = CLMMFSM(
             config=self.config,

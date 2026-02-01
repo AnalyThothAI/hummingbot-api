@@ -1,9 +1,6 @@
 import os
 import sys
-import types
-from dataclasses import dataclass
 from decimal import Decimal
-from enum import Enum
 
 import pytest
 
@@ -13,61 +10,8 @@ for path in (ROOT, HBOT_ROOT):
     if path not in sys.path:
         sys.path.insert(0, path)
 
-# ---- Stubs for hummingbot dependencies ----
-common_module = types.ModuleType("hummingbot.core.data_type.common")
-
-
-class TradeType(Enum):
-    BUY = 1
-    SELL = 2
-
-
-common_module.TradeType = TradeType
-sys.modules.setdefault("hummingbot.core.data_type.common", common_module)
-
-executors_module = types.ModuleType("hummingbot.strategy_v2.models.executors")
-
-
-class CloseType(Enum):
-    FAILED = 8
-    COMPLETED = 9
-
-
-executors_module.CloseType = CloseType
-sys.modules.setdefault("hummingbot.strategy_v2.models.executors", executors_module)
-
-executor_actions_module = types.ModuleType("hummingbot.strategy_v2.models.executor_actions")
-
-
-@dataclass(frozen=True)
-class ExecutorAction:
-    controller_id: str = ""
-
-
-@dataclass(frozen=True)
-class StopExecutorAction(ExecutorAction):
-    executor_id: str = ""
-
-
-executor_actions_module.ExecutorAction = ExecutorAction
-executor_actions_module.StopExecutorAction = StopExecutorAction
-sys.modules["hummingbot.strategy_v2.models.executor_actions"] = executor_actions_module
-
-lp_states_module = types.ModuleType("hummingbot.strategy_v2.executors.lp_position_executor.data_types")
-
-
-class LPPositionStates(Enum):
-    NOT_ACTIVE = "NOT_ACTIVE"
-    OPENING = "OPENING"
-    IN_RANGE = "IN_RANGE"
-    OUT_OF_RANGE = "OUT_OF_RANGE"
-    CLOSING = "CLOSING"
-    COMPLETE = "COMPLETE"
-    RETRIES_EXCEEDED = "RETRIES_EXCEEDED"
-
-
-lp_states_module.LPPositionStates = LPPositionStates
-sys.modules["hummingbot.strategy_v2.executors.lp_position_executor.data_types"] = lp_states_module
+from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionStates
+from hummingbot.strategy_v2.models.executor_actions import StopExecutorAction
 
 # ---- Import target modules (after stubs) ----
 for module_name in (

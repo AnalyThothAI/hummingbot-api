@@ -36,7 +36,7 @@ cost_filter_max_payback_sec: 3600
 
 stop_loss_pnl_pct: 0.3
 stop_loss_pause_sec: 1800
-reenter_enabled: true
+reenter_enabled: false
 
 budget_key: clmm_lp_uniswap
 native_token_symbol: BNB

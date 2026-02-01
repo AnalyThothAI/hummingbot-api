@@ -151,6 +151,7 @@ Controller 维护的钱包与派生数据：
   - 发送 `StopExecutorAction` 关闭 LP
   - LP 关闭完成后回到 `IDLE`
   - 不做 swap（只平仓 LP）
+  - 若 `reenter_enabled=false`，止盈/止损后不再自动入场（需手动重启/更新配置）
 
 ## 11. `processed_data`（对外观测字段）
 
@@ -173,6 +174,7 @@ Controller 维护的钱包与派生数据：
 补充配置：
 - `rebalance_enabled` 默认 `false`，需要时显式设为 `true`
 - `rebalance_seconds <= 0` 等价于禁用 rebalance
+- `reenter_enabled` 默认 `false`，为 `false` 时止盈/止损后不再自动入场
 
 示例：`bots/conf/controllers/clmm_lp_uniswap.yml` / `bots/conf/controllers/clmm_lp_meteora.yml`（已给出）。
 

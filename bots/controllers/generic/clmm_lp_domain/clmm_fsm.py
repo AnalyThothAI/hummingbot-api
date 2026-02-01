@@ -744,7 +744,7 @@ class CLMMFSM:
     def _can_reenter(self, ctx: ControllerContext) -> bool:
         if self._config.reenter_enabled:
             return True
-        return ctx.last_exit_reason != "stop_loss"
+        return ctx.last_exit_reason not in {"stop_loss", "take_profit"}
 
     def _transition(
         self,

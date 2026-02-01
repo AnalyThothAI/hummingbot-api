@@ -20,7 +20,7 @@ position_width_pct: 50
 ratio_clamp_tick_multiplier: 2
 rebalance_enabled: false
 rebalance_seconds: 60
-reenter_enabled: true
+reenter_enabled: false
 router_connector: uniswap/router
 stop_loss_pause_sec: 1800
 stop_loss_pnl_pct: 0.3
