@@ -9,6 +9,7 @@ if DASHBOARD_DIR not in sys.path:
     sys.path.insert(0, DASHBOARD_DIR)
 
 from frontend.components import controller_config_generator as generator  # noqa: E402
+from frontend.components.clmm_config_generator import template_section  # noqa: E402
 
 
 class ConfigGeneratorTests(unittest.TestCase):
@@ -22,6 +23,68 @@ class ConfigGeneratorTests(unittest.TestCase):
         self.assertEqual(rows[1]["trading_pair"], "SOL-USDT")
         self.assertEqual(rows[1]["pool_trading_pair"], "SOL-USDT")
         self.assertEqual(rows[1]["pool_address"], "0xabc")
+
+    def test_pool_to_override_row_uses_base_quote_when_missing_pair(self):
+        pool = {"base": "SOL", "quote": "USDC", "address": "0xpool"}
+        row = generator.pool_to_override_row(pool)
+        self.assertEqual(row["trading_pair"], "SOL-USDC")
+        self.assertEqual(row["pool_trading_pair"], "SOL-USDC")
+        self.assertEqual(row["pool_address"], "0xpool")
+
+    def test_merge_override_rows_prefers_new_rows_when_requested(self):
+        existing = [{"trading_pair": "SOL-USDC", "pool_address": "0xold"}]
+        new = [{"trading_pair": "SOL-USDC", "pool_address": "0xnew"}]
+        merged = generator.merge_override_rows(existing, new, prefer_new=True)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["pool_address"], "0xnew")
+
+    def test_extract_defaults_from_template(self):
+        template_fields = {
+            "controller_name": {"default": "clmm_lp_uniswap"},
+            "position_value_quote": {"default": "0.3"},
+            "rebalance_enabled": {"default": False},
+            "strategy_type": {"default": None},
+        }
+        defaults = template_section.extract_defaults_from_template(template_fields)
+        self.assertEqual(defaults["controller_name"], "clmm_lp_uniswap")
+        self.assertEqual(defaults["position_value_quote"], "0.3")
+        self.assertFalse(defaults["rebalance_enabled"])
+        self.assertIsNone(defaults["strategy_type"])
+
+    def test_select_template_defaults_prefers_config_data(self):
+        config_data = {"controller_name": "clmm_lp_uniswap", "position_value_quote": 1}
+        template_fields = {"position_value_quote": {"default": 0.3}}
+        selected = template_section.select_template_defaults(config_data, template_fields)
+        self.assertEqual(selected, config_data)
+
+    def test_compute_param_overrides_filters_unchanged_and_none(self):
+        base = {"position_value_quote": 10, "rebalance_enabled": False}
+        values = {"position_value_quote": 10, "rebalance_enabled": True, "stop_loss_pnl_pct": None}
+        overrides = generator.compute_param_overrides(base, values)
+        self.assertEqual(overrides, {"rebalance_enabled": True})
+
+    def test_compute_param_overrides_treats_numeric_equal(self):
+        base = {"swap_min_value_pct": "0.005"}
+        values = {"swap_min_value_pct": 0.005}
+        overrides = generator.compute_param_overrides(base, values)
+        self.assertEqual(overrides, {})
+
+    def test_apply_param_overrides_updates_only_provided_fields(self):
+        base = {
+            "position_value_quote": 10,
+            "position_width_pct": 5,
+            "rebalance_enabled": False,
+        }
+        overrides = {
+            "position_value_quote": 20,
+            "rebalance_enabled": True,
+            "stop_loss_pnl_pct": None,
+        }
+        updated = generator.apply_param_overrides(base, overrides)
+        self.assertEqual(updated["position_value_quote"], 20)
+        self.assertEqual(updated["position_width_pct"], 5)
+        self.assertTrue(updated["rebalance_enabled"])
+        self.assertNotIn("stop_loss_pnl_pct", updated)
 
     def test_validate_override_requires_pool_address_when_pair_changes(self):
         base_config = {"trading_pair": "ETH-USDT", "pool_address": "0xold"}

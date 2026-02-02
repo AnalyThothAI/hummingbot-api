@@ -29,7 +29,7 @@ def private_pages():
     ]
     if GATEWAY_ENABLED:
         orchestration_pages.insert(
-            2,
+            3,
             st.Page("frontend/pages/orchestration/gateway/app.py", title="Gateway", icon="🔗", url_path="gateway"),
         )
 
