@@ -1,7 +1,7 @@
 # RFC: CLMM LP Controller — 边界定义、FSM 与恢复原则
 
 ## 1. 背景与问题
-CLMM LP 策略涉及链上头寸、余额快照与事件账本（ledger）多源数据。过去在 RPC / Gateway 不稳定时，出现以下问题：
+CLMM LP 策略涉及链上头寸与余额快照等多源数据。过去在 RPC / Gateway 不稳定时，出现以下问题：
 
 - LP 头寸已关闭或已出区间，但 UI 观察窗口消失，无法判断当前状态
 - 余额恢复后策略仍长期停留在 IDLE，无法重新入场
@@ -19,12 +19,12 @@ CLMM LP 策略涉及链上头寸、余额快照与事件账本（ledger）多源
 
 恢复原则（核心规则）：
 
-1) **无 LP/Swap 时，snapshot 为权威**
-   - 当无活跃 LP/Swap 且余额快照 fresh 时，ledger 必须被重置到 snapshot
-   - 这是恢复死锁的根原则
+1) **余额快照为权威**
+   - BalanceManager 负责刷新余额并标记 `balance_fresh`
+   - 当余额 stale 时请求刷新，不阻塞 FSM
 
-2) **Stoploss 只有在 balance_fresh + price_valid 时触发**
-   - 避免余额不可靠或价格不可用时误触发止损
+2) **Stoploss 仅在 price_valid 时触发**
+   - 价格不可用时跳过止损，避免误触发
 
 3) **价格权威顺序：RateOracle(quote-swap) 单口径**
    - CLMM 决策统一使用 quote-swap 报价，不再混用池内价格
@@ -42,14 +42,12 @@ CLMM LP 策略涉及链上头寸、余额快照与事件账本（ledger）多源
 ### 3.2 数据流
 1. 每 tick 调用 `BalanceManager.schedule_refresh`
 2. 生成 Snapshot（包含 balance_fresh、current_price、lp views、swaps）
-3. Ledger 应用事件并生成 LedgerStatus
-4. FSM 根据 Snapshot 与 LedgerStatus 产生 Decision
+3. FSM 根据 Snapshot 产生 Decision
 
 ## 4. 权威数据源边界定义（余额 / 价格 / LP 信息）
-### 4.1 余额：Ledger vs Snapshot
-- **有活跃 LP/Swap 时**：ledger 为主（因为可能存在未结算事件）
-- **无活跃 LP/Swap 且 balance_fresh 时**：snapshot 为主，ledger 必须强制重置
-- 该规则保证异常恢复后不会长期卡死
+### 4.1 余额：Snapshot 为权威
+- 余额来源统一为 BalanceManager 的快照
+- 通过强制刷新解决短期不一致（LP 开/关仓、swap 完成）
 
 ### 4.2 价格：Quote-swap 单口径
 - 决策统一使用 RateOracle/quote-swap 报价
@@ -63,60 +61,60 @@ CLMM LP 策略涉及链上头寸、余额快照与事件账本（ledger）多源
 ## 5. 关键状态与转移（FSM 说明）
 状态集合：
 - IDLE
-- ENTRY_SWAP → ENTRY_OPEN → ACTIVE
-- REBALANCE_STOP → REBALANCE_SWAP → REBALANCE_OPEN
-- STOPLOSS_STOP → STOPLOSS_SWAP
+- ENTRY_OPEN → ACTIVE
+- REBALANCE_STOP → REBALANCE_OPEN
+- TAKE_PROFIT_STOP
+- STOPLOSS_STOP → EXIT_SWAP
 - COOLDOWN
 
 关键规则：
 - 仅允许单一活动 LP（并发 guard）
 - Entry 由 `target_price` 与 `trigger_above` 决定
-- Rebalance 由 out_of_range + 时间阈值 + cost filter 决定
-- Stoploss 优先于 rebalance，但需满足 balance_fresh + price_valid
+- Rebalance 由 out_of_range + 时间阈值 + hysteresis + cooldown 决定
+- Stoploss 优先于 rebalance，但需满足 price_valid
+- 若 `exit_full_liquidation=true`，止盈/止损后进入 `EXIT_SWAP` 清算
 
 ### 5.1 状态转移表（核心路径）
 
 | 当前状态 | 触发条件 | 目标状态 | 关键动作/说明 |
 | --- | --- | --- | --- |
-| IDLE | 触发入场条件满足 | ENTRY_OPEN | 直接开仓或进入 swap 逻辑 |
-| IDLE | 需要调整库存 | ENTRY_SWAP | 构建 inventory swap |
-| ENTRY_SWAP | swap 完成 | ENTRY_OPEN | 进入开仓 |
+| IDLE | 触发入场条件满足 | ENTRY_OPEN | 直接开仓 |
 | ENTRY_OPEN | LP 成功创建 | ACTIVE | 设置 anchor |
 | ACTIVE | out_of_range & 达到 rebalance 门槛 | REBALANCE_STOP | 关闭 LP |
-| REBALANCE_STOP | LP 已关闭 | REBALANCE_SWAP | 进入重平衡 swap |
-| REBALANCE_SWAP | swap 完成 | REBALANCE_OPEN | 重新开仓 |
+| REBALANCE_STOP | LP 已关闭 | REBALANCE_OPEN | 重新开仓 |
 | REBALANCE_OPEN | LP 成功创建 | ACTIVE | 更新 anchor |
 | 任意 | Stoploss 触发 | STOPLOSS_STOP | 强制关闭 LP |
-| STOPLOSS_STOP | LP 已关闭 | STOPLOSS_SWAP | 全额 base→quote |
-| STOPLOSS_SWAP | swap 完成 | COOLDOWN | 冷却期 |
+| STOPLOSS_STOP | LP 已关闭 | EXIT_SWAP/COOLDOWN | 可选清算 base→quote |
+| TAKE_PROFIT_STOP | LP 已关闭 | EXIT_SWAP/IDLE | 可选清算 |
+| EXIT_SWAP | swap 完成 | COOLDOWN/IDLE | 依据退出原因 |
 | COOLDOWN | 冷却结束 | IDLE | 重新评估入场 |
 
 ### 5.2 典型流程序列（简化）
 
 **正常入场：**  
-IDLE → ENTRY_OPEN（或 ENTRY_SWAP） → ACTIVE
+IDLE → ENTRY_OPEN → ACTIVE
 
 **出区间再平衡：**  
-ACTIVE → REBALANCE_STOP → REBALANCE_SWAP → REBALANCE_OPEN → ACTIVE
+ACTIVE → REBALANCE_STOP → REBALANCE_OPEN → ACTIVE
 
 **止损流程：**  
-ACTIVE/IDLE → STOPLOSS_STOP → STOPLOSS_SWAP → COOLDOWN → IDLE
+ACTIVE/IDLE → STOPLOSS_STOP → EXIT_SWAP/COOLDOWN → IDLE
 
-**异常恢复（ledger 漂移）：**  
-异常阶段 → 无 LP/Swap + balance_fresh → ledger reset → IDLE → 正常入场
+**异常恢复（余额漂移）：**  
+异常阶段 → 触发强制刷新 → IDLE → 正常入场
 
 ## 6. 变更与差异（相对旧行为）
 ### 6.1 余额权威边界
-- 旧：ledger 与 snapshot 不一致时无法自动恢复
-- 新：无 LP/Swap 时 snapshot 为权威，ledger 强制 reset
+- 旧：多源余额不一致时无法自动恢复
+- 新：snapshot 为权威，缺失时通过刷新恢复
 
 ### 6.2 价格优先级
 - 旧：多源价格混用，存在口径冲突
 - 新：RateOracle/quote-swap 单口径
 
 ### 6.3 Stoploss 前置条件
-- 旧：price 有就触发 stoploss，不考虑余额是否可靠
-- 新：必须 balance_fresh + price_valid 才能触发
+- 旧：balance_fresh + price_valid gating
+- 新：仅 price_valid gating（余额刷新由 BalanceManager 异步触发，不阻塞止损）
 
 ### 6.4 观察窗口消失
 - 旧：nav 为空 → custom_info 清空 → UI 没有 LP range
@@ -133,13 +131,13 @@ ACTIVE/IDLE → STOPLOSS_STOP → STOPLOSS_SWAP → COOLDOWN → IDLE
 ### 8.1 典型症状（节选）
 - `update_balances failed ... TimeoutError`
 - `Gateway error: Pool not found ...`（RPC 抖动导致）
-- `State: IDLE | Wallet: 361 / -1314`（ledger 漂移）
+- `State: IDLE | Wallet: 361 / -1314`（余额漂移）
 
 ### 8.2 典型故障链路
 1. RPC 抖动 → balance/position-info/pool-info 频繁失败
 2. Ledger 与 snapshot 漂移加大，无法 reconcile
-3. FSM 被 ledger_guard 阻断 → 永久 IDLE
+3. FSM 被连续异常阻断 → 永久 IDLE
 4. UI custom_info 被清空 → LP 观察窗口消失
 
 ### 8.3 恢复原则验证
-- 当 LP/Swap 全为空 + balance_fresh = True 时，ledger 强制 reset → FSM 继续推进
+- 当余额 stale 时触发刷新，恢复后 FSM 继续推进

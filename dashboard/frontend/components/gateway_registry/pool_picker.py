@@ -252,6 +252,7 @@ def render_gateway_pool_picker(
     target_rows_key: Optional[str],
     show_existing_toggle: bool = True,
     show_filters: bool = True,
+    existing_only: bool = False,
 ) -> List[Dict]:
     connectors_response = backend_api_request("GET", "/gateway/connectors")
     connectors_payload = connectors_response.get("data", {}) if connectors_response.get("ok") else {}
@@ -290,7 +291,9 @@ def render_gateway_pool_picker(
     )
 
     data_source = "Search Results"
-    if show_existing_toggle:
+    if existing_only:
+        data_source = "Existing Pools"
+    elif show_existing_toggle:
         data_source = st.radio(
             "Data Source",
             ["Search Results", "Existing Pools"],

@@ -1,10 +1,10 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import Field
+from pydantic import ConfigDict, Field
 
 from hummingbot.core.data_type.common import MarketDict
 from hummingbot.core.utils.async_utils import safe_ensure_future
@@ -14,7 +14,6 @@ from hummingbot.strategy_v2.controllers import ControllerBase, ControllerConfigB
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from .clmm_lp_domain.components import ControllerContext, ControllerState, LPView, OpenProposal, Snapshot, PoolDomainAdapter, PriceContext
-from .clmm_lp_domain.cost_filter import CostFilter
 from .clmm_lp_domain.clmm_fsm import CLMMFSM
 from .clmm_lp_domain.policies import CLMMPolicyBase
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
@@ -23,6 +22,7 @@ from .clmm_lp_domain.io import ActionFactory, BalanceManager, SnapshotBuilder, P
 
 
 class CLMMLPBaseConfig(ControllerConfigBase):
+    model_config = ConfigDict(extra="ignore")
     controller_type: str = "generic"
     controller_name: str = "clmm_lp_base"
     connector_name: str = ""
@@ -44,24 +44,9 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     max_rebalances_per_hour: int = Field(default=20, json_schema_extra={"is_updatable": True})
     rebalance_open_timeout_sec: int = Field(default=300, json_schema_extra={"is_updatable": True})
 
-    auto_swap_enabled: bool = Field(default=True, json_schema_extra={"is_updatable": True})
-    swap_min_value_pct: Decimal = Field(default=Decimal("0.005"), json_schema_extra={"is_updatable": True})
-    swap_safety_buffer_pct: Decimal = Field(default=Decimal("0.02"), json_schema_extra={"is_updatable": True})
-    swap_slippage_pct: Decimal = Field(default=Decimal("0.01"), json_schema_extra={"is_updatable": True})
-    max_inventory_swap_attempts: int = Field(default=3, json_schema_extra={"is_updatable": True})
-    max_stoploss_liquidation_attempts: int = Field(default=5, json_schema_extra={"is_updatable": True})
-    inventory_drift_tolerance_pct: Decimal = Field(default=Decimal("0.01"), json_schema_extra={"is_updatable": True})
-    normalization_cooldown_sec: int = Field(default=30, json_schema_extra={"is_updatable": True})
-    normalization_min_value_pct: Decimal = Field(default=Decimal("0.005"), json_schema_extra={"is_updatable": True})
-    normalization_strict: bool = Field(default=False, json_schema_extra={"is_updatable": True})
-
-    cost_filter_enabled: bool = Field(default=False, json_schema_extra={"is_updatable": True})
-    cost_filter_fee_rate_bootstrap_quote_per_hour: Decimal = Field(
-        default=Decimal("0"),
-        json_schema_extra={"is_updatable": True},
-    )
-    cost_filter_fixed_cost_quote: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
-    cost_filter_max_payback_sec: int = Field(default=3600, json_schema_extra={"is_updatable": True})
+    exit_full_liquidation: bool = Field(default=False, json_schema_extra={"is_updatable": True})
+    exit_swap_slippage_pct: Decimal = Field(default=Decimal("0.01"), json_schema_extra={"is_updatable": True})
+    max_exit_swap_attempts: int = Field(default=5, json_schema_extra={"is_updatable": True})
 
     stop_loss_pnl_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     take_profit_pnl_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
@@ -77,7 +62,8 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     def update_markets(self, markets: MarketDict) -> MarketDict:
         pool_pair = self.pool_trading_pair or self.trading_pair
         markets = markets.add_or_update(self.connector_name, pool_pair)
-        markets = markets.add_or_update(self.router_connector, self.trading_pair)
+        if self.router_connector:
+            markets = markets.add_or_update(self.router_connector, self.trading_pair)
         return markets
 
 
@@ -175,8 +161,7 @@ class CLMMLPBaseController(ControllerBase):
         # 构建本 tick 的一致性快照。
         snapshot = self._refresh_snapshot(now)
         self._latest_snapshot = snapshot
-        # 基于 LP fee 更新费率估计（供 cost filter 使用）。
-        self._update_fee_rate_estimates(snapshot)
+        # 已移除 cost filter，避免在 tick 中做额外估计。
 
         # 周期性刷新 policy 输入（如 tick spacing），避免阻塞。
         connector = self.market_data_provider.connectors.get(self.config.connector_name)
@@ -215,7 +200,7 @@ class CLMMLPBaseController(ControllerBase):
         (
             risk_cap_quote,
             risk_equity_quote,
-            risk_wallet_contrib_quote,
+            _risk_wallet_contrib,
             lp_value_quote,
             wallet_value_quote,
         ) = self._compute_risk_values(snapshot, price)
@@ -227,10 +212,6 @@ class CLMMLPBaseController(ControllerBase):
         take_profit_trigger_quote = None
         if anchor is not None and anchor > 0 and self.config.take_profit_pnl_pct > 0:
             take_profit_trigger_quote = anchor * (Decimal("1") + self.config.take_profit_pnl_pct)
-
-        fee_rate_quote_per_hour = None
-        if self._ctx.fee.fee_rate_ewma is not None:
-            fee_rate_quote_per_hour = self._ctx.fee.fee_rate_ewma * Decimal("3600")
 
         realized_pnl_quote = self._ctx.realized_pnl_quote
         unrealized_pnl_quote: Optional[Decimal] = None
@@ -311,7 +292,6 @@ class CLMMLPBaseController(ControllerBase):
             "lp": {
                 "active_count": len(snapshot.active_lp),
                 "value_quote": _as_float(lp_value_quote),
-                "fee_rate_quote_per_hour": _as_float(fee_rate_quote_per_hour),
                 "positions": positions,
             },
             "swaps": {
@@ -319,10 +299,9 @@ class CLMMLPBaseController(ControllerBase):
                 "active": swaps,
             },
             "risk": {
-                "budget_mode": "soft_cap",
+                "budget_mode": "lp_only",
                 "cap_quote": _as_float(risk_cap_quote),
                 "equity_quote": _as_float(risk_equity_quote),
-                "wallet_contrib_quote": _as_float(risk_wallet_contrib_quote),
                 "anchor_quote": _as_float(anchor),
                 "stoploss_trigger_quote": _as_float(stoploss_trigger_quote),
                 "take_profit_trigger_quote": _as_float(take_profit_trigger_quote),
@@ -330,7 +309,7 @@ class CLMMLPBaseController(ControllerBase):
                 "pnl_unrealized_quote": _as_float(unrealized_pnl_quote),
                 "pnl_net_quote": _as_float(net_pnl_quote),
                 "pnl_net_pct": _as_float(net_pnl_pct),
-                "stoploss_liquidates_all_base": True,
+                "exit_full_liquidation": bool(self.config.exit_full_liquidation),
             },
             "rebalance": {
                 "out_of_range_since": self._ctx.out_of_range_since,
@@ -362,16 +341,10 @@ class CLMMLPBaseController(ControllerBase):
             else:
                 lp_value_quote = Decimal("0")
 
-        risk_wallet_contrib_quote: Optional[Decimal] = None
         risk_equity_quote: Optional[Decimal] = None
-        if wallet_value_quote is not None and lp_value_quote is not None:
-            if risk_cap_quote > 0:
-                risk_wallet_contrib_quote = max(Decimal("0"), min(wallet_value_quote, risk_cap_quote - lp_value_quote))
-                risk_equity_quote = lp_value_quote + risk_wallet_contrib_quote
-            else:
-                risk_wallet_contrib_quote = wallet_value_quote
-                risk_equity_quote = lp_value_quote + wallet_value_quote
-        return risk_cap_quote, risk_equity_quote, risk_wallet_contrib_quote, lp_value_quote, wallet_value_quote
+        if lp_value_quote is not None:
+            risk_equity_quote = lp_value_quote
+        return risk_cap_quote, risk_equity_quote, None, lp_value_quote, wallet_value_quote
 
     def _log_decision_metrics(self, decision, snapshot: Snapshot) -> None:
         price = snapshot.current_price
@@ -530,28 +503,6 @@ class CLMMLPBaseController(ControllerBase):
         quote_fee = abs(lp_view.quote_fee)
         return (base_amount + base_fee) * current_price + (quote_amount + quote_fee)
 
-    def _update_fee_rate_estimates(self, snapshot: Snapshot) -> None:
-        current_price = snapshot.current_price
-        if current_price is None or current_price <= 0:
-            return
-        if not snapshot.active_lp:
-            return
-        lp_view = snapshot.active_lp[0]
-        position_address = lp_view.position_address or ""
-        if not position_address:
-            return
-        # Skip fee-rate updates when executor reports out-of-range.
-        if lp_view.state == "OUT_OF_RANGE":
-            return
-        CostFilter.update_fee_rate_ewma(
-            now=snapshot.now,
-            position_address=position_address,
-            base_fee=lp_view.base_fee,
-            quote_fee=lp_view.quote_fee,
-            price=current_price,
-            ctx=self._ctx.fee,
-        )
-
     def _build_open_proposal(
         self,
         current_price: Optional[Decimal],
@@ -567,65 +518,55 @@ class CLMMLPBaseController(ControllerBase):
         total_value = max(Decimal("0"), total_value)
         if total_value <= 0:
             return None, "budget_unavailable"
-        range_plan = self._policy.range_plan(current_price)
-        if range_plan is None:
-            return None, "range_unavailable"
-        ratio = self._policy.quote_per_base_ratio(current_price, range_plan.lower, range_plan.upper)
-        if ratio is None:
-            return None, "ratio_unavailable"
         total_wallet_value = wallet_base * current_price + wallet_quote
-        reserve_quote = max(Decimal("0"), self.config.cost_filter_fixed_cost_quote)
         effective_budget = min(total_value, total_wallet_value)
-        if reserve_quote > 0:
-            effective_budget = max(Decimal("0"), effective_budget - reserve_quote)
         if effective_budget <= 0:
             return None, "insufficient_balance"
+        if wallet_base > 0 and wallet_quote > 0:
+            side = "both"
+        elif wallet_base > 0:
+            side = "base"
+        elif wallet_quote > 0:
+            side = "quote"
+        else:
+            return None, "insufficient_balance"
 
-        targets = self._policy.target_amounts_from_value(effective_budget, current_price, ratio)
-        if targets is None:
-            return None, "target_unavailable"
-        target_base, target_quote = targets
+        range_plan = self._policy.range_plan_for_side(current_price, side)
+        if range_plan is None:
+            return None, "range_unavailable"
 
-        open_base = min(wallet_base, target_base)
-        open_quote = min(wallet_quote, target_quote)
+        target_base = Decimal("0")
+        target_quote = Decimal("0")
+        open_base = Decimal("0")
+        open_quote = Decimal("0")
+
+        if side == "both":
+            ratio = self._policy.quote_per_base_ratio(current_price, range_plan.lower, range_plan.upper)
+            if ratio is None:
+                return None, "ratio_unavailable"
+            targets = self._policy.target_amounts_from_value(effective_budget, current_price, ratio)
+            if targets is None:
+                return None, "target_unavailable"
+            target_base, target_quote = targets
+            open_base = min(wallet_base, target_base)
+            open_quote = min(wallet_quote, target_quote)
+        elif side == "base":
+            target_base = min(wallet_base, effective_budget / current_price)
+            open_base = target_base
+        else:
+            target_quote = min(wallet_quote, effective_budget)
+            open_quote = target_quote
+
         if open_base <= 0 and open_quote <= 0:
             return None, "insufficient_balance"
 
-        base_deficit = max(Decimal("0"), target_base - wallet_base)
-        quote_deficit = max(Decimal("0"), target_quote - wallet_quote)
-        if base_deficit > 0 and quote_deficit > 0:
-            return None, "insufficient_balance"
-
-        delta_base = Decimal("0")
-        if base_deficit > 0:
-            quote_surplus = max(Decimal("0"), wallet_quote - target_quote)
-            if quote_surplus <= 0:
-                return None, "insufficient_balance"
-            delta_base = min(base_deficit, quote_surplus / current_price)
-        elif quote_deficit > 0:
-            base_surplus = max(Decimal("0"), wallet_base - target_base)
-            if base_surplus <= 0:
-                return None, "insufficient_balance"
-            delta_base = -min(base_surplus, quote_deficit / current_price)
-
-        min_pct = max(Decimal("0"), self.config.swap_min_value_pct)
-        min_swap_value = effective_budget * min_pct
-        delta_quote_value = abs(delta_base * current_price)
-        if open_base <= 0 or open_quote <= 0:
-            if not self.config.auto_swap_enabled:
-                return None, "swap_required"
-            if delta_quote_value <= 0 or delta_quote_value < min_swap_value:
-                return None, "swap_required"
         return OpenProposal(
             lower=range_plan.lower,
             upper=range_plan.upper,
-            target_base=target_base,
-            target_quote=target_quote,
-            delta_base=delta_base,
-            delta_quote_value=delta_quote_value,
             open_base=open_base,
             open_quote=open_quote,
-            min_swap_value_quote=min_swap_value,
+            target_base=target_base,
+            target_quote=target_quote,
         ), None
 
     def _clear_policy_update_task(self, task: asyncio.Task) -> None:

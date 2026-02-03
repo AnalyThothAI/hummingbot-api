@@ -1,61 +1,49 @@
-# CLMM LP controller local ledger (hybrid 120s)
+# CLMM LP controller balance snapshots (ledger removed)
 
 Problem
-- Symptom: after LP close/rebalance, inventory swaps can use stale wallet snapshots, leading to wrong swap direction and rapid quote depletion.
-- Essence: no single balance truth for the controller; executor events and connector snapshots are unsynchronized.
-- Impact: CLMM LP controller state machine (entry/rebalance/stoploss) and swap sizing/side decisions.
-- Acceptance: actions only advance when the ledger confirms the prior action or reconciliation completes; no repeated wrong-direction swaps.
+- Symptom: after LP close or exit swap, wallet snapshots can be stale, causing wrong sizing.
+- Essence: no ledger reconciliation; controller must rely on refreshed snapshots at key transitions.
+- Impact: CLMM LP exit swap sizing and post-close NAV reporting.
+- Acceptance: controller requests balance refresh on LP open/close and swap completion; exit swap uses fresh snapshots when available.
 
 Scope
-- Controller-local ledger only (no strategy_v2 core changes). Optional: add timestamp to LP executor balance_event.
+- Snapshot-only balance tracking (no strategy_v2 core changes).
 - Applies only to bots/controllers/generic/clmm_lp_*.
 
 Design overview
-- Maintain a ledger that ingests executor balance events (LP open/close deltas, swap deltas).
-- Use ledger balances for action planning. Wallet snapshots are only used for reconciliation after a 120s window.
-- State machine gates progress on event acknowledgement; if events are missing beyond the window, pause and reconcile.
+- Use BalanceManager to schedule refreshes and expose `balance_fresh`.
+- Request forced refresh when LP opens/closes and when swaps complete.
+- FSM does not gate progress on ledger events.
 
 Data model
-- BalanceEvent: {executor_id, seq, timestamp, kind, delta_base, delta_quote}.
-- LedgerState: {balance_base, balance_quote, last_event_ts, seen_event_ids, pending_action_id, pending_action_ts}.
-- Snapshot extends with balance_events and swap_events.
+- Snapshot: {wallet_base, wallet_quote, balance_fresh, lp views, swaps}.
 
 Data flow
-1) SnapshotBuilder parses executor custom_info into BalanceEvent list.
-2) Ledger applies events with de-duplication and ordering.
-3) FSM uses ledger balances for proposals and waits for event ack.
-4) If no ack within 120s, FSM enters SYNC_WAIT (or stays with reason=ledger_stale) and waits for reconciliation.
+1) BalanceManager refreshes balances on schedule or forced triggers.
+2) SnapshotBuilder builds a snapshot each tick.
+3) FSM uses snapshot balances for proposals and exit swaps.
 
 FSM gates (key points)
-- ENTRY_SWAP / REBALANCE_SWAP / STOPLOSS_SWAP: compute from ledger balance; record pending action; wait for swap delta or completion event.
-- ENTRY_OPEN / REBALANCE_OPEN: compute from ledger balance; wait for LP open event ack.
-- REBALANCE_STOP / STOPLOSS_STOP: wait for LP close event ack.
+- ENTRY_OPEN / REBALANCE_OPEN: compute from snapshot balances.
+- STOPLOSS_STOP / TAKE_PROFIT_STOP: wait for LP close event ack; optional EXIT_SWAP uses snapshot balances.
+- EXIT_SWAP: requests a balance refresh once if snapshot is stale.
 
-Reconciliation strategy (hybrid 120s)
-- If now - last_event_ts <= 120s: ledger is authoritative.
-- If >120s: require snapshot to be "close enough" (epsilon) before allowing new actions.
-- If reconciliation fails repeatedly, log ledger_stale and pause actions.
+Reconciliation strategy
+- No ledger reconciliation. Fresh snapshots are preferred; stale snapshots trigger a one-time refresh request.
 
 Failure handling
-- Missing events: time out into reconciliation.
-- Duplicate events: ignore via (executor_id, seq) or timestamp-based ids.
-- Out-of-order events: ignore if timestamp < last_event_ts.
+- Missing refresh: exit swap may proceed or be skipped based on retry attempts.
+- No event de-duplication required.
 
 Files to modify
-- bots/controllers/generic/clmm_lp_domain/components.py (BalanceEvent, LedgerState).
-- bots/controllers/generic/clmm_lp_domain/io.py (extract balance_event and swap deltas).
-- bots/controllers/generic/clmm_lp_domain/ledger.py (new).
-- bots/controllers/generic/clmm_lp_domain/clmm_fsm.py (gates and SYNC_WAIT logic).
-- bots/controllers/generic/clmm_lp_base.py (use ledger balances instead of BalanceManager for planning).
-- Optional: hummingbot/hummingbot/strategy_v2/executors/lp_position_executor/lp_position_executor.py (add timestamp to balance_event).
+- bots/controllers/generic/clmm_lp_domain/clmm_fsm.py (exit swap refresh).
+- bots/controllers/generic/clmm_lp_base.py (force refresh on LP open/close).
 
 Atomic tasks (single-commit sized)
-1) Add ledger data model and event extraction.
-2) Integrate ledger into FSM gates for swap/open/stop.
-3) Wire controller to use ledger balances for planning and NAV.
-4) Optional: add balance_event timestamp to LP executor.
+1) Ensure forced refresh on LP open/close and swap completion.
+2) Keep exit swap retry limits and refresh attempts bounded.
 
 Verification
-- Log-based: no repeated inventory swaps after LP close; swap direction matches post-close balances.
-- Behavior: if events missing, FSM pauses and resumes after snapshot reconciliation.
-- Metrics: active LP remains single; no duplicate swaps under normal event flow.
+- Log-based: exit swap uses refreshed balances when available.
+- Behavior: if balance stale, FSM issues refresh and continues after completion.
+- Metrics: active LP remains single; no duplicate swaps under normal flow.

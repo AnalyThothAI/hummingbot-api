@@ -1,21 +1,15 @@
 services:
   hummingbot-api:
     container_name: hummingbot-api
-    image: hummingbot/hummingbot-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hummingbot-api:local
     ports:
       - "18000:8000"
     volumes:
       - ./bots:/hummingbot-api/bots
       - /var/run/docker.sock:/var/run/docker.sock
-      # Development mounts - mount local code for live updates
-      - ./main.py:/hummingbot-api/main.py:ro
-      - ./config.py:/hummingbot-api/config.py:ro
-      - ./deps.py:/hummingbot-api/deps.py:ro
-      - ./services:/hummingbot-api/services:ro
-      - ./routers:/hummingbot-api/routers:ro
-      - ./database:/hummingbot-api/database:ro
-      - ./models:/hummingbot-api/models:ro
-      - ./utils:/hummingbot-api/utils:ro
     env_file:
       - .env
     networks:

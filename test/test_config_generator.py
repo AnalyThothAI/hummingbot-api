@@ -9,6 +9,9 @@ if DASHBOARD_DIR not in sys.path:
     sys.path.insert(0, DASHBOARD_DIR)
 
 from frontend.components import controller_config_generator as generator  # noqa: E402
+from frontend.components.controller_config_generator_helpers import (  # noqa: E402
+    select_default_controller_type_index,
+)
 
 
 class ConfigGeneratorTests(unittest.TestCase):
@@ -44,8 +47,8 @@ class ConfigGeneratorTests(unittest.TestCase):
         self.assertEqual(overrides, {"rebalance_enabled": True})
 
     def test_compute_param_overrides_treats_numeric_equal(self):
-        base = {"swap_min_value_pct": "0.005"}
-        values = {"swap_min_value_pct": 0.005}
+        base = {"exit_swap_slippage_pct": "0.005"}
+        values = {"exit_swap_slippage_pct": 0.005}
         overrides = generator.compute_param_overrides(base, values)
         self.assertEqual(overrides, {})
 
@@ -84,6 +87,14 @@ class ConfigGeneratorTests(unittest.TestCase):
         row = {"trading_pair": "ETH-USDT", "pool_trading_pair": None, "pool_address": "0xnew"}
         payload = generator.build_override_payload(base_config, row)
         self.assertEqual(payload["pool_address"], "0xnew")
+
+    def test_select_default_controller_type_index_prefers_generic(self):
+        types = ["directional_trading", "generic", "market_making"]
+        self.assertEqual(select_default_controller_type_index(types), 1)
+
+    def test_select_default_controller_type_index_falls_back_to_zero(self):
+        types = ["directional_trading", "market_making"]
+        self.assertEqual(select_default_controller_type_index(types), 0)
 
 
 if __name__ == "__main__":

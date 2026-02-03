@@ -341,6 +341,28 @@ class FileSystemUtil:
             logger.warning(f"Error loading controller class for '{controller_type}.{controller_name}': {e}")
         return None
 
+    @staticmethod
+    def load_controller_config_class_with_error(controller_type: str, controller_name: str) -> tuple[Optional[Type], Optional[str]]:
+        """
+        Load controller config class and return error detail if it fails.
+        """
+        try:
+            module_name = f"bots.controllers.{controller_type}.{controller_name.replace('.py', '')}"
+            if module_name not in sys.modules:
+                script_module = importlib.import_module(module_name)
+            else:
+                script_module = importlib.reload(sys.modules[module_name])
+
+            for _, cls in inspect.getmembers(script_module, inspect.isclass):
+                if (issubclass(cls, DirectionalTradingControllerConfigBase) and cls is not DirectionalTradingControllerConfigBase)\
+                        or (issubclass(cls, MarketMakingControllerConfigBase) and cls is not MarketMakingControllerConfigBase)\
+                        or (issubclass(cls, ControllerConfigBase) and cls is not ControllerConfigBase):
+                    return cls, None
+        except (ImportError, AttributeError, ModuleNotFoundError) as e:
+            logger.warning(f"Error loading controller class for '{controller_type}.{controller_name}': {e}")
+            return None, str(e)
+        return None, "Config class not found in module"
+
     def ensure_file_and_dump_text(self, file_path: str, text: str) -> None:
         """
         Ensures that the directory for the file exists, then writes text to a file.

@@ -231,7 +231,7 @@ def build_approval_plan(selected_controllers, controller_config_map):
         spenders = []
         if is_gateway_connector(connector_name):
             spenders.append(connector_name)
-        if config.get("auto_swap_enabled", False) and is_gateway_connector(router_connector):
+        if config.get("exit_full_liquidation", False) and is_gateway_connector(router_connector):
             spenders.append(router_connector)
         spenders = list(dict.fromkeys([spender for spender in spenders if spender]))
         if not spenders:
@@ -279,20 +279,31 @@ def evaluate_controller_config(config_id, config, gateway_network_id):
 
     base_amount = parse_decimal_value(config.get("base_amount"))
     quote_amount = parse_decimal_value(config.get("quote_amount"))
-    if base_amount is None and quote_amount is None:
+    position_value_quote = parse_decimal_value(config.get("position_value_quote"))
+    total_amount_quote = parse_decimal_value(config.get("total_amount_quote"))
+    has_budget = any(
+        value is not None and value > 0
+        for value in (
+            base_amount,
+            quote_amount,
+            position_value_quote,
+            total_amount_quote,
+        )
+    )
+    if not has_budget:
         issues.append({
             "Config": config_id,
             "Issue": "Budget is zero",
-            "Field": "base_amount / quote_amount",
-            "Fix": "Set at least one amount above 0.",
+            "Field": "budget (base_amount/quote_amount/position_value_quote/total_amount_quote)",
+            "Fix": "Set at least one budget field above 0.",
         })
 
-    if config.get("auto_swap_enabled") and not router_connector:
+    if config.get("exit_full_liquidation") and not router_connector:
         issues.append({
             "Config": config_id,
-            "Issue": "auto_swap_enabled without router_connector",
+            "Issue": "exit_full_liquidation without router_connector",
             "Field": "router_connector",
-            "Fix": "Set router_connector or disable auto_swap_enabled.",
+            "Fix": "Set router_connector or disable exit_full_liquidation.",
         })
 
     if connector_name and is_gateway_connector(connector_name) and not gateway_network_id:
@@ -995,7 +1006,13 @@ else:
 
             connector_name = config_data.get("connector_name", "Unknown")
             trading_pair = config_data.get("trading_pair", "Unknown")
-            total_amount_quote = float(config_data.get("total_amount_quote", 0))
+            position_value_quote = parse_decimal_value(config_data.get("position_value_quote"))
+            total_amount_quote = parse_decimal_value(config_data.get("total_amount_quote"))
+            budget_quote = 0.0
+            if position_value_quote is not None and position_value_quote > 0:
+                budget_quote = float(position_value_quote)
+            elif total_amount_quote is not None:
+                budget_quote = float(total_amount_quote)
 
             # Extract controller info
             controller_name = config_data.get("controller_name", config_name)
@@ -1018,7 +1035,7 @@ else:
                 "Controller Type": controller_type,
                 "Connector": connector_name,
                 "Trading Pair": trading_pair,
-                "Amount (USDT)": f"${total_amount_quote:,.2f}",
+                "Amount (USDT)": f"${budget_quote:,.2f}",
                 "_config_name": config_name  # Hidden column for reference
             })
 

@@ -17,6 +17,9 @@ class CLMMPolicyBase:
     def range_plan(self, center_price: Decimal) -> Optional[RangePlan]:
         raise NotImplementedError
 
+    def range_plan_for_side(self, center_price: Decimal, side: str) -> Optional[RangePlan]:
+        return self.range_plan(center_price)
+
     def quote_per_base_ratio(self, price: Decimal, lower: Decimal, upper: Decimal) -> Optional[Decimal]:
         raise NotImplementedError
 
@@ -87,6 +90,42 @@ class UniswapV3Policy(CLMMPolicyBase):
             return None
         return RangePlan(center_price=center_price, lower=aligned_lower, upper=aligned_upper)
 
+    def range_plan_for_side(self, center_price: Decimal, side: str) -> Optional[RangePlan]:
+        if side == "both":
+            return self.range_plan(center_price)
+        width = max(Decimal("0"), self._config.position_width_pct) / Decimal("100")
+        if width <= 0:
+            return None
+        if side == "base":
+            lower = center_price
+            upper = center_price * (Decimal("1") + width)
+        elif side == "quote":
+            lower = center_price * (Decimal("1") - width)
+            upper = center_price
+        else:
+            return self.range_plan(center_price)
+
+        if lower <= 0 or upper <= 0 or lower >= upper:
+            return None
+        if self._tick_spacing is None or self._tick_spacing <= 0:
+            return None
+
+        pool_lower, pool_upper = self._domain.strategy_bounds_to_pool(lower, upper)
+        aligned = RangeCalculator.align_bounds_to_ticks(
+            pool_lower,
+            pool_upper,
+            tick_spacing=self._tick_spacing,
+            tick_base=self._tick_base,
+        )
+        if aligned is None:
+            return None
+        aligned_lower, aligned_upper = self._domain.pool_bounds_to_strategy(
+            aligned[0], aligned[1], self._domain.pool_order_inverted
+        )
+        if aligned_lower >= aligned_upper:
+            return None
+        return RangePlan(center_price=center_price, lower=aligned_lower, upper=aligned_upper)
+
     def quote_per_base_ratio(self, price: Decimal, lower: Decimal, upper: Decimal) -> Optional[Decimal]:
         if self._tick_spacing is None or self._tick_spacing <= 0:
             return None
@@ -110,6 +149,23 @@ class UniswapV3Policy(CLMMPolicyBase):
 
 
 class MeteoraPolicy(CLMMPolicyBase):
+    def range_plan_for_side(self, center_price: Decimal, side: str) -> Optional[RangePlan]:
+        if side == "both":
+            return self.range_plan(center_price)
+        width = max(Decimal("0"), self._config.position_width_pct) / Decimal("100")
+        if width <= 0:
+            return None
+        if side == "base":
+            lower = center_price
+            upper = center_price * (Decimal("1") + width)
+        elif side == "quote":
+            lower = center_price * (Decimal("1") - width)
+            upper = center_price
+        else:
+            return self.range_plan(center_price)
+        if lower <= 0 or upper <= 0 or lower >= upper:
+            return None
+        return RangePlan(center_price=center_price, lower=lower, upper=upper)
     def range_plan(self, center_price: Decimal) -> Optional[RangePlan]:
         return RangeCalculator.geometric_plan(center_price, self._config.position_width_pct)
 

@@ -10,18 +10,18 @@ explicit state machine with lower coupling and fewer hidden gates.
 ## Goals
 - Replace implicit rule ordering with an explicit FSM.
 - Support a single active LP position per controller.
-- Keep entry, rebalance, stoploss, budget, and cost filter behavior.
+- Keep entry, rebalance, stoploss, take-profit, and budget behavior.
 - Simplify balance management to a snapshot service with minimal blocking.
 - Reduce coupling between stoploss, rebalance, and balance syncing logic.
 
 ## Non-Goals
 - Backward compatibility with the old controller internal structures.
 - Multi-LP support.
-- Manual kill switch and failure-blocked gating.
+- Removing manual kill switch or failure-blocked gating.
 
 ## Proposed Architecture
 - `clmm_lp_base.py` becomes a thin controller: build snapshot, refresh balances, call FSM, send actions.
-- New `clmm_lp_domain/fsm.py` encapsulates state transitions and action decisions.
+- New `clmm_lp_domain/clmm_fsm.py` encapsulates state transitions and action decisions.
 - `rebalance_engine.py` becomes a pure predicate helper (no plan queues).
 - `BalanceManager` becomes a balance snapshot service (no event deltas, no barriers).
 - `components.py` is simplified to core view and decision types only.
@@ -30,27 +30,25 @@ explicit state machine with lower coupling and fewer hidden gates.
 States:
 - IDLE
 - ENTRY_OPEN
-- ENTRY_SWAP
 - ACTIVE
 - REBALANCE_STOP
-- REBALANCE_SWAP
 - REBALANCE_OPEN
+- TAKE_PROFIT_STOP
 - STOPLOSS_STOP
-- STOPLOSS_SWAP
+- EXIT_SWAP
 - COOLDOWN
 
 Key transitions:
-- IDLE -> ENTRY_OPEN when entry conditions true and balance snapshot is fresh.
+- IDLE -> ENTRY_OPEN when entry conditions true.
 - ENTRY_OPEN -> ACTIVE after LP becomes active.
-- ENTRY_OPEN -> ENTRY_SWAP if inventory swap is required.
-- ENTRY_SWAP -> ENTRY_OPEN after swap completes.
 - ACTIVE -> REBALANCE_STOP when rebalance predicate is true.
-- REBALANCE_STOP -> REBALANCE_SWAP after LP is fully closed.
-- REBALANCE_SWAP -> REBALANCE_OPEN after swap completes or if no swap needed.
+- REBALANCE_STOP -> REBALANCE_OPEN after LP is fully closed.
 - REBALANCE_OPEN -> ACTIVE after LP becomes active.
+- ACTIVE -> TAKE_PROFIT_STOP when take-profit triggers.
 - ACTIVE -> STOPLOSS_STOP when stoploss triggers.
-- STOPLOSS_STOP -> STOPLOSS_SWAP after LP is fully closed.
-- STOPLOSS_SWAP -> COOLDOWN after full base is swapped to quote.
+- TAKE_PROFIT_STOP -> EXIT_SWAP/IDLE after LP is fully closed.
+- STOPLOSS_STOP -> EXIT_SWAP/COOLDOWN after LP is fully closed.
+- EXIT_SWAP -> COOLDOWN/IDLE after swap completes.
 - COOLDOWN -> IDLE after cooldown expires (if reenter disabled, remain IDLE).
 
 The FSM stores `state`, `state_since_ts`, and a small set of context fields to avoid hidden control flow.
@@ -61,23 +59,22 @@ Responsibilities:
 - Track `last_update_ts` and provide `is_fresh(now)` for gating entry or swap actions.
 
 Behavior:
-- Only entry and rebalance swap/open states require fresh balances.
-- All other FSM states proceed without blocking on balance freshness.
+- FSM does not block on balance freshness; it requests refresh on key events (LP open/close, swap completion).
 - No balance delta events, no barriers, no optimistic adjustments.
 
 ## Stoploss Simplification
 Anchor calculation:
-- On entering ACTIVE, record anchor as `lp_value + wallet_value` at that time, capped by budget.
+- On entering ACTIVE, record anchor as `lp_value` at that time, capped by budget.
 
 Stoploss flow:
 - Triggered when equity <= anchor * (1 - stop_loss_pnl_pct).
-- Stop LP, then sell all wallet base into quote via a swap.
-- No liquidation target tracking, no pending flags, no reliance on balance events.
+- Stop LP, then (if `exit_full_liquidation`) sell all wallet base into quote via a swap.
+- No liquidation target tracking, no reliance on balance events.
 
 ## Rebalance Simplification
 `RebalanceEngine` becomes pure logic:
 - `should_rebalance(snapshot, ctx)` returns a boolean and reason.
-- Conditions retain hysteresis, out_of_range_since, rebalance_seconds, cooldown, and cost filter.
+- Conditions retain hysteresis, out_of_range_since, rebalance_seconds, and cooldown.
 
 The FSM handles stop, swap, and open sequencing explicitly.
 
@@ -92,7 +89,7 @@ The FSM handles stop, swap, and open sequencing explicitly.
 - anchor_value_quote
 - last_rebalance_ts, rebalance_timestamps
 - pending_lp_id, pending_swap_id
-- stoploss_swap_attempts, last_decision_reason
+- exit_swap_attempts, exit_balance_refresh_attempts, last_decision_reason
 
 `Decision`:
 - actions
@@ -101,14 +98,14 @@ The FSM handles stop, swap, and open sequencing explicitly.
 
 ## Error Handling
 - Failures log and retry with cooldown, no global blocking.
-- Stoploss swap failures retry up to max attempts, then enter COOLDOWN with a reason.
+- Exit swap failures retry up to max attempts, then enter COOLDOWN/IDLE with a reason.
 - Rebalance open failures retry in REBALANCE_OPEN after cooldown.
 
 ## Observability
 `get_custom_info()` provides:
 - state, state_since, last_reason
 - anchor_value_quote, cooldown_remaining
-- rebalance_due, balance_fresh
+- rebalance_due
 - active_lp_count, active_swap_count
 
 ## Migration Plan
@@ -120,8 +117,8 @@ The FSM handles stop, swap, and open sequencing explicitly.
 
 ## Testing Plan
 - FSM transitions: entry, rebalance, stoploss, cooldown.
-- Balance freshness gate only blocks entry and swap.
-- CostFilter + hysteresis boundary cases.
+- Take-profit and exit swap transitions.
+- Hysteresis boundary cases.
 
 ## Acceptance Criteria
 - No implicit rule ordering in controller.

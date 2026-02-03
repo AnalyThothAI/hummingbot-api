@@ -30,21 +30,13 @@ class DummyConfig:
         self.hysteresis_pct = Decimal("0")
         self.cooldown_seconds = 0
         self.max_rebalances_per_hour = 0
-        self.cost_filter_enabled = False
-        self.cost_filter_fee_rate_bootstrap_quote_per_hour = Decimal("0")
-        self.auto_swap_enabled = False
-        self.swap_slippage_pct = Decimal("0")
-        self.cost_filter_fixed_cost_quote = Decimal("0")
-        self.cost_filter_max_payback_sec = 0
+        self.rebalance_open_timeout_sec = 0
+        self.exit_full_liquidation = False
+        self.exit_swap_slippage_pct = Decimal("0")
+        self.max_exit_swap_attempts = 0
         self.stop_loss_pnl_pct = Decimal("0")
         self.take_profit_pnl_pct = Decimal("0")
         self.reenter_enabled = True
-        self.max_inventory_swap_attempts = 0
-        self.inventory_drift_tolerance_pct = Decimal("0")
-        self.normalization_cooldown_sec = 0
-        self.normalization_min_value_pct = Decimal("0")
-        self.normalization_strict = False
-        self.max_stoploss_liquidation_attempts = 0
 
 
 def _dummy_build_open_proposal(*_args, **_kwargs):
@@ -108,12 +100,6 @@ def test_rebalance_disabled_when_flag_missing():
         hysteresis_pct=Decimal("0"),
         cooldown_seconds=0,
         max_rebalances_per_hour=0,
-        cost_filter_enabled=False,
-        cost_filter_fee_rate_bootstrap_quote_per_hour=Decimal("0"),
-        auto_swap_enabled=False,
-        swap_slippage_pct=Decimal("0"),
-        cost_filter_fixed_cost_quote=Decimal("0"),
-        cost_filter_max_payback_sec=0,
     )
     engine = RebalanceEngine(config=config, estimate_position_value=_estimate_position_value)
     lp_view = _make_lp_view(state=None, lower=Decimal("100"), upper=Decimal("150"))

@@ -36,22 +36,14 @@ class DummyConfig:
         self.hysteresis_pct = Decimal("0")
         self.cooldown_seconds = 0
         self.max_rebalances_per_hour = 0
-        self.cost_filter_enabled = False
-        self.cost_filter_fee_rate_bootstrap_quote_per_hour = Decimal("0")
-        self.auto_swap_enabled = False
-        self.swap_slippage_pct = Decimal("0")
-        self.cost_filter_fixed_cost_quote = Decimal("0")
-        self.cost_filter_max_payback_sec = 0
+        self.rebalance_open_timeout_sec = 0
+        self.exit_full_liquidation = False
+        self.exit_swap_slippage_pct = Decimal("0")
+        self.max_exit_swap_attempts = 0
         self.stop_loss_pnl_pct = Decimal("0")
         self.take_profit_pnl_pct = Decimal("0")
         self.stop_loss_pause_sec = 0
         self.reenter_enabled = True
-        self.max_inventory_swap_attempts = 0
-        self.inventory_drift_tolerance_pct = Decimal("0")
-        self.normalization_cooldown_sec = 0
-        self.normalization_min_value_pct = Decimal("0")
-        self.normalization_strict = False
-        self.max_stoploss_liquidation_attempts = 0
         self.position_value_quote = Decimal("0")
         self.target_price = Decimal("0")
         self.trigger_above = True
@@ -142,7 +134,7 @@ def test_risk_equity_caps_wallet_excess():
 
     equity = fsm._compute_risk_equity_value(snapshot, lp_view, Decimal("0.05"), None)
 
-    assert equity == Decimal("30")
+    assert equity == Decimal("20")
 
 
 def test_risk_equity_ignores_wallet_excess():
@@ -159,7 +151,7 @@ def test_risk_equity_ignores_wallet_excess():
 
     equity = fsm._compute_risk_equity_value(snapshot, lp_view, Decimal("0.05"), None)
 
-    assert equity == Decimal("30")
+    assert equity == Decimal("20")
 
 
 def test_stoploss_triggers_when_equity_below_threshold():
@@ -243,8 +235,29 @@ def test_stoploss_without_lp_transitions_to_swap():
 
     decision = fsm.step(snapshot, ctx)
 
-    assert decision.reason == "stop_loss_idle"
-    assert ctx.state.value == "STOPLOSS_SWAP"
+    assert decision.reason == "entry_unavailable"
+    assert ctx.state.value == "IDLE"
+
+
+def test_stoploss_without_lp_transitions_to_exit_swap_when_enabled():
+    config = DummyConfig()
+    config.stop_loss_pnl_pct = Decimal("0.1")
+    config.exit_full_liquidation = True
+    fsm = _make_fsm(config)
+    snapshot = _make_snapshot(
+        now=410,
+        price=Decimal("0.018"),
+        lp_view=None,
+        wallet_base=Decimal("1000"),
+    )
+    ctx = ControllerContext()
+    ctx.state = ctx.state.IDLE
+    ctx.anchor_value_quote = Decimal("30")
+
+    decision = fsm.step(snapshot, ctx)
+
+    assert decision.reason == "entry_unavailable"
+    assert ctx.state.value == "IDLE"
 
 
 def test_price_unavailable_blocks_actions():

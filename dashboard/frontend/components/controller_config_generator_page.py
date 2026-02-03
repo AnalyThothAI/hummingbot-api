@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from frontend.components import controller_config_generator as generator
+from frontend.components.controller_config_generator_helpers import select_default_controller_type_index
 from frontend.components.gateway_registry import render_gateway_pool_picker
 from frontend.components.gateway_registry.common import is_gateway_connector
 from frontend.st_utils import backend_api_request, get_backend_api_client
@@ -240,7 +241,13 @@ def render_config_generator_page() -> None:
 
     st.info("1) Select controller")
     with st.container(border=True):
-        selected_type = st.selectbox("Controller Type", controller_types, key="gen_controller_type")
+        default_type_index = select_default_controller_type_index(controller_types)
+        selected_type = st.selectbox(
+            "Controller Type",
+            controller_types,
+            index=default_type_index,
+            key="gen_controller_type",
+        )
         controller_names = sorted(controllers.get(selected_type, []))
         if not controller_names:
             st.info("No controllers available for the selected type.")

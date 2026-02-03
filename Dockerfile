@@ -3,7 +3,7 @@ FROM continuumio/miniconda3 AS builder
 
 # Install build dependencies
 RUN apt-get update && \
-    apt-get install -y python3-dev gcc && \
+    apt-get install -y python3-dev gcc g++ && \
     rm -rf /var/lib/apt/lists/*
 
 # Set working directory
@@ -16,6 +16,11 @@ COPY environment.yml .
 RUN conda env create -f environment.yml && \
     conda clean -afy && \
     rm -rf /root/.cache/pip/*
+
+# Install local Hummingbot from source for production stability
+COPY hummingbot ./hummingbot
+RUN /opt/conda/envs/hummingbot-api/bin/pip install --no-cache-dir cython && \
+    /opt/conda/envs/hummingbot-api/bin/pip install --no-cache-dir ./hummingbot
 
 # Stage 2: Runtime stage
 FROM continuumio/miniconda3

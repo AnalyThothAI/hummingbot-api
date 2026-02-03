@@ -140,12 +140,8 @@ class SnapshotBuilder:
 
     @staticmethod
     def _swap_purpose(level_id: Optional[str]) -> Optional[SwapPurpose]:
-        if level_id == SwapPurpose.INVENTORY.value:
-            return SwapPurpose.INVENTORY
-        if level_id == SwapPurpose.INVENTORY_REBALANCE.value:
-            return SwapPurpose.INVENTORY_REBALANCE
-        if level_id == SwapPurpose.STOPLOSS.value:
-            return SwapPurpose.STOPLOSS
+        if level_id == SwapPurpose.EXIT_LIQUIDATION.value:
+            return SwapPurpose.EXIT_LIQUIDATION
         return None
 
 
@@ -423,7 +419,7 @@ class ActionFactory:
         return CreateExecutorAction(controller_id=self._config.id, executor_config=executor_config)
 
     def swap_slippage_pct(self) -> Decimal:
-        return max(Decimal("0"), self._config.swap_slippage_pct) * Decimal("100")
+        return max(Decimal("0"), self._config.exit_swap_slippage_pct) * Decimal("100")
 
     def build_swap_action(
         self,
@@ -433,14 +429,11 @@ class ActionFactory:
         side: TradeType,
         amount: Decimal,
         amount_in_is_quote: bool,
-        apply_buffer: bool,
     ) -> Optional[CreateExecutorAction]:
         if amount <= 0:
             return None
-        if apply_buffer:
-            amount = self._apply_swap_buffer(amount)
-            if amount <= 0:
-                return None
+        if not self._config.router_connector:
+            return None
         executor_config = GatewaySwapExecutorConfig(
             timestamp=now,
             connector_name=self._config.router_connector,
@@ -458,16 +451,8 @@ class ActionFactory:
             executor_config=executor_config,
         )
 
-    def _apply_swap_buffer(self, amount: Decimal) -> Decimal:
-        buffer_pct = max(Decimal("0"), self._config.swap_safety_buffer_pct)
-        if buffer_pct <= 0:
-            return amount
-        if buffer_pct >= 1:
-            return Decimal("0")
-        return amount * (Decimal("1") - buffer_pct)
-
     def _create_lp_executor_config(self, proposal: "OpenProposal", now: float) -> Optional[LPPositionExecutorConfig]:
-        if proposal.open_base <= 0 or proposal.open_quote <= 0:
+        if proposal.open_base <= 0 and proposal.open_quote <= 0:
             return None
         lower_price, upper_price = proposal.lower, proposal.upper
         lp_base_amt, lp_quote_amt = self._domain.strategy_amounts_to_pool(

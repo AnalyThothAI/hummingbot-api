@@ -239,12 +239,12 @@ async def get_controller_config_template(controller_type: ControllerType, contro
     Raises:
         HTTPException: 404 if controller configuration class not found
     """
-    config_class = fs_util.load_controller_config_class(controller_type.value, controller_name)
+    config_class, error = fs_util.load_controller_config_class_with_error(controller_type.value, controller_name)
     if config_class is None:
-        raise HTTPException(
-            status_code=404, 
-            detail=f"Controller configuration class for '{controller_name}' not found"
-        )
+        detail = f"Controller configuration class for '{controller_name}' not found"
+        if error:
+            detail = f"{detail}. Import error: {error}"
+        raise HTTPException(status_code=404, detail=detail)
 
     # Extract fields and default values
     config_fields = {name: {"default": field.default,
@@ -262,12 +262,12 @@ async def get_controller_config_schema(controller_type: ControllerType, controll
     Returns:
         Dict with schema, defaults, and field metadata
     """
-    config_class = fs_util.load_controller_config_class(controller_type.value, controller_name)
+    config_class, error = fs_util.load_controller_config_class_with_error(controller_type.value, controller_name)
     if config_class is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Controller configuration class for '{controller_name}' not found",
-        )
+        detail = f"Controller configuration class for '{controller_name}' not found"
+        if error:
+            detail = f"{detail}. Import error: {error}"
+        raise HTTPException(status_code=404, detail=detail)
     return build_controller_config_schema(config_class)
 
 @router.post("/{controller_type}/{controller_name}/config/validate")
@@ -286,12 +286,12 @@ async def validate_controller_config(controller_type: ControllerType, controller
     Raises:
         HTTPException: 400 if validation fails
     """
-    config_class = fs_util.load_controller_config_class(controller_type.value, controller_name)
+    config_class, error = fs_util.load_controller_config_class_with_error(controller_type.value, controller_name)
     if config_class is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Controller configuration class for '{controller_name}' not found"
-        )
+        detail = f"Controller configuration class for '{controller_name}' not found"
+        if error:
+            detail = f"{detail}. Import error: {error}"
+        raise HTTPException(status_code=404, detail=detail)
 
     try:
         config_class(**config)  # Validate by instantiating the model

@@ -20,20 +20,11 @@ rebalance_seconds: 60
 hysteresis_pct: 0.002
 cooldown_seconds: 30
 max_rebalances_per_hour: 20
+rebalance_open_timeout_sec: 300
 
-auto_swap_enabled: true
-swap_min_value_pct: 0.005
-swap_safety_buffer_pct: 0.02
-swap_slippage_pct: 0.03
-inventory_drift_tolerance_pct: 0.01
-normalization_cooldown_sec: 30
-normalization_min_value_pct: 0.005
-normalization_strict: false
-
-cost_filter_enabled: false
-cost_filter_fee_rate_bootstrap_quote_per_hour: 0
-cost_filter_fixed_cost_quote: 0
-cost_filter_max_payback_sec: 3600
+exit_full_liquidation: true
+exit_swap_slippage_pct: 0.03
+max_exit_swap_attempts: 5
 
 stop_loss_pnl_pct: 0.1
 stop_loss_pause_sec: 1800

@@ -36,22 +36,14 @@ class DummyConfig:
         self.hysteresis_pct = Decimal("0")
         self.cooldown_seconds = 0
         self.max_rebalances_per_hour = 0
-        self.cost_filter_enabled = False
-        self.cost_filter_fee_rate_bootstrap_quote_per_hour = Decimal("0")
-        self.auto_swap_enabled = False
-        self.swap_slippage_pct = Decimal("0")
-        self.cost_filter_fixed_cost_quote = Decimal("0")
-        self.cost_filter_max_payback_sec = 0
+        self.rebalance_open_timeout_sec = 0
+        self.exit_full_liquidation = False
+        self.exit_swap_slippage_pct = Decimal("0")
+        self.max_exit_swap_attempts = 0
         self.stop_loss_pnl_pct = Decimal("0")
         self.take_profit_pnl_pct = Decimal("0.1")
         self.stop_loss_pause_sec = 0
         self.reenter_enabled = True
-        self.max_inventory_swap_attempts = 0
-        self.inventory_drift_tolerance_pct = Decimal("0")
-        self.normalization_cooldown_sec = 0
-        self.normalization_min_value_pct = Decimal("0")
-        self.normalization_strict = False
-        self.max_stoploss_liquidation_attempts = 0
         self.position_value_quote = Decimal("0")
         self.target_price = Decimal("0")
         self.trigger_above = True
@@ -187,5 +179,31 @@ def test_take_profit_stop_transitions_to_idle_after_close():
 
     decision = fsm.step(snapshot, ctx)
 
-    assert decision.reason in {"take_profit_done", "take_profit_closed"}
+    assert decision.reason == "take_profit_closed"
     assert ctx.state.value == "IDLE"
+
+
+def test_take_profit_stop_transitions_to_exit_swap_when_enabled():
+    config = DummyConfig()
+    config.exit_full_liquidation = True
+    engine = RebalanceEngine(config=config, estimate_position_value=_estimate_position_value)
+    fsm = CLMMFSM(
+        config=config,
+        action_factory=None,
+        build_open_proposal=_dummy_build_open_proposal,
+        estimate_position_value=_estimate_position_value,
+        rebalance_engine=engine,
+        exit_policy=ExitPolicy(config=config),
+    )
+    lp_view = _make_lp_view(state=LPPositionStates.COMPLETE.value, done=True, position=False)
+    snapshot = _make_snapshot(now=3100, price=Decimal("1"), lp_view=lp_view)
+    ctx = ControllerContext()
+    ctx.state = ctx.state.TAKE_PROFIT_STOP
+    ctx.pending_close_lp_id = "lp1"
+    ctx.anchor_value_quote = Decimal("100")
+    ctx.pending_realized_anchor = Decimal("100")
+
+    decision = fsm.step(snapshot, ctx)
+
+    assert decision.reason == "take_profit_exit_swap"
+    assert ctx.state.value == "EXIT_SWAP"

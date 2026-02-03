@@ -1,0 +1,14 @@
+services:
+  hummingbot-api:
+    command: ["--reload"]
+    volumes:
+      - ./bots:/hummingbot-api/bots
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./main.py:/hummingbot-api/main.py:ro
+      - ./config.py:/hummingbot-api/config.py:ro
+      - ./deps.py:/hummingbot-api/deps.py:ro
+      - ./routers:/hummingbot-api/routers:ro
+      - ./services:/hummingbot-api/services:ro
+      - ./utils:/hummingbot-api/utils:ro
+      - ./models:/hummingbot-api/models:ro
+      - ./database:/hummingbot-api/database:ro

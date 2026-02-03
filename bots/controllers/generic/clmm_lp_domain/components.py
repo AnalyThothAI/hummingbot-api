@@ -11,21 +11,17 @@ from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
 class ControllerState(str, Enum):
     IDLE = "IDLE"
     ENTRY_OPEN = "ENTRY_OPEN"
-    ENTRY_SWAP = "ENTRY_SWAP"
     ACTIVE = "ACTIVE"
     REBALANCE_STOP = "REBALANCE_STOP"
-    REBALANCE_SWAP = "REBALANCE_SWAP"
     REBALANCE_OPEN = "REBALANCE_OPEN"
     TAKE_PROFIT_STOP = "TAKE_PROFIT_STOP"
     STOPLOSS_STOP = "STOPLOSS_STOP"
-    STOPLOSS_SWAP = "STOPLOSS_SWAP"
+    EXIT_SWAP = "EXIT_SWAP"
     COOLDOWN = "COOLDOWN"
 
 
 class SwapPurpose(str, Enum):
-    INVENTORY = "inventory"
-    INVENTORY_REBALANCE = "inventory_rebalance"
-    STOPLOSS = "liquidate"
+    EXIT_LIQUIDATION = "exit_liquidation"
 
 
 @dataclass(frozen=True)
@@ -170,22 +166,10 @@ class Snapshot:
 class OpenProposal:
     lower: Decimal
     upper: Decimal
-    target_base: Decimal
-    target_quote: Decimal
-    delta_base: Decimal
-    delta_quote_value: Decimal
     open_base: Decimal
     open_quote: Decimal
-    min_swap_value_quote: Decimal
-
-
-@dataclass
-class FeeEstimatorContext:
-    fee_rate_ewma: Optional[Decimal] = None
-    last_base_fee: Optional[Decimal] = None
-    last_quote_fee: Optional[Decimal] = None
-    last_fee_ts: Optional[float] = None
-    last_position_address: Optional[str] = None
+    target_base: Decimal
+    target_quote: Decimal
 
 
 @dataclass(frozen=True)
@@ -214,12 +198,8 @@ class ControllerContext:
     pending_swap_id: Optional[str] = None
     pending_swap_since_ts: float = 0.0
     pending_swap_purpose: Optional[SwapPurpose] = None
-    inventory_swap_attempts: int = 0
-    last_inventory_swap_ts: float = 0.0
-    normalization_swap_attempts: int = 0
-    last_normalization_swap_ts: float = 0.0
-    stoploss_swap_attempts: int = 0
-    last_stoploss_swap_ts: float = 0.0
+    exit_swap_attempts: int = 0
+    last_exit_swap_ts: float = 0.0
     last_exit_reason: Optional[str] = None
     last_decision_reason: Optional[str] = None
     out_of_range_since: Optional[float] = None
@@ -228,9 +208,7 @@ class ControllerContext:
     pending_realized_anchor: Optional[Decimal] = None
     force_balance_refresh_until_ts: float = 0.0
     force_balance_refresh_reason: Optional[str] = None
-    stoploss_balance_refresh_attempts: int = 0
-    inventory_balance_refresh_attempts: int = 0
-    fee: FeeEstimatorContext = field(default_factory=FeeEstimatorContext)
+    exit_balance_refresh_attempts: int = 0
 
 
 @dataclass(frozen=True)

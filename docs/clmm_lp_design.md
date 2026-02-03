@@ -12,8 +12,8 @@
 
 **要改的部分（可读、可维护、契约清晰）**
 - 把 token 顺序/反转问题集中到 `TokenOrderMapper`（适配层）。
-- 把成本过滤独立成模块：`bots/controllers/generic/clmm_lp_domain/cost_filter.py`。
-- Controller 主流程固定为：`snapshot -> reconcile -> decide -> apply_patch -> actions`（实现在 `clmm_lp_base.py`）。
+- 移除成本过滤与自动 swap/normalization 路径，保留“退出时可选 liquidation swap”。
+- Controller 主流程固定为：`snapshot -> fsm.step -> actions`（实现在 `clmm_lp_base.py`）。
 - 日志只保留关键异常/告警，不做大量节流/Debug 采样逻辑（避免性能与维护负担）。
 
 ## 2. 文件入口
@@ -22,7 +22,6 @@
 - Controller（Uniswap）：`bots/controllers/generic/clmm_lp_uniswap.py`
 - Controller（Meteora）：`bots/controllers/generic/clmm_lp_meteora.py`
 - Types / Adapters / Context：`bots/controllers/generic/clmm_lp_domain/components.py`
-- Cost Filter：`bots/controllers/generic/clmm_lp_domain/cost_filter.py`
 - 配置示例：`bots/conf/controllers/clmm_lp_uniswap.yml` / `bots/conf/controllers/clmm_lp_meteora.yml`
 - 官方参考（对比用）：`hummingbot/controllers/generic/lp_manager.py`
 - LP Executor：`hummingbot/hummingbot/strategy_v2/executors/lp_position_executor/`
@@ -62,29 +61,26 @@ Controller 通过 `TokenOrderMapper` 统一做三件事：
 ### 4.2 Portfolio & Budget（观测层）
 Controller 维护的钱包与派生数据：
 - `wallet_base/wallet_quote`：来自 connector balances（按策略 `trading_pair` 的 token）。
-- `BudgetAnchor`：用于 stoploss 的“预算切片锚定值”（按 quote 计价），按 `executor_id` 存在 `ControllerContext.lp[executor_id].anchor`。
-- `FeeEstimatorContext`：用于 cost filter 的 fee_rate EWMA（按 `position_address` 绑定）。
+- `BudgetAnchor`：用于 stoploss 的“预算切片锚定值”（按 quote 计价），存在 `ControllerContext.anchor_value_quote`。
 
 ### 4.3 Flow（决策层）
 三个 flow（都在 `clmm_lp_base.py` 内，以 `Decision/Intent` 表达）：
-- Entry：入场前必要时做 inventory swap，然后开 LP。
-- Rebalance：出界 -> stop ->（延时）-> 必要时 inventory swap -> reopen。
-- StopLoss：触发后 stop 全部 LP，进入冷却；可选执行 liquidation swap（base->quote）。
+- Entry：直接按钱包余额开 LP（支持单边或双边）。
+- Rebalance：出界 -> stop -> reopen（不做 inventory swap）。
+- StopLoss/TakeProfit：触发后 stop 全部 LP；根据 `exit_full_liquidation` 决定是否执行 liquidation swap（base->quote）。
 
 ## 5. Controller 边界（完全对齐 v2 实践）
 
 ### 5.1 `update_processed_data()`：观测与视图
 - 允许做 IO：刷新 balances。
-- 允许做“观测驱动”的 ctx 更新：reconcile 已完成 swap、更新 anchors、更新 fee EWMA。
+- 允许做“观测驱动”的 ctx 更新：检测 LP 开/关仓并触发强制余额刷新。
 - 构建 `Snapshot` 并缓存到 `_latest_snapshot`，同时输出基础 `processed_data`（价格/余额/active executors 列表）。
 
 ### 5.2 `determine_executor_actions()`：决策与状态推进
 - 读取 `_latest_snapshot`（或当次构建），然后：
-  1) reconcile（done swaps、rebalance plans、out-of-range since）
-  2) `decision = _decide(snapshot)`
-  3) `_apply_patch(decision.patch)`（只在这里推进策略状态）
-  4) 返回 `decision.actions`
-- 同时输出完整 `processed_data`：`controller_state`、`intent_*`、rebalance/stoploss 关键字段。
+  1) `decision = fsm.step(snapshot, ctx)`
+  2) 返回 `decision.actions`
+- 同时输出完整 `processed_data`：`state`、`risk`、`rebalance`、`lp/swaps` 等关键字段。
 
 ## 6. 决策优先级（规则树）
 
@@ -93,12 +89,13 @@ Controller 维护的钱包与派生数据：
 2) `lp_failure_detected`（进入 failure block，需要人工）
 3) 任意 swap executor active（全局串行，直接 WAIT）
 4) stoploss（触发则 stop 全部 LP，并进入冷却/可选 liquidation）
-5) rebalance stop（符合条件则对对应 LP 发 stop，并创建 plan）
-6) 有 active LP 且无 rebalance plan（保持 ACTIVE/WAIT）
-7) pending liquidation（提交 liquidation swap）
-8) stoploss cooldown（等待）
-9) rebalance reopen（延时到期后执行 swap/open）
-10) entry（触发则 swap/open，否则 idle）
+5) take-profit（触发则 stop LP）
+6) rebalance stop（符合条件则对对应 LP 发 stop）
+7) 有 active LP 且无 rebalance plan（保持 ACTIVE/WAIT）
+8) exit liquidation（执行 base->quote swap）
+9) stoploss cooldown（等待）
+10) rebalance reopen（延时到期后执行 open）
+11) entry（触发则 open，否则 idle）
 
 ## 7. 为什么我们的 Rebalance 比官方 `lp_manager` 更复杂？
 
@@ -108,9 +105,9 @@ Controller 维护的钱包与派生数据：
 - 不做 inventory swap、不做预算锁、不做 stoploss、不做 cost filter、不处理 “action 只是建议、可能不被执行” 的情况。
 
 而 `clmm_lp_base` 的 rebalance 复杂，主要来自四类“必须处理的真实约束”：
-1) **多 executor**：每个 LP 都可能独立 out-of-range，需要按 `executor_id` 保存独立 plan（`RebalanceContext.plans`）。
-2) **动作互斥**：rebalance reopen 前可能需要 inventory swap，swap 期间必须全局暂停 LP 开/关仓。
-3) **频率/冷却/成本**：`hysteresis_pct`、`cooldown_seconds`、`max_rebalances_per_hour` 与 `cost_filter_*` 都会影响“是否 stop、何时 stop”。
+1) **并发保护**：同一 controller 只允许一个 LP 与一个 swap 活跃，避免互相干扰。
+2) **动作互斥**：swap 与 LP 变更串行化（exit swap 期间暂停 LP 开/关仓）。
+3) **频率/冷却**：`hysteresis_pct`、`cooldown_seconds`、`max_rebalances_per_hour` 会影响“是否 stop、何时 stop”。
 4) **Controller/Strategy 契约**：Controller 输出的是 actions proposal，不应假设一定执行；因此需要：
    - STOP 阶段幂等重复输出 `StopExecutorAction`，直到观测到 LP 已关闭；
    - OPEN 阶段有超时回退（避免永远卡住）。
@@ -127,42 +124,39 @@ Controller 维护的钱包与派生数据：
 - `now - out_of_range_since >= rebalance_seconds`
 - `now - last_rebalance_ts >= cooldown_seconds`
 - `_can_rebalance_now()` 通过（`max_rebalances_per_hour`）
-- 若启用 cost filter：`CostFilter.allow_rebalance(...)` 通过；否则可能被 `should_force_rebalance()` 强制放行
 
 ### 8.2 阶段（显式 FSM）
 - `REBALANCE_STOP`：对 LP 幂等发 stop，直到观测到 LP 已关闭。
-- `REBALANCE_SWAP`：若需要 inventory swap，则执行并等待完成。
 - `REBALANCE_OPEN`：发送 open action，若超时则回退到 `IDLE`。
 
-## 9. Cost Filter（独立模块）
+## 9. Cost Filter（已移除）
 
-位置：`bots/controllers/generic/clmm_lp_domain/cost_filter.py`，职责是：
-- 从 `LPView` 的 pending fees（转换成 quote）更新 `FeeEstimatorContext.fee_rate_ewma`。
-- 依据固定窗口 `IN_RANGE_TIME_SEC` 与成本估算（fixed + swap 摩擦）判断是否允许 rebalance。
-- 提供 `should_force_rebalance()`：长时间 out-of-range 允许绕过过滤，避免永远不 rebalance。
+已移除成本过滤与相关上下文，rebalance 仅基于价格越界 + 冷却/频率条件判断。
 
 ## 10. StopLoss 与 liquidation
 
 - StopLoss 基于 anchor equity（quote 计价）：
-  - equity = deployed_value（含 fees） + wallet_value
+  - equity = LP deployed_value（含 fees，仅 LP 资产）
   - 低于阈值则触发：stop LP，进入 `stop_loss_pause_sec` 冷却。
-- LP stop 完成后，触发一次全额 base -> quote 清算（按钱包快照）。
+- LP stop 完成后，若 `exit_full_liquidation=true`，触发一次全额 base -> quote 清算（按钱包快照）。
 - Take-profit（`take_profit_pnl_pct`）触发后进入 `TAKE_PROFIT_STOP`：
   - 发送 `StopExecutorAction` 关闭 LP
-  - LP 关闭完成后回到 `IDLE`
-  - 不做 swap（只平仓 LP）
+  - LP 关闭完成后回到 `IDLE`，或在 `exit_full_liquidation=true` 时进入 `EXIT_SWAP`
+  - 不做 inventory swap（只平仓 LP）
   - 若 `reenter_enabled=false`，止盈/止损后不再自动入场（需手动重启/更新配置）
 
 ## 11. `processed_data`（对外观测字段）
 
 关键字段（以当前实现为准）：
-- 价格/余额：`current_price`、`wallet_base`、`wallet_quote`
-- view state：`controller_state`、`state_reason`
-- intent：`intent_flow`、`intent_stage`、`intent_reason`
-- stoploss：`pending_liquidation`、`stop_loss_active`、`stop_loss_until_ts`
-- rebalance：`rebalance_pending`、`rebalance_plans`
-- failure：`lp_failure_blocked`
-- executors：`active_lp`、`active_swaps`
+- state：`state.value` / `state.since` / `state.reason`
+- heartbeat：`heartbeat.last_tick_ts` / `heartbeat.tick_age_sec`
+- price：`price.value` / `price.source` / `price.timestamp`
+- wallet：`wallet.base` / `wallet.quote` / `wallet.value_quote`
+- lp：`lp.active_count` / `lp.value_quote` / `lp.positions`
+- swaps：`swaps.active_count` / `swaps.active`
+- risk：`risk.anchor_quote` / `risk.equity_quote` / `risk.exit_full_liquidation`
+- rebalance：`rebalance.out_of_range_since` / `rebalance.count_1h` / `rebalance.signal_reason`
+- diagnostics：`diagnostics.balance_fresh` / `diagnostics.domain_ready`
 
 ## 12. 配置要点（防止方向配错）
 
@@ -175,10 +169,13 @@ Controller 维护的钱包与派生数据：
 - `rebalance_enabled` 默认 `false`，需要时显式设为 `true`
 - `rebalance_seconds <= 0` 等价于禁用 rebalance
 - `reenter_enabled` 默认 `false`，为 `false` 时止盈/止损后不再自动入场
+- `exit_full_liquidation` 控制止盈/止损后是否执行 base->quote 清算
+- `exit_swap_slippage_pct` 控制清算 swap 的滑点上限
+- `max_exit_swap_attempts` 控制清算 swap 的最大尝试次数
 
 示例：`bots/conf/controllers/clmm_lp_uniswap.yml` / `bots/conf/controllers/clmm_lp_meteora.yml`（已给出）。
 
 ## 13. 验收（最小可验证标准）
 
-- 编译检查：`python -m py_compile bots/controllers/generic/clmm_lp_base.py bots/controllers/generic/clmm_lp_uniswap.py bots/controllers/generic/clmm_lp_meteora.py bots/controllers/generic/clmm_lp_domain/components.py bots/controllers/generic/clmm_lp_domain/cost_filter.py`
+- 编译检查：`python -m py_compile bots/controllers/generic/clmm_lp_base.py bots/controllers/generic/clmm_lp_uniswap.py bots/controllers/generic/clmm_lp_meteora.py bots/controllers/generic/clmm_lp_domain/components.py`
 - 运行观察：启动 bot 后 `processed_data` 中不再出现 `router_price` 字段；rebalance/stoploss/entry 的 intent 与 actions 能对应到实际 executors 状态变化。

@@ -122,7 +122,7 @@ This MCP module is intended for **plan-first** automation. Agents should build a
 
 ### 2.5) Approvals (Deploy V2 UI logic)
 - Tokens = base+quote from `trading_pair`
-- Spenders = `connector_name` (gateway) + `router_connector` (when `auto_swap_enabled` is true)
+- Spenders = `connector_name` (gateway) + `router_connector` (when `exit_full_liquidation` is true)
 - Check: `gateway_allowances` with `{network_id, address: wallet_address, tokens, spender}`
 - Treat allowance >= 1e10 as "Unlimited"; if not, call `gateway_approve` for each missing token+spender
 

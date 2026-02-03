@@ -3,7 +3,6 @@ from decimal import Decimal
 from typing import Callable, Tuple
 
 from .components import ControllerContext, LPView, Snapshot
-from .cost_filter import CostFilter
 
 EstimatePositionValue = Callable[[LPView, Decimal], Decimal]
 
@@ -49,25 +48,6 @@ class RebalanceEngine:
             return RebalanceSignal(False, "cooldown")
         if not self._can_rebalance_now(now, ctx):
             return RebalanceSignal(False, "max_rebalances")
-
-        allow_rebalance = CostFilter.allow_rebalance(
-            enabled=self._config.cost_filter_enabled,
-            position_value=self._estimate_position_value(lp_view, effective_price),
-            fee_rate_ewma=ctx.fee.fee_rate_ewma,
-            fee_rate_bootstrap_quote_per_hour=self._config.cost_filter_fee_rate_bootstrap_quote_per_hour,
-            auto_swap_enabled=self._config.auto_swap_enabled,
-            swap_slippage_pct=max(Decimal("0"), self._config.swap_slippage_pct) * Decimal("100"),
-            fixed_cost_quote=self._config.cost_filter_fixed_cost_quote,
-            max_payback_sec=self._config.cost_filter_max_payback_sec,
-        )
-        if not allow_rebalance and CostFilter.should_force_rebalance(
-            now=now,
-            out_of_range_since=out_of_range_since,
-            rebalance_seconds=self._config.rebalance_seconds,
-        ):
-            allow_rebalance = True
-        if not allow_rebalance:
-            return RebalanceSignal(False, "cost_filter")
 
         return RebalanceSignal(True, "out_of_range_rebalance")
 
