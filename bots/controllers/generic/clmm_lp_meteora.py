@@ -13,6 +13,10 @@ class CLMMLPMeteoraConfig(clmm_lp_base.CLMMLPBaseConfig):
     connector_name: str = "meteora/clmm"
     router_connector: str = "jupiter/router"
     trading_pair: str = "SOL-USDC"
+    pool_trading_pair: Optional[str] = Field(
+        default=None,
+        json_schema_extra={"is_updatable": True, "hidden": True},
+    )
 
     ratio_edge_buffer_pct: Decimal = Field(default=Decimal("0.02"), json_schema_extra={"is_updatable": True})
     strategy_type: Optional[int] = Field(default=None, json_schema_extra={"is_updatable": True})

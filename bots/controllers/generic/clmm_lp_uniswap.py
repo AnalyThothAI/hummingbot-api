@@ -21,6 +21,10 @@ class CLMMLPUniswapConfig(clmm_lp_base.CLMMLPBaseConfig):
     router_connector: str = "uniswap/router"
     trading_pair: str = "ETH-USDC"
     pool_address: str = ""
+    pool_trading_pair: Optional[str] = Field(
+        default=None,
+        json_schema_extra={"is_updatable": True, "hidden": True},
+    )
 
     ratio_clamp_tick_multiplier: int = Field(default=2, json_schema_extra={"is_updatable": True})
 

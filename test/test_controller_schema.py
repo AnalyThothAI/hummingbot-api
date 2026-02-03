@@ -45,6 +45,24 @@ class BrokenSchemaConfig:
         raise RuntimeError("boom")
 
 
+class HiddenFieldConfig:
+    model_fields = {
+        "visible": _DummyField("ok", annotation=str),
+        "secret": _DummyField("nope", annotation=str, json_schema_extra={"hidden": True}),
+    }
+
+    @staticmethod
+    def model_json_schema():
+        return {
+            "type": "object",
+            "properties": {
+                "visible": {"type": "string", "default": "ok"},
+                "secret": {"type": "string", "default": "nope"},
+            },
+            "required": ["visible", "secret"],
+        }
+
+
 class ControllerSchemaTests(unittest.TestCase):
     def test_build_controller_config_schema_includes_defaults_and_meta(self):
         payload = build_controller_config_schema(DummyConfig)
@@ -69,6 +87,15 @@ class ControllerSchemaTests(unittest.TestCase):
         self.assertEqual(props["count"]["type"], "integer")
         self.assertEqual(props["enabled"]["type"], "boolean")
         self.assertEqual(props["name"]["type"], "string")
+
+    def test_build_controller_config_schema_hides_hidden_fields(self):
+        payload = build_controller_config_schema(HiddenFieldConfig)
+        schema = payload["schema"]
+        props = schema.get("properties", {})
+        self.assertIn("visible", props)
+        self.assertNotIn("secret", props)
+        self.assertNotIn("secret", payload["defaults"])
+        self.assertNotIn("secret", payload["meta"])
 
 
 if __name__ == "__main__":

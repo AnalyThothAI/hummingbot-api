@@ -19,8 +19,13 @@ def parse_override_rows(raw_text: str) -> List[Dict[str, Optional[str]]]:
         values = [value.strip() for value in values]
 
         trading_pair = values[0] if len(values) >= 1 and values[0] else None
-        pool_trading_pair = values[1] if len(values) >= 2 and values[1] else None
-        pool_address = values[2] if len(values) >= 3 and values[2] else None
+        pool_trading_pair = None
+        pool_address = None
+        if len(values) == 2:
+            pool_address = values[1] if values[1] else None
+        elif len(values) >= 3:
+            pool_trading_pair = values[1] if values[1] else None
+            pool_address = values[2] if values[2] else None
 
         rows.append({
             "line_no": line_no,
@@ -58,10 +63,9 @@ def is_valid_trading_pair(value: Optional[str]) -> bool:
 
 
 def _needs_pool_trading_pair(base_config: Dict) -> bool:
-    connector_name = str(base_config.get("connector_name") or "")
     if "pool_trading_pair" in base_config:
         return True
-    return "/clmm" in connector_name or "/amm" in connector_name
+    return False
 
 
 def _row_key(row: Dict[str, Optional[str]]) -> str:

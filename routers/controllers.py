@@ -247,10 +247,19 @@ async def get_controller_config_template(controller_type: ControllerType, contro
         raise HTTPException(status_code=404, detail=detail)
 
     # Extract fields and default values
-    config_fields = {name: {"default": field.default,
-                            "type": field.annotation,
-                            "required": field.required if hasattr(field, 'required') else False,
-                            } for name, field in config_class.model_fields.items()}
+    def _is_hidden(field) -> bool:
+        extra = getattr(field, "json_schema_extra", None)
+        return isinstance(extra, dict) and extra.get("hidden") is True
+
+    config_fields = {}
+    for name, field in config_class.model_fields.items():
+        if _is_hidden(field):
+            continue
+        config_fields[name] = {
+            "default": field.default,
+            "type": field.annotation,
+            "required": field.required if hasattr(field, "required") else False,
+        }
     return json.loads(json.dumps(config_fields, default=str))
 
 

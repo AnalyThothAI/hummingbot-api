@@ -62,6 +62,28 @@ def _build_schema_from_fields(config_class: Type) -> Dict[str, Any]:
     }
 
 
+def _prune_schema(schema: Dict[str, Any], hidden_fields: set) -> Dict[str, Any]:
+    if not hidden_fields or not isinstance(schema, dict):
+        return schema
+    pruned = dict(schema)
+    properties = pruned.get("properties")
+    if isinstance(properties, dict):
+        filtered = dict(properties)
+        for name in hidden_fields:
+            filtered.pop(name, None)
+        pruned["properties"] = filtered
+    required = pruned.get("required")
+    if isinstance(required, list):
+        pruned["required"] = [item for item in required if item not in hidden_fields]
+    all_of = pruned.get("allOf")
+    if isinstance(all_of, list):
+        pruned["allOf"] = [
+            _prune_schema(item, hidden_fields) if isinstance(item, dict) else item
+            for item in all_of
+        ]
+    return pruned
+
+
 def build_controller_config_schema(config_class: Type) -> Dict[str, Any]:
     schema = {}
     if hasattr(config_class, "model_json_schema"):
@@ -81,6 +103,13 @@ def build_controller_config_schema(config_class: Type) -> Dict[str, Any]:
         defaults[name] = default
         json_schema_extra = getattr(field, "json_schema_extra", None) or {}
         meta[name] = dict(json_schema_extra) if isinstance(json_schema_extra, dict) else {}
+
+    hidden_fields = {name for name, info in meta.items() if info.get("hidden") is True}
+    if hidden_fields:
+        for name in hidden_fields:
+            defaults.pop(name, None)
+            meta.pop(name, None)
+        schema = _prune_schema(schema, hidden_fields)
 
     payload = {
         "schema": schema,

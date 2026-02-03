@@ -26,6 +26,14 @@ class ConfigGeneratorTests(unittest.TestCase):
         self.assertEqual(rows[1]["pool_trading_pair"], "SOL-USDT")
         self.assertEqual(rows[1]["pool_address"], "0xabc")
 
+    def test_parse_override_rows_two_columns_treats_second_as_pool_address(self):
+        raw = "SOL-USDT, 0xabc"
+        rows = generator.parse_override_rows(raw)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["trading_pair"], "SOL-USDT")
+        self.assertIsNone(rows[0]["pool_trading_pair"])
+        self.assertEqual(rows[0]["pool_address"], "0xabc")
+
     def test_pool_to_override_row_uses_base_quote_when_missing_pair(self):
         pool = {"base": "SOL", "quote": "USDC", "address": "0xpool"}
         row = generator.pool_to_override_row(pool)
@@ -76,11 +84,17 @@ class ConfigGeneratorTests(unittest.TestCase):
         self.assertTrue(any("pool_address" in err for err in errors))
 
     def test_build_override_payload_defaults_pool_trading_pair_for_clmm(self):
-        base_config = {"connector_name": "raydium/clmm", "trading_pair": "ETH-USDT"}
+        base_config = {"connector_name": "raydium/clmm", "trading_pair": "ETH-USDT", "pool_trading_pair": None}
         row = {"trading_pair": "SOL-USDT", "pool_trading_pair": None, "pool_address": None}
         payload = generator.build_override_payload(base_config, row)
         self.assertEqual(payload["trading_pair"], "SOL-USDT")
         self.assertEqual(payload["pool_trading_pair"], "SOL-USDT")
+
+    def test_build_override_payload_skips_pool_trading_pair_when_missing(self):
+        base_config = {"connector_name": "uniswap/clmm", "trading_pair": "ETH-USDT"}
+        row = {"trading_pair": "SOL-USDT", "pool_trading_pair": "SOL-USDT", "pool_address": None}
+        payload = generator.build_override_payload(base_config, row)
+        self.assertNotIn("pool_trading_pair", payload)
 
     def test_build_override_payload_overrides_pool_address_when_provided(self):
         base_config = {"trading_pair": "ETH-USDT", "pool_address": "0xold"}
