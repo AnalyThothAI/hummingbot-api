@@ -9,7 +9,6 @@ if DASHBOARD_DIR not in sys.path:
     sys.path.insert(0, DASHBOARD_DIR)
 
 from frontend.components import controller_config_generator as generator  # noqa: E402
-from frontend.components.clmm_config_generator import template_section  # noqa: E402
 
 
 class ConfigGeneratorTests(unittest.TestCase):
@@ -37,25 +36,6 @@ class ConfigGeneratorTests(unittest.TestCase):
         merged = generator.merge_override_rows(existing, new, prefer_new=True)
         self.assertEqual(len(merged), 1)
         self.assertEqual(merged[0]["pool_address"], "0xnew")
-
-    def test_extract_defaults_from_template(self):
-        template_fields = {
-            "controller_name": {"default": "clmm_lp_uniswap"},
-            "position_value_quote": {"default": "0.3"},
-            "rebalance_enabled": {"default": False},
-            "strategy_type": {"default": None},
-        }
-        defaults = template_section.extract_defaults_from_template(template_fields)
-        self.assertEqual(defaults["controller_name"], "clmm_lp_uniswap")
-        self.assertEqual(defaults["position_value_quote"], "0.3")
-        self.assertFalse(defaults["rebalance_enabled"])
-        self.assertIsNone(defaults["strategy_type"])
-
-    def test_select_template_defaults_prefers_config_data(self):
-        config_data = {"controller_name": "clmm_lp_uniswap", "position_value_quote": 1}
-        template_fields = {"position_value_quote": {"default": 0.3}}
-        selected = template_section.select_template_defaults(config_data, template_fields)
-        self.assertEqual(selected, config_data)
 
     def test_compute_param_overrides_filters_unchanged_and_none(self):
         base = {"position_value_quote": 10, "rebalance_enabled": False}

@@ -7,6 +7,7 @@ from starlette import status
 
 from models import Controller, ControllerType
 from utils.file_system import fs_util
+from utils.controller_schema import build_controller_config_schema
 
 router = APIRouter(tags=["Controllers"], prefix="/controllers")
 
@@ -251,6 +252,23 @@ async def get_controller_config_template(controller_type: ControllerType, contro
                             "required": field.required if hasattr(field, 'required') else False,
                             } for name, field in config_class.model_fields.items()}
     return json.loads(json.dumps(config_fields, default=str))
+
+
+@router.get("/{controller_type}/{controller_name}/config/schema")
+async def get_controller_config_schema(controller_type: ControllerType, controller_name: str):
+    """
+    Get controller configuration schema with defaults and metadata.
+
+    Returns:
+        Dict with schema, defaults, and field metadata
+    """
+    config_class = fs_util.load_controller_config_class(controller_type.value, controller_name)
+    if config_class is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Controller configuration class for '{controller_name}' not found",
+        )
+    return build_controller_config_schema(config_class)
 
 @router.post("/{controller_type}/{controller_name}/config/validate")
 async def validate_controller_config(controller_type: ControllerType, controller_name: str, config: Dict):

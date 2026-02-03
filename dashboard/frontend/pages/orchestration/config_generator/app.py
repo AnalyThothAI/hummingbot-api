@@ -1,4 +1,4 @@
-from frontend.components.clmm_config_generator import render_config_generator_page
+from frontend.components.controller_config_generator_page import render_config_generator_page
 from frontend.st_utils import initialize_st_page
 
 initialize_st_page(show_readme=False)
