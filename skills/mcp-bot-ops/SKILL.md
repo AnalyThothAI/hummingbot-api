@@ -18,14 +18,16 @@ Covers three workflows via MCP tools:
 
 ## Swap flow (unified trading/swap)
 Inputs: `chainNetwork`, `baseToken`, `quoteToken`, `amount`, `side`, optional `connector`, `slippagePct`, `walletAddress`.
+Slippage is a percentage (0-100). `1` means 1%. `0.01` means 0.01% (1 bp).
 1. `gateway_swap_quote` and summarize `amountOut`, `priceImpactPct`, `minAmountOut`.
 2. Confirm execution parameters (amount, slippage, connector, wallet).
-3. If EVM allowance error:
-   - `gateway_allowances` with `{network_id: chainNetwork, address: walletAddress, tokens: [baseToken], spender}`
-   - Ask before `gateway_approve`.
-   - Spender is typically connector name without `/type` (e.g., `pancakeswap`, `uniswap`). If unsure, ask.
-4. `gateway_swap_execute`.
-5. Verify via `gateway_swaps_status` or `gateway_swaps_search`.
+3. If `chainNetwork` starts with `ethereum-`, handle allowance before execute when `walletAddress` is known.
+4. Derive token-in: `SELL` uses `baseToken`, `BUY` uses `quoteToken`.
+5. Derive spender: if `connector` is set, use the part before `/` (e.g., `pancakeswap/router` -> `pancakeswap`). If unknown, ask.
+6. Pre-check allowance (EVM only): `gateway_allowances` with `{network_id: chainNetwork, address: walletAddress, tokens: [token_in], spender}`.
+7. If allowance is missing or below required, ask for approval and call `gateway_approve` with no `amount` (unlimited).
+8. `gateway_swap_execute`.
+9. Verify via `gateway_swaps_status` or `gateway_swaps_search`.
 
 ## Deploy V2 flow (plan-first)
 Inputs: `deployment_type`, `instance_name`, `credentials_profile`, `network_id` or `gateway_network_id`, `connector_name`, `pool_type`, `pool_address` or token addresses, `tokens`, optional `wallet_address`, `spender`, plus `controllers_config` or `script` + `script_config`.

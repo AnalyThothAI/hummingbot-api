@@ -69,6 +69,7 @@ Inputs use the unified fields:
 - `baseToken`, `quoteToken` (symbol or address)
 - `amount`, `side` (`BUY`/`SELL`)
 - Optional: `connector` (e.g., `pancakeswap/router`), `slippagePct`, `walletAddress`
+  - `slippagePct` is a percentage (0-100). `1` = 1%, `0.01` = 0.01% (1 bp).
 
 Example (quote):
 ```json
