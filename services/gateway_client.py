@@ -426,54 +426,55 @@ class GatewayClient:
 
     async def quote_swap(
         self,
-        connector: str,
-        network: str,
-        base_asset: str,
-        quote_asset: str,
+        chain_network: str,
+        base_token: str,
+        quote_token: str,
         amount: float,
         side: str,
         slippage_pct: Optional[float] = None,
-        pool_address: Optional[str] = None
+        connector: Optional[str] = None,
     ) -> Dict:
-        """Get a quote for a swap"""
+        """Get a quote for a swap via the unified Gateway trading/swap endpoint."""
         payload = {
-            "network": network,
-            "baseToken": base_asset,
-            "quoteToken": quote_asset,
-            "amount": str(amount),
-            "side": side.upper()
+            "chainNetwork": chain_network,
+            "baseToken": base_token,
+            "quoteToken": quote_token,
+            "amount": amount,
+            "side": side.upper(),
         }
         if slippage_pct is not None:
             payload["slippagePct"] = slippage_pct
-        if pool_address:
-            payload["poolAddress"] = pool_address
+        if connector:
+            payload["connector"] = connector
 
-        return await self._request("GET", f"connectors/{connector}/router/quote-swap", params=payload)
+        return await self._request("GET", "trading/swap/quote", params=payload)
 
     async def execute_swap(
         self,
-        connector: str,
-        network: str,
+        chain_network: str,
         wallet_address: str,
-        base_asset: str,
-        quote_asset: str,
+        base_token: str,
+        quote_token: str,
         amount: float,
         side: str,
-        slippage_pct: Optional[float] = None
+        slippage_pct: Optional[float] = None,
+        connector: Optional[str] = None,
     ) -> Dict:
-        """Execute a swap"""
+        """Execute a swap via the unified Gateway trading/swap endpoint."""
         payload = {
-            "network": network,
+            "chainNetwork": chain_network,
             "walletAddress": wallet_address,
-            "baseToken": base_asset,
-            "quoteToken": quote_asset,
-            "amount": str(amount),
-            "side": side.upper()
+            "baseToken": base_token,
+            "quoteToken": quote_token,
+            "amount": amount,
+            "side": side.upper(),
         }
         if slippage_pct is not None:
             payload["slippagePct"] = slippage_pct
+        if connector:
+            payload["connector"] = connector
 
-        return await self._request("POST", f"connectors/{connector}/router/execute-swap", json=payload)
+        return await self._request("POST", "trading/swap/execute", json=payload)
 
     async def execute_quote(
         self,

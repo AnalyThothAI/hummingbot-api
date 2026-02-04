@@ -55,7 +55,8 @@ from routers import (
     docker,
     # executors,
     gateway,
-    gateway_swap,
+    gateway_trading_swap,
+    gateway_swaps,
     gateway_clmm,
     market_data,
     metadata,
@@ -314,7 +315,8 @@ app.include_router(accounts.router, dependencies=[Depends(auth_user)])
 app.include_router(connectors.router, dependencies=[Depends(auth_user)])
 app.include_router(portfolio.router, dependencies=[Depends(auth_user)])
 app.include_router(trading.router, dependencies=[Depends(auth_user)])
-app.include_router(gateway_swap.router, dependencies=[Depends(auth_user)])
+app.include_router(gateway_trading_swap.router, dependencies=[Depends(auth_user)])
+app.include_router(gateway_swaps.router, dependencies=[Depends(auth_user)])
 app.include_router(gateway_clmm.router, dependencies=[Depends(auth_user)])
 app.include_router(metadata.router, dependencies=[Depends(auth_user)])
 app.include_router(bot_orchestration.router, dependencies=[Depends(auth_user)])

@@ -213,22 +213,34 @@ def _gateway_approve(arguments: dict, http_client: McpHttpClient) -> Any:
 
 
 def _gateway_swap_quote(arguments: dict, http_client: McpHttpClient) -> Any:
-    payload = _pick_params(arguments, ["connector", "network", "trading_pair", "side", "amount", "slippage_pct"])
-    for key in ("connector", "network", "trading_pair", "side", "amount"):
+    payload = _pick_params(
+        arguments,
+        ["chainNetwork", "connector", "baseToken", "quoteToken", "amount", "side", "slippagePct"],
+    )
+    for key in ("chainNetwork", "baseToken", "quoteToken", "amount", "side"):
         if key not in payload:
             raise ValueError(f"{key} is required")
-    return http_client.post("/gateway/swap/quote", json_body=payload)
+    return http_client.get("/gateway/trading/swap/quote", params=payload)
 
 
 def _gateway_swap_execute(arguments: dict, http_client: McpHttpClient) -> Any:
     payload = _pick_params(
         arguments,
-        ["connector", "network", "trading_pair", "side", "amount", "slippage_pct", "wallet_address"],
+        [
+            "chainNetwork",
+            "connector",
+            "baseToken",
+            "quoteToken",
+            "amount",
+            "side",
+            "slippagePct",
+            "walletAddress",
+        ],
     )
-    for key in ("connector", "network", "trading_pair", "side", "amount"):
+    for key in ("chainNetwork", "baseToken", "quoteToken", "amount", "side"):
         if key not in payload:
             raise ValueError(f"{key} is required")
-    return http_client.post("/gateway/swap/execute", json_body=payload)
+    return http_client.post("/gateway/trading/swap/execute", json_body=payload)
 
 
 def _gateway_swaps_status(arguments: dict, http_client: McpHttpClient) -> Any:
@@ -842,36 +854,38 @@ _TOOL_SPECS: List[ToolSpec] = [
     ),
     ToolSpec(
         name="gateway_swap_quote",
-        description="Get a swap quote via Gateway router.",
+        description="Get a swap quote via Gateway trading/swap (unified).",
         input_schema={
             "type": "object",
             "properties": {
+                "chainNetwork": {"type": "string"},
                 "connector": {"type": "string"},
-                "network": {"type": "string"},
-                "trading_pair": {"type": "string"},
+                "baseToken": {"type": "string"},
+                "quoteToken": {"type": "string"},
                 "side": {"type": "string"},
                 "amount": {"type": "number"},
-                "slippage_pct": {"type": "number"},
+                "slippagePct": {"type": "number"},
             },
-            "required": ["connector", "network", "trading_pair", "side", "amount"],
+            "required": ["chainNetwork", "baseToken", "quoteToken", "side", "amount"],
         },
         handler=_gateway_swap_quote,
     ),
     ToolSpec(
         name="gateway_swap_execute",
-        description="Execute a swap via Gateway router.",
+        description="Execute a swap via Gateway trading/swap (unified).",
         input_schema={
             "type": "object",
             "properties": {
+                "chainNetwork": {"type": "string"},
                 "connector": {"type": "string"},
-                "network": {"type": "string"},
-                "trading_pair": {"type": "string"},
+                "baseToken": {"type": "string"},
+                "quoteToken": {"type": "string"},
                 "side": {"type": "string"},
                 "amount": {"type": "number"},
-                "slippage_pct": {"type": "number"},
-                "wallet_address": {"type": "string"},
+                "slippagePct": {"type": "number"},
+                "walletAddress": {"type": "string"},
             },
-            "required": ["connector", "network", "trading_pair", "side", "amount"],
+            "required": ["chainNetwork", "baseToken", "quoteToken", "side", "amount"],
         },
         handler=_gateway_swap_execute,
     ),

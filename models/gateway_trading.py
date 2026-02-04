@@ -1,8 +1,6 @@
 """
 Models for Gateway DEX trading operations.
-Supports swaps via routers (Jupiter, 0x) and CLMM liquidity positions (Meteora, Raydium, Uniswap V3).
-
-Note: AMM support has been removed. Use Router for simple swaps, CLMM for liquidity provision.
+Supports unified swaps via Gateway trading/swap endpoints and CLMM liquidity positions.
 """
 from typing import Optional, List, Dict, Any
 from pydantic import BaseModel, Field
@@ -14,46 +12,76 @@ from decimal import Decimal
 # ============================================
 
 class SwapQuoteRequest(BaseModel):
-    """Request for swap price quote"""
-    connector: str = Field(description="DEX router connector (e.g., 'jupiter', '0x')")
-    network: str = Field(description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta', 'ethereum-mainnet')")
-    trading_pair: str = Field(description="Trading pair in BASE-QUOTE format (e.g., 'SOL-USDC')")
+    """Request for unified swap price quote (Gateway trading/swap)."""
+    chain_network: str = Field(
+        alias="chainNetwork",
+        description="Chain and network (e.g., 'solana-mainnet-beta', 'ethereum-bsc')",
+    )
+    connector: Optional[str] = Field(
+        default=None,
+        description="Optional connector/type (e.g., 'jupiter/router', 'uniswap/clmm')",
+    )
+    base_token: str = Field(alias="baseToken", description="Symbol or address of the base token")
+    quote_token: str = Field(alias="quoteToken", description="Symbol or address of the quote token")
+    amount: Decimal = Field(description="Amount to swap")
     side: str = Field(description="Trade side: 'BUY' or 'SELL'")
-    amount: Decimal = Field(description="Amount to swap (in base token for SELL, quote token for BUY)")
-    slippage_pct: Optional[Decimal] = Field(default=1.0, description="Maximum slippage percentage (default: 1.0)")
+    slippage_pct: Optional[Decimal] = Field(default=None, alias="slippagePct", description="Slippage percentage")
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class SwapQuoteResponse(BaseModel):
-    """Response with swap quote details"""
-    base: str = Field(description="Base token symbol")
-    quote: str = Field(description="Quote token symbol")
-    price: Decimal = Field(description="Quoted price (base/quote)")
-    amount: Decimal = Field(description="Amount specified in request (BUY: base amount to receive, SELL: base amount to sell)")
-    amount_in: Optional[Decimal] = Field(default=None, description="Actual input amount (BUY: quote to spend, SELL: base to sell)")
-    amount_out: Optional[Decimal] = Field(default=None, description="Actual output amount (BUY: base to receive, SELL: quote to receive)")
-    expected_amount: Optional[Decimal] = Field(default=None, description="Deprecated: use amount_out instead")
-    slippage_pct: Decimal = Field(description="Applied slippage percentage")
-    gas_estimate: Optional[Decimal] = Field(default=None, description="Estimated gas cost")
+    """Response with unified swap quote details (Gateway trading/swap)."""
+    token_in: str = Field(alias="tokenIn", description="Address of the token being swapped from")
+    token_out: str = Field(alias="tokenOut", description="Address of the token being swapped to")
+    amount_in: Decimal = Field(alias="amountIn", description="Amount of tokenIn to be swapped")
+    amount_out: Decimal = Field(alias="amountOut", description="Expected amount of tokenOut to receive")
+    price: Decimal = Field(description="Exchange rate between tokenIn and tokenOut")
+    price_impact_pct: Decimal = Field(alias="priceImpactPct", description="Estimated price impact percentage")
+    min_amount_out: Decimal = Field(alias="minAmountOut", description="Minimum amount of tokenOut that will be accepted")
+    max_amount_in: Decimal = Field(alias="maxAmountIn", description="Maximum amount of tokenIn that will be spent")
+    pool_address: Optional[str] = Field(default=None, alias="poolAddress", description="Pool address (AMM/CLMM)")
+    route_path: Optional[str] = Field(default=None, alias="routePath", description="Route path (router)")
+    slippage_pct: Optional[Decimal] = Field(default=None, alias="slippagePct", description="Applied slippage percentage")
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class SwapExecuteRequest(BaseModel):
-    """Request to execute a swap"""
-    connector: str = Field(description="DEX router connector (e.g., 'jupiter', '0x')")
-    network: str = Field(description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta')")
-    trading_pair: str = Field(description="Trading pair (e.g., 'SOL-USDC')")
-    side: str = Field(description="Trade side: 'BUY' or 'SELL'")
+    """Request to execute a unified swap (Gateway trading/swap)."""
+    wallet_address: Optional[str] = Field(
+        default=None,
+        alias="walletAddress",
+        description="Wallet address (optional, uses default if not provided)",
+    )
+    chain_network: str = Field(
+        alias="chainNetwork",
+        description="Chain and network (e.g., 'solana-mainnet-beta', 'ethereum-bsc')",
+    )
+    connector: Optional[str] = Field(
+        default=None,
+        description="Optional connector/type (e.g., 'jupiter/router', 'uniswap/clmm')",
+    )
+    base_token: str = Field(alias="baseToken", description="Symbol or address of the base token")
+    quote_token: str = Field(alias="quoteToken", description="Symbol or address of the quote token")
     amount: Decimal = Field(description="Amount to swap")
-    slippage_pct: Optional[Decimal] = Field(default=1.0, description="Maximum slippage percentage (default: 1.0)")
-    wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
+    side: str = Field(description="Trade side: 'BUY' or 'SELL'")
+    slippage_pct: Optional[Decimal] = Field(default=None, alias="slippagePct", description="Slippage percentage")
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 class SwapExecuteResponse(BaseModel):
-    """Response after executing swap"""
-    transaction_hash: str = Field(description="Transaction hash")
-    trading_pair: str = Field(description="Trading pair")
-    side: str = Field(description="Trade side")
-    amount: Decimal = Field(description="Amount swapped")
-    status: str = Field(default="submitted", description="Transaction status")
+    """Response after executing a unified swap (Gateway trading/swap)."""
+    signature: str = Field(description="Transaction signature/hash")
+    status: int = Field(description="Transaction status: 0 = PENDING, 1 = CONFIRMED, -1 = FAILED")
+    data: Optional[Dict[str, Any]] = Field(default=None, description="Optional execution details")
+
+    class Config:
+        allow_population_by_field_name = True
 
 
 # ============================================

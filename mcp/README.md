@@ -62,6 +62,45 @@ The MCP process reads `.env` automatically if present (simple loader, no extra d
 - `gateway_clmm_position_events`
 - `gateway_clmm_positions_search`
 
+### Swap (unified trading/swap)
+`gateway_swap_quote` and `gateway_swap_execute` now align with Gateway `/trading/swap`.
+Inputs use the unified fields:
+- `chainNetwork` (e.g., `ethereum-bsc`, `solana-mainnet-beta`)
+- `baseToken`, `quoteToken` (symbol or address)
+- `amount`, `side` (`BUY`/`SELL`)
+- Optional: `connector` (e.g., `pancakeswap/router`), `slippagePct`, `walletAddress`
+
+Example (quote):
+```json
+{
+  "chainNetwork": "ethereum-bsc",
+  "baseToken": "0x987e6269c6b7ea6898221882f11ea16f87b97777",
+  "quoteToken": "0x55d398326f99059ff775485246999027b3197955",
+  "amount": 1,
+  "side": "SELL",
+  "connector": "pancakeswap/router",
+  "slippagePct": 1
+}
+```
+
+Example (execute):
+```json
+{
+  "chainNetwork": "ethereum-bsc",
+  "baseToken": "0x987e6269c6b7ea6898221882f11ea16f87b97777",
+  "quoteToken": "0x55d398326f99059ff775485246999027b3197955",
+  "amount": 1,
+  "side": "SELL",
+  "connector": "pancakeswap/router",
+  "walletAddress": "0xYourWallet",
+  "slippagePct": 1
+}
+```
+
+Allowance/authorization (EVM only):
+- Check: `gateway_allowances` with `{network_id, address, tokens, spender}`
+- Approve: `gateway_approve` for missing token+spender before `gateway_swap_execute`
+
 ### Bot orchestration
 - `bot_status`
 - `bot_instances`
@@ -95,6 +134,10 @@ The MCP process reads `.env` automatically if present (simple loader, no extra d
 
 The workflow planner only reads current state and returns a recommended action list.
 It does not execute any mutating calls.
+
+## Skills
+Recommended local skill in this repo:
+- `skills/mcp-bot-ops` for plan-first deploy-v2, unified swap, and lifecycle ops
 
 Notes:
 - For pool checks, `connector_name` is normalized (e.g., `meteora/clmm` -> `meteora`).

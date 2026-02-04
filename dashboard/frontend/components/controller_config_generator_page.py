@@ -735,7 +735,17 @@ def render_config_generator_page() -> None:
             if not controller_names:
                 st.info("No controllers available for the selected type.")
                 return
-            selected_name = st.selectbox("Controller", controller_names, key="gen_controller_name")
+            default_controller = "clmm_lp_uniswap"
+            if default_controller in controller_names:
+                default_index = controller_names.index(default_controller)
+            else:
+                default_index = 0
+            selected_name = st.selectbox(
+                "Controller",
+                controller_names,
+                index=default_index,
+                key="gen_controller_name",
+            )
 
         key_prefix = _normalize_key(f"gen_{selected_type}_{selected_name}")
 
@@ -811,34 +821,31 @@ def render_config_generator_page() -> None:
                             token_map.setdefault(symbol.lower(), token)
                         token_options = sorted({sym for sym in [t.get("symbol") for t in tokens if isinstance(t, dict)] if sym})
 
+                    base_address = None
                     if not token_options:
                         st.info("Select a network to load available tokens.")
                         base_symbol = None
                         quote_symbol = None
                         base_input = None
-                        quote_choice = "Stable"
                     else:
                         base_symbol, _ = _default_token_pair(selected_network_id, token_options)
                         if base_symbol is None:
                             base_symbol = token_options[0]
 
                         stable_candidates, native_candidates = _quote_symbols_for_network(selected_network_id)
-                        quote_choice = st.radio(
-                            "Quote",
-                            options=["Stable", "Native"],
-                            horizontal=True,
-                            key=f"{key_prefix}_quote_choice",
-                        )
-                        if quote_choice == "Stable":
-                            quote_symbol = _pick_default_symbol(token_options, stable_candidates)
-                            if quote_symbol is None and stable_candidates:
-                                quote_symbol = stable_candidates[0]
-                        else:
-                            quote_symbol = _pick_default_symbol(token_options, native_candidates)
-                            if quote_symbol is None and native_candidates:
-                                quote_symbol = native_candidates[0]
-                        if quote_symbol is None and token_options:
-                            quote_symbol = token_options[0]
+                        quote_candidates = []
+                        for candidate in stable_candidates + native_candidates:
+                            if candidate and candidate not in quote_candidates:
+                                quote_candidates.append(candidate)
+                            wrapped = {
+                                "SOL": "WSOL",
+                                "ETH": "WETH",
+                                "BNB": "WBNB",
+                            }.get(candidate)
+                            if wrapped and wrapped not in quote_candidates:
+                                quote_candidates.append(wrapped)
+                        if not quote_candidates:
+                            quote_candidates = token_options[:]
 
                         cols = st.columns([2, 2])
                         with cols[0]:
@@ -849,11 +856,11 @@ def render_config_generator_page() -> None:
                                 key=f"{key_prefix}_base_token",
                             )
                         with cols[1]:
-                            st.text_input(
-                                "Quote Token (fixed)",
-                                value=quote_symbol or "",
-                                disabled=True,
-                                key=f"{key_prefix}_quote_token_fixed",
+                            quote_symbol = st.selectbox(
+                                "Quote Token",
+                                options=quote_candidates,
+                                index=0,
+                                key=f"{key_prefix}_quote_token",
                             )
 
                         base_override = st.text_input(
@@ -896,20 +903,23 @@ def render_config_generator_page() -> None:
 
                     pool_rows = st.session_state.get(override_rows_key, [])
                     if token_options and base_symbol and quote_symbol:
-                        st.caption("Existing Gateway pools are shown first. If none match, we search the network.")
+                        st.caption("Gateway pools and network pools are listed below.")
                         search_term = st.text_input("Filter pools (optional)", key=f"{key_prefix}_pool_filter")
                         connector_base = connector_base_name(connector_name)
                         pool_type = connector_pool_type(connector_name) or "clmm"
                         network_value = extract_network_value(selected_network_id or "") or ""
 
-                        refresh = st.button("Refresh Pools", key=f"{key_prefix}_pool_refresh", use_container_width=True)
+                        refresh = False
                         query_key = f"{key_prefix}_pool_query"
+                        token_a = _resolve_token_for_search(tokens, base_input or base_symbol)
+                        token_b = _resolve_token_for_search(tokens, quote_symbol)
                         current_query = (
                             selected_network_id,
-                            base_input or base_symbol,
-                            quote_symbol,
+                            token_a,
+                            token_b,
                             search_term,
                             pool_type,
+                            connector_base,
                         )
                         last_query = st.session_state.get(query_key)
                         now = time.time()
@@ -935,6 +945,13 @@ def render_config_generator_page() -> None:
                         quote_token = token_map.get(quote_symbol.lower()) if token_map else None
                         base_addr = base_token.get("address") if isinstance(base_token, dict) else None
                         quote_addr = quote_token.get("address") if isinstance(quote_token, dict) else None
+                        if base_address:
+                            base_addr = base_address
+                        if not quote_addr and quote_symbol:
+                            if quote_symbol.startswith("0x"):
+                                quote_addr, _ = normalize_evm_address(quote_symbol)
+                            elif is_valid_solana_address(quote_symbol):
+                                quote_addr = quote_symbol
 
                         filtered_pools = _filter_pools_by_tokens(normalized_existing, base_symbol, quote_symbol, base_addr, quote_addr)
                         if search_term:
@@ -945,53 +962,54 @@ def render_config_generator_page() -> None:
                                 or search_lower in str(pool.get("address") or "").lower()
                             ]
 
-                        pools_to_show = filtered_pools
-                        source_label = "Gateway Pools"
+                        gateway_pools = filtered_pools
 
-                        if not pools_to_show:
-                            st.info("No Gateway pools found for this token pair.")
-                            search_clicked = st.button("Search on network", key=f"{key_prefix}_pool_search", use_container_width=True)
-                            cached_results = st.session_state.get(f"{key_prefix}_metadata_results", [])
-                            if search_clicked:
-                                token_a = _resolve_token_for_search(tokens, base_input or base_symbol)
-                                token_b = _resolve_token_for_search(tokens, quote_symbol)
-                                if token_a and token_b:
-                                    with st.spinner("Searching pools on network..."):
-                                        response = backend_api_request(
-                                            "GET",
-                                            "/metadata/pools",
-                                            params={
-                                                "connector": connector_base,
-                                                "network_id": selected_network_id,
-                                                "pool_type": pool_type,
-                                                "token_a": token_a,
-                                                "token_b": token_b,
-                                                "search": search_term or None,
-                                                "pages": 1,
-                                                "limit": 50,
-                                            },
-                                        )
-                                    if response.get("ok"):
-                                        payload = response.get("data", {})
-                                        search_results = payload.get("pools", []) if isinstance(payload, dict) else []
-                                        cached_results = [
-                                            normalize_search_pool(pool)
-                                            for pool in search_results
-                                            if isinstance(pool, dict)
-                                        ]
-                                        st.session_state[f"{key_prefix}_metadata_results"] = cached_results
-                                else:
-                                    st.warning("Base/quote token not resolved for search.")
-                            if cached_results:
-                                pools_to_show = cached_results
-                                source_label = "Search Results (not in Gateway)"
+                        search_key = f"{key_prefix}_metadata_search"
+                        search_query = (
+                            selected_network_id,
+                            token_a,
+                            token_b,
+                            search_term or "",
+                            pool_type,
+                            connector_base,
+                        )
+                        cached_query = st.session_state.get(search_key)
+                        cached_results = st.session_state.get(f"{key_prefix}_metadata_results", [])
 
-                        if not pools_to_show:
-                            st.info("No pools found for the selected token pair.")
-                        else:
-                            st.markdown(f"**{source_label}**")
+                        network_pools = []
+                        if token_a and token_b:
+                            if refresh or should_refresh:
+                                with st.spinner("Searching pools on network..."):
+                                    response = backend_api_request(
+                                        "GET",
+                                        "/metadata/pools",
+                                        params={
+                                            "connector": connector_base,
+                                            "network_id": selected_network_id,
+                                            "pool_type": pool_type,
+                                            "token_a": token_a,
+                                            "token_b": token_b,
+                                            "search": search_term or None,
+                                            "pages": 1,
+                                            "limit": 50,
+                                        },
+                                    )
+                                if response.get("ok"):
+                                    payload = response.get("data", {})
+                                    search_results = payload.get("pools", []) if isinstance(payload, dict) else []
+                                    cached_results = [
+                                        normalize_search_pool(pool)
+                                        for pool in search_results
+                                        if isinstance(pool, dict)
+                                    ]
+                                    st.session_state[search_key] = search_query
+                                    st.session_state[f"{key_prefix}_metadata_results"] = cached_results
+                            network_pools = cached_results
+
+                        st.markdown(f"**Gateway Pools ({len(gateway_pools)})**")
+                        if gateway_pools:
                             display_rows = []
-                            for pool in pools_to_show:
+                            for pool in gateway_pools:
                                 display_rows.append({
                                     "Pair": pool.get("trading_pair") or f"{base_symbol}-{quote_symbol}",
                                     "Fee %": pool.get("fee_tier"),
@@ -1002,22 +1020,65 @@ def render_config_generator_page() -> None:
                             st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
 
                             options = {}
-                            for pool in pools_to_show:
+                            for pool in gateway_pools:
                                 address = pool.get("address", "")
                                 pair = pool.get("trading_pair") or f"{base_symbol}-{quote_symbol}"
                                 label = " | ".join(part for part in [pair, address] if part)
                                 options[label] = pool
 
                             selected_label = st.selectbox(
-                                "Select Pool",
+                                "Select Gateway Pool",
                                 list(options.keys()),
-                                key=f"{key_prefix}_pool_choice",
+                                key=f"{key_prefix}_pool_choice_gateway",
+                            )
+                            selected_pool = options.get(selected_label, {})
+
+                            if st.button("Add Gateway Pool to Config", key=f"{key_prefix}_pool_add_gateway_cfg", use_container_width=True):
+                                trading_pair = selected_pool.get("trading_pair") or f"{base_symbol}-{quote_symbol}"
+                                pool_address = selected_pool.get("address") or selected_pool.get("pool_address") or selected_pool.get("id")
+                                if pool_address:
+                                    row = {
+                                        "trading_pair": trading_pair,
+                                        "pool_trading_pair": None,
+                                        "pool_address": pool_address,
+                                    }
+                                    pool_rows = generator.merge_override_rows(pool_rows, [row], prefer_new=False)
+                                    st.session_state[override_rows_key] = pool_rows
+                        else:
+                            st.info("No Gateway pools found for this token pair.")
+
+                        st.markdown(f"**Network Pools ({len(network_pools)})**")
+                        if not token_a or not token_b:
+                            st.info("Select tokens to search network pools.")
+                        elif network_pools:
+                            display_rows = []
+                            for pool in network_pools:
+                                display_rows.append({
+                                    "Pair": pool.get("trading_pair") or f"{base_symbol}-{quote_symbol}",
+                                    "Fee %": pool.get("fee_tier"),
+                                    "Base Address": pool.get("base_address"),
+                                    "Quote Address": pool.get("quote_address"),
+                                    "Address": pool.get("address"),
+                                })
+                            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+
+                            options = {}
+                            for pool in network_pools:
+                                address = pool.get("address", "")
+                                pair = pool.get("trading_pair") or f"{base_symbol}-{quote_symbol}"
+                                label = " | ".join(part for part in [pair, address] if part)
+                                options[label] = pool
+
+                            selected_label = st.selectbox(
+                                "Select Network Pool",
+                                list(options.keys()),
+                                key=f"{key_prefix}_pool_choice_network",
                             )
                             selected_pool = options.get(selected_label, {})
 
                             add_cols = st.columns(2)
                             with add_cols[0]:
-                                if st.button("Add Pool to Config", key=f"{key_prefix}_pool_add", use_container_width=True):
+                                if st.button("Add Network Pool to Config", key=f"{key_prefix}_pool_add_network_cfg", use_container_width=True):
                                     trading_pair = selected_pool.get("trading_pair") or f"{base_symbol}-{quote_symbol}"
                                     pool_address = selected_pool.get("address") or selected_pool.get("pool_address") or selected_pool.get("id")
                                     if pool_address:
@@ -1029,20 +1090,19 @@ def render_config_generator_page() -> None:
                                         pool_rows = generator.merge_override_rows(pool_rows, [row], prefer_new=False)
                                         st.session_state[override_rows_key] = pool_rows
                             with add_cols[1]:
-                                if source_label == "Search Results (not in Gateway)":
-                                    if st.button("Add Pool to Gateway", key=f"{key_prefix}_pool_add_gateway", use_container_width=True):
-                                        if selected_pool:
-                                            added = _maybe_add_pool(
-                                                prefix=key_prefix,
-                                                connector_name=connector_base,
-                                                network_id=selected_network_id,
-                                                pool_type=pool_type,
-                                                pool=selected_pool,
-                                            )
-                                            if added:
-                                                st.rerun()
-                                else:
-                                    st.caption("Pool already in Gateway.")
+                                if st.button("Add Network Pool to Gateway", key=f"{key_prefix}_pool_add_network_gateway", use_container_width=True):
+                                    if selected_pool:
+                                        added = _maybe_add_pool(
+                                            prefix=key_prefix,
+                                            connector_name=connector_base,
+                                            network_id=selected_network_id,
+                                            pool_type=pool_type,
+                                            pool=selected_pool,
+                                        )
+                                        if added:
+                                            st.rerun()
+                        else:
+                            st.info("No network pools found for the selected token pair.")
 
                     if pool_rows:
                         st.markdown("**Selected Pools**")
