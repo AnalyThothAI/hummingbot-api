@@ -77,17 +77,19 @@ Restart Claude Desktop after adding.
 If you prefer a local stdio adapter (no extra container), run:
 
 ```bash
-MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+MCP_HUMMINGBOT_API_URL=http://127.0.0.1:18000 \
 MCP_HUMMINGBOT_API_USERNAME=admin \
 MCP_HUMMINGBOT_API_PASSWORD=admin \
 ./hummingbot-api-mcp
 ```
 
+If you run the API directly with uvicorn (not docker-compose), use `http://127.0.0.1:8000`.
+
 Claude CLI config:
 
 ```bash
 claude mcp add --transport stdio hummingbot-api -- \
-  env MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+  env MCP_HUMMINGBOT_API_URL=http://127.0.0.1:18000 \
       MCP_HUMMINGBOT_API_USERNAME=admin \
       MCP_HUMMINGBOT_API_PASSWORD=admin \
       ./hummingbot-api-mcp
@@ -101,7 +103,7 @@ Claude Desktop config:
     "hummingbot-api": {
       "command": "env",
       "args": [
-        "MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000",
+        "MCP_HUMMINGBOT_API_URL=http://127.0.0.1:18000",
         "MCP_HUMMINGBOT_API_USERNAME=admin",
         "MCP_HUMMINGBOT_API_PASSWORD=admin",
         "./hummingbot-api-mcp"

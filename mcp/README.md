@@ -9,14 +9,16 @@ and does not expose any network port.
    - Run from the repo root so `./hummingbot-api-mcp` is available.
 
 ```bash
-MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+MCP_HUMMINGBOT_API_URL=http://127.0.0.1:18000 \
 MCP_HUMMINGBOT_API_USERNAME=admin \
 MCP_HUMMINGBOT_API_PASSWORD=admin \
 ./hummingbot-api-mcp
 ```
 
+If you run the API directly with uvicorn (not docker-compose), use `http://127.0.0.1:8000`.
+
 ## Environment variables
-- `MCP_HUMMINGBOT_API_URL` (default: `http://127.0.0.1:8000`)
+- `MCP_HUMMINGBOT_API_URL` (default: `http://127.0.0.1:18000`)
 - `MCP_HUMMINGBOT_API_USERNAME` (required)
 - `MCP_HUMMINGBOT_API_PASSWORD` (required)
 - `MCP_HUMMINGBOT_API_TIMEOUT_SECONDS` (optional, default: `10`)
@@ -263,7 +265,7 @@ Example output (trimmed):
 ## Claude CLI (stdio)
 ```bash
 claude mcp add --transport stdio hummingbot-api -- \
-  env MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+  env MCP_HUMMINGBOT_API_URL=http://127.0.0.1:18000 \
       MCP_HUMMINGBOT_API_USERNAME=admin \
       MCP_HUMMINGBOT_API_PASSWORD=admin \
       ./hummingbot-api-mcp
@@ -276,7 +278,7 @@ claude mcp add --transport stdio hummingbot-api -- \
     "hummingbot-api": {
       "command": "env",
       "args": [
-        "MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000",
+        "MCP_HUMMINGBOT_API_URL=http://127.0.0.1:18000",
         "MCP_HUMMINGBOT_API_USERNAME=admin",
         "MCP_HUMMINGBOT_API_PASSWORD=admin",
         "./hummingbot-api-mcp"
@@ -297,7 +299,7 @@ docker build -t hummingbot-api-mcp:local -f mcp/Dockerfile .
 Run (macOS/Windows):
 ```bash
 docker run --rm -i \
-  -e MCP_HUMMINGBOT_API_URL=http://host.docker.internal:8000 \
+  -e MCP_HUMMINGBOT_API_URL=http://host.docker.internal:18000 \
   -e MCP_HUMMINGBOT_API_USERNAME=admin \
   -e MCP_HUMMINGBOT_API_PASSWORD=admin \
   hummingbot-api-mcp:local
@@ -306,7 +308,7 @@ docker run --rm -i \
 Run (Linux):
 ```bash
 docker run --rm -i --network host \
-  -e MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+  -e MCP_HUMMINGBOT_API_URL=http://127.0.0.1:18000 \
   -e MCP_HUMMINGBOT_API_USERNAME=admin \
   -e MCP_HUMMINGBOT_API_PASSWORD=admin \
   hummingbot-api-mcp:local
@@ -317,7 +319,7 @@ If you prefer not to build an image, you can run MCP in a container without crea
 macOS/Windows (use host.docker.internal):
 ```bash
 docker run --rm -i -v "$PWD:/app" -w /app \
-  -e MCP_HUMMINGBOT_API_URL=http://host.docker.internal:8000 \
+  -e MCP_HUMMINGBOT_API_URL=http://host.docker.internal:18000 \
   -e MCP_HUMMINGBOT_API_USERNAME=admin \
   -e MCP_HUMMINGBOT_API_PASSWORD=admin \
   python:3.12-slim bash -lc "pip install -q httpx && ./hummingbot-api-mcp"
@@ -332,8 +334,10 @@ docker run --rm -i -v "$PWD:/app" -w /app \
 Linux (use host network):
 ```bash
 docker run --rm -i --network host -v "$PWD:/app" -w /app \
-  -e MCP_HUMMINGBOT_API_URL=http://127.0.0.1:8000 \
+  -e MCP_HUMMINGBOT_API_URL=http://127.0.0.1:18000 \
   -e MCP_HUMMINGBOT_API_USERNAME=admin \
   -e MCP_HUMMINGBOT_API_PASSWORD=admin \
   python:3.12-slim bash -lc "pip install -q httpx && ./hummingbot-api-mcp"
 ```
+
+If you run the API directly with uvicorn (not docker-compose), replace `18000` with `8000`.

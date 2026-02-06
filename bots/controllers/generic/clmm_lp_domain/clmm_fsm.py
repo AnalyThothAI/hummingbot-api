@@ -28,6 +28,7 @@ EstimatePositionValue = Callable[[LPView, Decimal], Decimal]
 
 class CLMMFSM:
     _pending_swap_grace_sec = 30.0
+    _exit_balance_refresh_max_attempts = 3
     def __init__(
         self,
         *,
@@ -294,7 +295,7 @@ class CLMMFSM:
 
     def _handle_exit_swap(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
-        if not snapshot.balance_fresh and ctx.exit_balance_refresh_attempts < 1:
+        if not snapshot.balance_fresh and ctx.exit_balance_refresh_attempts < self._exit_balance_refresh_max_attempts:
             self._request_balance_refresh(ctx, now, reason="exit_refresh")
             ctx.exit_balance_refresh_attempts += 1
             return self._stay(ctx, reason="exit_refresh_balance")
