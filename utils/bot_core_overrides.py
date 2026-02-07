@@ -5,6 +5,8 @@ from typing import Dict, Optional
 
 
 HBOT_MARKET_DATA_PROVIDER_CONTAINER_PATH = "/home/hummingbot/hummingbot/data_feed/market_data_provider.py"
+HBOT_EXECUTOR_BASE_CONTAINER_PATH = "/home/hummingbot/hummingbot/strategy_v2/executors/executor_base.py"
+HBOT_GATEWAY_LP_CONTAINER_PATH = "/home/hummingbot/hummingbot/connector/gateway/gateway_lp.py"
 
 
 def build_bot_core_override_volumes(host_project_root: Optional[str]) -> Dict[str, Dict[str, str]]:
@@ -18,7 +20,7 @@ def build_bot_core_override_volumes(host_project_root: Optional[str]) -> Dict[st
     if not host_project_root:
         return {}
 
-    source = os.path.abspath(
+    market_data_provider_source = os.path.abspath(
         os.path.join(
             host_project_root,
             "hummingbot",
@@ -27,10 +29,42 @@ def build_bot_core_override_volumes(host_project_root: Optional[str]) -> Dict[st
             "market_data_provider.py",
         )
     )
-    return {
-        source: {
+    executor_base_source = os.path.abspath(
+        os.path.join(
+            host_project_root,
+            "hummingbot",
+            "hummingbot",
+            "strategy_v2",
+            "executors",
+            "executor_base.py",
+        )
+    )
+    gateway_lp_source = os.path.abspath(
+        os.path.join(
+            host_project_root,
+            "hummingbot",
+            "hummingbot",
+            "connector",
+            "gateway",
+            "gateway_lp.py",
+        )
+    )
+
+    volumes = {
+        market_data_provider_source: {
             "bind": HBOT_MARKET_DATA_PROVIDER_CONTAINER_PATH,
             "mode": "ro",
         }
     }
-
+    # Optional: only mount when present in the repo checkout.
+    if os.path.exists(executor_base_source):
+        volumes[executor_base_source] = {
+            "bind": HBOT_EXECUTOR_BASE_CONTAINER_PATH,
+            "mode": "ro",
+        }
+    if os.path.exists(gateway_lp_source):
+        volumes[gateway_lp_source] = {
+            "bind": HBOT_GATEWAY_LP_CONTAINER_PATH,
+            "mode": "ro",
+        }
+    return volumes

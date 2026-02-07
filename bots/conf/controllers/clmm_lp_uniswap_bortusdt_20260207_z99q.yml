@@ -1,0 +1,14 @@
+controller_name: clmm_lp_uniswap
+controller_type: generic
+connector_name: uniswap/clmm
+router_connector: uniswap/router
+trading_pair: BORT-USDT
+pool_address: '0x9e227088422901b5d8a9bd07cfe2844e202fcf15'
+target_price: '0.00232597191442042'
+position_value_quote: '10'
+total_amount_quote: '10'
+position_width_pct: '20'
+stop_loss_pnl_pct: '5'
+take_profit_pnl_pct: '5'
+rebalance_enabled: false
+id: clmm_lp_uniswap_bortusdt_20260207_z99q

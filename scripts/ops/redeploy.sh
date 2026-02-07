@@ -210,6 +210,8 @@ main() {
   case "$target" in
     gateway)
       redeploy_service gateway
+      # Give the container a moment to finish booting before running HTTP checks.
+      wait_http "http://localhost:15888/" 60
       verify_gateway_fees || true
       ;;
     api|hummingbot-api)

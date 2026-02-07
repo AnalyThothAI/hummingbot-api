@@ -152,6 +152,7 @@ Notes:
 - For other connectors (e.g., Meteora), pool order is not reversed.
 - If `pool_trading_pair` order differs from `trading_pair`, provide `pool_address` or token addresses to avoid ambiguity.
 - CLMM LP controllers default `rebalance_enabled: false` in config. Set it explicitly if you want rebalance.
+- Some CLMM LP controllers support an entry gate via `target_price` + `trigger_above`. Unless you explicitly want a “wait for price” behavior, use `target_price: 0` to avoid an instance that looks running but never opens.
 - Allowance checks only apply to EVM chains (`chain == ethereum`). Solana connectors will skip allowances.
 - If tokens/pools are missing, the plan will include `gateway_restart` and **block deploy** until you restart and re-run the plan.
 - If `network_id` is omitted but `gateway_network_id` is provided, the planner uses it for Gateway checks.

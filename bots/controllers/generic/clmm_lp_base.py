@@ -308,6 +308,17 @@ class CLMMLPBaseController(ControllerBase):
                 "timestamp": price_ts,
                 "age_sec": float(price_age) if price_age is not None else None,
             },
+            # Token/unit helpers for dashboards and external consumers.
+            # This allows UI to label values correctly even when it cannot load controller YAML configs.
+            "pair": {
+                "trading_pair": self._domain.trading_pair,
+                "pool_trading_pair": self._domain.pool_trading_pair,
+                "base_symbol": self._domain.base_token,
+                "quote_symbol": self._domain.quote_token,
+                "pool_base_symbol": self._domain.pool_base_token,
+                "pool_quote_symbol": self._domain.pool_quote_token,
+                "pool_order_inverted": bool(self._domain.pool_order_inverted),
+            },
             "wallet": {
                 "base": _as_float(snapshot.wallet_base),
                 "quote": _as_float(snapshot.wallet_quote),

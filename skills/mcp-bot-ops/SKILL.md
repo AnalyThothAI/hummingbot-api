@@ -88,3 +88,12 @@ There are two different "percent" conventions in this stack:
   - percent-points: `30` (30%)
 
 Recommendation: In controller YAML, always use **percent-points** for `*_pct` fields (e.g., `position_width_pct: 30`, `stop_loss_pnl_pct: 30`, `take_profit_pnl_pct: 10`, `exit_swap_slippage_pct: 1`) to avoid confusing it with Gateway `slippagePct`.
+
+### `target_price` Semantics (CLMM LP Entry Gate)
+CLMM LP controllers support an optional entry gate:
+- If `target_price` <= 0: entry is always allowed (controller can open immediately).
+- If `target_price` > 0: controller stays `IDLE` until the current price crosses the threshold:
+  - `trigger_above: true` enters when `price >= target_price`
+  - `trigger_above: false` enters when `price <= target_price`
+
+Recommendation: Unless you explicitly want a “wait for price” behavior, set `target_price: 0` in the controller YAML to avoid a bot that looks “running” but never opens.

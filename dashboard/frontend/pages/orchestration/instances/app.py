@@ -101,6 +101,13 @@ def infer_trading_pair_from_performance(inner_dict: Any) -> Optional[str]:
     """
     if not isinstance(inner_dict, dict):
         return None
+    custom_info = inner_dict.get("custom_info")
+    if isinstance(custom_info, dict):
+        pair_info = custom_info.get("pair")
+        if isinstance(pair_info, dict):
+            trading_pair = pair_info.get("trading_pair") or pair_info.get("pool_trading_pair")
+            if isinstance(trading_pair, str) and "-" in trading_pair:
+                return trading_pair
     performance = inner_dict.get("performance")
     if isinstance(performance, dict):
         positions_summary = performance.get("positions_summary")
@@ -478,6 +485,7 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
 
         controller_performance = inner_dict.get("performance", {})
         custom_info = inner_dict.get("custom_info", {})
+        pair_payload = custom_info.get("pair") if isinstance(custom_info, dict) else None
         controller_config = config_map.get(controller, {})
         # Some legacy configs omit `id`, leading to controller_id being serialized as "null".
         # When there is a single controller config, use it as a safe fallback to keep UI usable.
@@ -486,8 +494,13 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
 
         controller_name = controller_config.get("controller_name", controller)
         connector_name = controller_config.get("connector_name", "N/A")
-        trading_pair = controller_config.get("trading_pair") or infer_trading_pair_from_performance(inner_dict) or "N/A"
+        trading_pair = controller_config.get("trading_pair") or infer_trading_pair_from_performance(inner_dict)
+        if not trading_pair and isinstance(pair_payload, dict):
+            trading_pair = pair_payload.get("trading_pair") or pair_payload.get("pool_trading_pair")
+        trading_pair = trading_pair or "N/A"
         _, quote_symbol = split_trading_pair(trading_pair)
+        if isinstance(pair_payload, dict) and not quote_symbol:
+            quote_symbol = pair_payload.get("quote_symbol")
         if quote_symbol:
             quote_symbols.add(quote_symbol)
         kill_switch_status = controller_config.get("manual_kill_switch", False)
@@ -774,6 +787,7 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
         if not isinstance(inner_dict, dict):
             continue
         custom_info = inner_dict.get("custom_info", {})
+        pair_payload = custom_info.get("pair") if isinstance(custom_info, dict) else None
         lp_payload = custom_info.get("lp") if isinstance(custom_info, dict) else None
         positions = lp_payload.get("positions") if isinstance(lp_payload, dict) else None
         fee_quote_per_hour = lp_payload.get("fee_rate_quote_per_hour") if isinstance(lp_payload, dict) else None
@@ -798,7 +812,12 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
                 controller_config = next(iter(config_map.values()))
             controller_name = controller_config.get("controller_name", controller_id)
             trading_pair = controller_config.get("trading_pair") or infer_trading_pair_from_performance(inner_dict)
+            if not trading_pair and isinstance(pair_payload, dict):
+                trading_pair = pair_payload.get("trading_pair") or pair_payload.get("pool_trading_pair")
             base_symbol, quote_symbol = split_trading_pair(trading_pair)
+            if isinstance(pair_payload, dict):
+                base_symbol = pair_payload.get("base_symbol") or base_symbol
+                quote_symbol = pair_payload.get("quote_symbol") or quote_symbol
             rows.append({
                 "controller": controller_name,
                 "pair": trading_pair or "-",
@@ -824,7 +843,12 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
             controller_config = next(iter(config_map.values()))
         controller_name = controller_config.get("controller_name", controller_id)
         trading_pair = controller_config.get("trading_pair") or infer_trading_pair_from_performance(inner_dict)
+        if not trading_pair and isinstance(pair_payload, dict):
+            trading_pair = pair_payload.get("trading_pair") or pair_payload.get("pool_trading_pair")
         base_symbol, quote_symbol = split_trading_pair(trading_pair)
+        if isinstance(pair_payload, dict):
+            base_symbol = pair_payload.get("base_symbol") or base_symbol
+            quote_symbol = pair_payload.get("quote_symbol") or quote_symbol
         current_price = current_price
 
         for pos in positions:
