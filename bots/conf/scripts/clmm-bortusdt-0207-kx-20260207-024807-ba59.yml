@@ -1,0 +1,5 @@
+candles_config: []
+controllers_config:
+- clmm-bortusdt-0207-kx.yml
+markets: {}
+script_file_name: v2_with_controllers.py

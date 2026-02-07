@@ -1,7 +1,7 @@
 from decimal import Decimal
 from typing import Dict, Optional, Tuple
 
-from .components import PoolDomainAdapter
+from .components import PoolDomainAdapter, pct_to_ratio
 from .range_calculator import RangeCalculator, RangePlan
 from .v3_math import V3Math
 
@@ -93,7 +93,7 @@ class UniswapV3Policy(CLMMPolicyBase):
     def range_plan_for_side(self, center_price: Decimal, side: str) -> Optional[RangePlan]:
         if side == "both":
             return self.range_plan(center_price)
-        width = max(Decimal("0"), self._config.position_width_pct) / Decimal("100")
+        width = pct_to_ratio(getattr(self._config, "position_width_pct", Decimal("0")))
         if width <= 0:
             return None
         if side == "base":
@@ -152,7 +152,7 @@ class MeteoraPolicy(CLMMPolicyBase):
     def range_plan_for_side(self, center_price: Decimal, side: str) -> Optional[RangePlan]:
         if side == "both":
             return self.range_plan(center_price)
-        width = max(Decimal("0"), self._config.position_width_pct) / Decimal("100")
+        width = pct_to_ratio(getattr(self._config, "position_width_pct", Decimal("0")))
         if width <= 0:
             return None
         if side == "base":
@@ -170,10 +170,10 @@ class MeteoraPolicy(CLMMPolicyBase):
         return RangeCalculator.geometric_plan(center_price, self._config.position_width_pct)
 
     def quote_per_base_ratio(self, price: Decimal, lower: Decimal, upper: Decimal) -> Optional[Decimal]:
-        buffer_pct = max(Decimal("0"), self._config.ratio_edge_buffer_pct)
-        if buffer_pct > 0:
+        buffer_ratio = pct_to_ratio(getattr(self._config, "ratio_edge_buffer_pct", Decimal("0")))
+        if buffer_ratio > 0:
             range_size = upper - lower
-            clamp_offset = range_size * buffer_pct
+            clamp_offset = range_size * buffer_ratio
             clamp_lower = lower + clamp_offset
             clamp_upper = upper - clamp_offset
             if clamp_lower >= clamp_upper:

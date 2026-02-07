@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Callable, Tuple
 
-from .components import ControllerContext, LPView, Snapshot
+from .components import ControllerContext, LPView, Snapshot, pct_to_ratio
 
 EstimatePositionValue = Callable[[LPView, Decimal], Decimal]
 
@@ -35,8 +35,8 @@ class RebalanceEngine:
         deviation_pct = self._out_of_range_deviation_pct(effective_price, lower_price, upper_price)
         if deviation_pct <= 0:
             return RebalanceSignal(False, "in_range")
-        hysteresis_pct = max(Decimal("0"), self._config.hysteresis_pct)
-        if deviation_pct < (hysteresis_pct * Decimal("100")):
+        hysteresis_ratio = pct_to_ratio(getattr(self._config, "hysteresis_pct", Decimal("0")))
+        if deviation_pct < (hysteresis_ratio * Decimal("100")):
             return RebalanceSignal(False, "hysteresis_guard")
 
         out_of_range_since = ctx.out_of_range_since

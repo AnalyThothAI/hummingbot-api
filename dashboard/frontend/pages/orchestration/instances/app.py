@@ -92,12 +92,42 @@ def split_trading_pair(trading_pair: Optional[str]) -> Tuple[Optional[str], Opti
     return base, quote
 
 
+def infer_trading_pair_from_performance(inner_dict: Any) -> Optional[str]:
+    """
+    Best-effort inference for quote/base units when controller configs are missing or unmapped.
+
+    V2 status payloads usually include `performance.positions_summary[].trading_pair`, which is
+    good enough for UI unit labels.
+    """
+    if not isinstance(inner_dict, dict):
+        return None
+    performance = inner_dict.get("performance")
+    if isinstance(performance, dict):
+        positions_summary = performance.get("positions_summary")
+        if isinstance(positions_summary, list):
+            for row in positions_summary:
+                if not isinstance(row, dict):
+                    continue
+                trading_pair = row.get("trading_pair")
+                if isinstance(trading_pair, str) and "-" in trading_pair:
+                    return trading_pair
+    return None
+
+
 def format_quote_value(value: Optional[float], quote_symbol: Optional[str], precision: int = 2) -> str:
     formatted = format_number(value, precision)
     if formatted == "-":
         return "-"
     unit = quote_symbol or "Quote"
     return f"{formatted} {unit}"
+
+
+def format_asset_value(value: Optional[float], symbol: Optional[str], precision: int = 6) -> str:
+    formatted = format_number(value, precision)
+    if formatted == "-":
+        return "-"
+    unit = symbol or ""
+    return f"{formatted} {unit}".strip()
 
 
 def format_timestamp_age(timestamp: Optional[float]) -> str:
@@ -414,8 +444,8 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
     for config in controller_configs:
         if not isinstance(config, dict):
             continue
-        config_id = config.get("id")
-        if config_id:
+        config_id = config.get("id") or config.get("_config_name")
+        if isinstance(config_id, str) and config_id.strip():
             config_map[config_id] = config
 
     total_global_pnl_quote = 0
@@ -449,10 +479,14 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         controller_performance = inner_dict.get("performance", {})
         custom_info = inner_dict.get("custom_info", {})
         controller_config = config_map.get(controller, {})
+        # Some legacy configs omit `id`, leading to controller_id being serialized as "null".
+        # When there is a single controller config, use it as a safe fallback to keep UI usable.
+        if not controller_config and controller in {"null", None, ""} and len(config_map) == 1:
+            controller_config = next(iter(config_map.values()))
 
         controller_name = controller_config.get("controller_name", controller)
         connector_name = controller_config.get("connector_name", "N/A")
-        trading_pair = controller_config.get("trading_pair", "N/A")
+        trading_pair = controller_config.get("trading_pair") or infer_trading_pair_from_performance(inner_dict) or "N/A"
         _, quote_symbol = split_trading_pair(trading_pair)
         if quote_symbol:
             quote_symbols.add(quote_symbol)
@@ -500,7 +534,7 @@ def build_controller_rows(performance: Dict[str, Any], controller_configs: List[
         heartbeat_age = format_timestamp_age(heartbeat_ts)
 
         controller_info = {
-            "ID": controller_config.get("id"),
+            "ID": controller_config.get("id") or controller_config.get("_config_name"),
             "Controller": controller_name,
             "Connector": connector_name,
             "Trading Pair": trading_pair,
@@ -760,12 +794,15 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
             if anchor_quote is None and stoploss_quote is None and equity_quote is None:
                 continue
             controller_config = config_map.get(controller_id, {})
+            if not controller_config and controller_id in {"null", None, ""} and len(config_map) == 1:
+                controller_config = next(iter(config_map.values()))
             controller_name = controller_config.get("controller_name", controller_id)
-            trading_pair = controller_config.get("trading_pair")
-            _, quote_symbol = split_trading_pair(trading_pair)
+            trading_pair = controller_config.get("trading_pair") or infer_trading_pair_from_performance(inner_dict)
+            base_symbol, quote_symbol = split_trading_pair(trading_pair)
             rows.append({
                 "controller": controller_name,
                 "pair": trading_pair or "-",
+                "base_symbol": base_symbol,
                 "quote_symbol": quote_symbol,
                 "state": "NO_LP",
                 "position": "-",
@@ -783,17 +820,31 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
             continue
 
         controller_config = config_map.get(controller_id, {})
+        if not controller_config and controller_id in {"null", None, ""} and len(config_map) == 1:
+            controller_config = next(iter(config_map.values()))
         controller_name = controller_config.get("controller_name", controller_id)
-        trading_pair = controller_config.get("trading_pair")
-        _, quote_symbol = split_trading_pair(trading_pair)
+        trading_pair = controller_config.get("trading_pair") or infer_trading_pair_from_performance(inner_dict)
+        base_symbol, quote_symbol = split_trading_pair(trading_pair)
         current_price = current_price
 
         for pos in positions:
             if not isinstance(pos, dict):
                 continue
+            base_fee = pos.get("base_fee")
+            quote_fee = pos.get("quote_fee")
+            fees_quote = None
+            try:
+                price = float(current_price) if current_price is not None else None
+                base_fee_f = float(base_fee) if base_fee is not None else 0.0
+                quote_fee_f = float(quote_fee) if quote_fee is not None else 0.0
+                if price is not None:
+                    fees_quote = (base_fee_f * price) + quote_fee_f
+            except (TypeError, ValueError):
+                fees_quote = None
             rows.append({
                 "controller": controller_name,
                 "pair": trading_pair or "-",
+                "base_symbol": base_symbol,
                 "quote_symbol": quote_symbol,
                 "state": pos.get("state") or "-",
                 "position": pos.get("position_address") or "-",
@@ -805,7 +856,9 @@ def build_lp_positions(performance: Dict[str, Any], config_map: Dict[str, Any]) 
                 "value_quote": pos.get("position_value_quote"),
                 "anchor_quote": anchor_quote,
                 "stoploss_quote": stoploss_quote,
-                "fee_quote_per_hour": fee_quote_per_hour,
+                "fees_quote": fees_quote,
+                "base_fee": base_fee,
+                "quote_fee": quote_fee,
                 "out_of_range_since": pos.get("out_of_range_since"),
             })
 
@@ -875,7 +928,12 @@ def render_lp_positions(positions: List[Dict[str, Any]]) -> None:
         if state_label != "Unknown":
             state_label = f"Executor {state_label}"
 
+        base_symbol = pos.get("base_symbol")
         quote_symbol = pos.get("quote_symbol")
+        if not base_symbol or not quote_symbol:
+            inferred_base, inferred_quote = split_trading_pair(pos.get("pair"))
+            base_symbol = base_symbol or inferred_base
+            quote_symbol = quote_symbol or inferred_quote
         state_out_of_range = None
         if state_attr == "OUT_OF_RANGE":
             state_out_of_range = True
@@ -892,9 +950,9 @@ def render_lp_positions(positions: List[Dict[str, Any]]) -> None:
             {"label": "Value", "value": format_quote_value(pos.get("value_quote"), quote_symbol, 4), "primary": True},
             {"label": "Anchor", "value": format_quote_value(pos.get("anchor_quote"), quote_symbol, 4), "primary": False},
             {"label": "StopLoss", "value": format_quote_value(pos.get("stoploss_quote"), quote_symbol, 4), "primary": False},
-            {"label": "Fee/hr", "value": format_quote_value(pos.get("fee_quote_per_hour"), quote_symbol, 6), "primary": False},
-            {"label": "Base", "value": format_number(pos.get("base"), 6), "primary": False},
-            {"label": "Quote", "value": format_number(pos.get("quote"), 6), "primary": False},
+            {"label": "Fees", "value": format_quote_value(pos.get("fees_quote"), quote_symbol, 6), "primary": False},
+            {"label": "Base", "value": format_asset_value(pos.get("base"), base_symbol, 6), "primary": False},
+            {"label": "Quote", "value": format_asset_value(pos.get("quote"), quote_symbol, 6), "primary": False},
         ]
 
         metrics_html = "".join(

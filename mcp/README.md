@@ -73,6 +73,10 @@ Inputs use the unified fields:
 - Optional: `connector` (e.g., `pancakeswap/router`), `slippagePct`, `walletAddress`
   - `slippagePct` is a percentage (0-100). `1` = 1%, `0.01` = 0.01% (1 bp).
 
+Important: Do not copy Gateway `slippagePct` values directly into controller YAML `*_pct` fields.
+Controller configs may accept `*_pct` as ratio (`0.01` meaning 1%) or percent-points (`1` meaning 1%).
+To avoid ambiguity, prefer percent-points in YAML (e.g., `exit_swap_slippage_pct: 1` for 1%).
+
 Example (quote):
 ```json
 {
@@ -151,6 +155,7 @@ Notes:
 - Allowance checks only apply to EVM chains (`chain == ethereum`). Solana connectors will skip allowances.
 - If tokens/pools are missing, the plan will include `gateway_restart` and **block deploy** until you restart and re-run the plan.
 - If `network_id` is omitted but `gateway_network_id` is provided, the planner uses it for Gateway checks.
+- Controller configs should include `id` and it is recommended to set `id == YAML basename` (without `.yml`) so bot reports map cleanly to dashboard units.
 
 ## Agent usage (recommended)
 This MCP module is intended for **plan-first** automation. Agents should build a plan, then execute actions step-by-step.

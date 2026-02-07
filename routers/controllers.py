@@ -50,6 +50,10 @@ async def list_controller_configs():
             config_name = config_file.replace('.yml', '')
             try:
                 config = fs_util.read_yaml_file(f"conf/controllers/{config_file}")
+                # Backfill `id` for legacy configs so downstream UI/report mapping works.
+                config_id = config.get("id") if isinstance(config, dict) else None
+                if isinstance(config, dict) and not (isinstance(config_id, str) and config_id.strip()):
+                    config["id"] = config_name
                 configs.append(config)
             except Exception as e:
                 # If config is malformed, still include it with basic info
@@ -102,6 +106,12 @@ async def create_or_update_controller_config(config_name: str, config: Dict):
         HTTPException: 400 if save error occurs
     """
     try:
+        # Hummingbot controllers expect `id` to be present and stable. Recommended convention is
+        # config filename == controller id (see AGENTS.md).
+        config_id = config.get("id")
+        if not (isinstance(config_id, str) and config_id.strip()):
+            config["id"] = config_name
+
         yaml_content = yaml.dump(
             config,
             default_flow_style=False,
@@ -333,6 +343,10 @@ async def get_bot_controller_configs(bot_name: str):
         if controller_file.endswith('.yml'):
             config = fs_util.read_yaml_file(f"{bots_config_path}/{controller_file}")
             config['_config_name'] = controller_file.replace('.yml', '')
+            # Backfill `id` for legacy configs (do not persist changes here).
+            config_id = config.get("id") if isinstance(config, dict) else None
+            if isinstance(config, dict) and not (isinstance(config_id, str) and config_id.strip()):
+                config["id"] = config["_config_name"]
             configs.append(config)
     return configs
 
@@ -360,6 +374,10 @@ async def update_bot_controller_config(bot_name: str, controller_name: str, conf
     try:
         current_config = fs_util.read_yaml_file(f"{bots_config_path}/{controller_name}.yml")
         current_config.update(config)
+        # Backfill id when missing/blank to avoid `controller_id=None` in v2 strategy internals.
+        config_id = current_config.get("id")
+        if not (isinstance(config_id, str) and config_id.strip()):
+            current_config["id"] = controller_name
         fs_util.dump_dict_to_yaml(f"{bots_config_path}/{controller_name}.yml", current_config)
         return {"message": f"Controller configuration for bot '{bot_name}' updated successfully"}
     except FileNotFoundError:

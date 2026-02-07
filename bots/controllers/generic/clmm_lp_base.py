@@ -13,7 +13,16 @@ from hummingbot.strategy_v2.budget.budget_coordinator import BudgetCoordinatorRe
 from hummingbot.strategy_v2.controllers import ControllerBase, ControllerConfigBase
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
 from hummingbot.strategy_v2.executors.data_types import ConnectorPair
-from .clmm_lp_domain.components import ControllerContext, ControllerState, LPView, OpenProposal, Snapshot, PoolDomainAdapter, PriceContext
+from .clmm_lp_domain.components import (
+    ControllerContext,
+    ControllerState,
+    LPView,
+    OpenProposal,
+    PoolDomainAdapter,
+    PriceContext,
+    Snapshot,
+    pct_to_ratio,
+)
 from .clmm_lp_domain.clmm_fsm import CLMMFSM
 from .clmm_lp_domain.policies import CLMMPolicyBase
 from .clmm_lp_domain.rebalance_engine import RebalanceEngine
@@ -213,11 +222,13 @@ class CLMMLPBaseController(ControllerBase):
 
         anchor = self._ctx.anchor_value_quote
         stoploss_trigger_quote = None
-        if anchor is not None and anchor > 0 and self.config.stop_loss_pnl_pct > 0:
-            stoploss_trigger_quote = anchor * (Decimal("1") - self.config.stop_loss_pnl_pct)
+        stop_loss_ratio = pct_to_ratio(self.config.stop_loss_pnl_pct)
+        if anchor is not None and anchor > 0 and stop_loss_ratio > 0:
+            stoploss_trigger_quote = anchor * (Decimal("1") - stop_loss_ratio)
         take_profit_trigger_quote = None
-        if anchor is not None and anchor > 0 and self.config.take_profit_pnl_pct > 0:
-            take_profit_trigger_quote = anchor * (Decimal("1") + self.config.take_profit_pnl_pct)
+        take_profit_ratio = pct_to_ratio(self.config.take_profit_pnl_pct)
+        if anchor is not None and anchor > 0 and take_profit_ratio > 0:
+            take_profit_trigger_quote = anchor * (Decimal("1") + take_profit_ratio)
 
         realized_pnl_quote = self._ctx.realized_pnl_quote
         unrealized_pnl_quote: Optional[Decimal] = None
@@ -387,8 +398,9 @@ class CLMMLPBaseController(ControllerBase):
             ) = self._compute_risk_values(snapshot, price)
             anchor = self._ctx.anchor_value_quote
             trigger = None
-            if anchor is not None and anchor > 0 and self.config.stop_loss_pnl_pct > 0:
-                trigger = anchor * (Decimal("1") - self.config.stop_loss_pnl_pct)
+            stop_loss_ratio = pct_to_ratio(self.config.stop_loss_pnl_pct)
+            if anchor is not None and anchor > 0 and stop_loss_ratio > 0:
+                trigger = anchor * (Decimal("1") - stop_loss_ratio)
             self._log_metric_event(
                 "stoploss_trigger",
                 price=price,
@@ -536,11 +548,17 @@ class CLMMLPBaseController(ControllerBase):
         effective_budget = min(total_value, total_wallet_value)
         if effective_budget <= 0:
             return None, "insufficient_balance"
-        if wallet_base > 0 and wallet_quote > 0:
+        # Avoid "dust both-sides" opens: if one side is only a tiny fraction of the intended budget,
+        # treat it as absent so we can open a single-sided range plan instead of minting dust liquidity.
+        min_side_value_quote = effective_budget * Decimal("0.01")  # 1% of effective budget
+        base_value_quote = wallet_base * current_price
+        has_base = base_value_quote >= min_side_value_quote
+        has_quote = wallet_quote >= min_side_value_quote
+        if has_base and has_quote:
             side = "both"
-        elif wallet_base > 0:
+        elif has_base:
             side = "base"
-        elif wallet_quote > 0:
+        elif has_quote:
             side = "quote"
         else:
             return None, "insufficient_balance"

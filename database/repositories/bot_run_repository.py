@@ -57,7 +57,7 @@ class BotRunRepository:
                 BotRun.run_status == "CREATED",
                 BotRun.deployment_status == "DEPLOYED"
             )
-        ).order_by(desc(BotRun.deployed_at))
+        ).order_by(desc(BotRun.deployed_at)).limit(1)
 
         result = await self.session.execute(stmt)
         bot_run = result.scalar_one_or_none()
@@ -81,7 +81,7 @@ class BotRunRepository:
                 BotRun.bot_name == bot_name,
                 or_(BotRun.run_status == "RUNNING", BotRun.run_status == "CREATED")
             )
-        ).order_by(desc(BotRun.deployed_at))
+        ).order_by(desc(BotRun.deployed_at)).limit(1)
 
         result = await self.session.execute(stmt)
         bot_run = result.scalar_one_or_none()
@@ -100,7 +100,7 @@ class BotRunRepository:
         """Mark a bot run as archived."""
         stmt = select(BotRun).where(
             BotRun.bot_name == bot_name
-        ).order_by(desc(BotRun.deployed_at))
+        ).order_by(desc(BotRun.deployed_at)).limit(1)
         
         result = await self.session.execute(stmt)
         bot_run = result.scalar_one_or_none()
@@ -159,7 +159,7 @@ class BotRunRepository:
         """Get the latest bot run for a specific bot."""
         stmt = select(BotRun).where(
             BotRun.bot_name == bot_name
-        ).order_by(desc(BotRun.deployed_at))
+        ).order_by(desc(BotRun.deployed_at)).limit(1)
         
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
@@ -204,7 +204,7 @@ class BotRunRepository:
                 BotRun.run_status == "CREATED",
                 BotRun.deployment_status == "DEPLOYED"
             )
-        ).order_by(desc(BotRun.deployed_at))
+        ).order_by(desc(BotRun.deployed_at)).limit(1)
 
         result = await self.session.execute(stmt)
         bot_run = result.scalar_one_or_none()

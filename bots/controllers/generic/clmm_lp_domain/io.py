@@ -13,6 +13,7 @@ from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
 from .components import LPView, PoolDomainAdapter, PriceContext, Snapshot, SwapPurpose, SwapView
+from .components import pct_to_ratio
 
 if TYPE_CHECKING:
     from ..clmm_lp_base import CLMMLPBaseConfig
@@ -419,7 +420,9 @@ class ActionFactory:
         return CreateExecutorAction(controller_id=self._config.id, executor_config=executor_config)
 
     def swap_slippage_pct(self) -> Decimal:
-        return max(Decimal("0"), self._config.exit_swap_slippage_pct) * Decimal("100")
+        # `GatewaySwapExecutorConfig.slippage_pct` is percentage points (0-100).
+        # Accept either ratio (0-1) or percentage points (0-100) in config.
+        return pct_to_ratio(getattr(self._config, "exit_swap_slippage_pct", Decimal("0"))) * Decimal("100")
 
     def build_swap_action(
         self,

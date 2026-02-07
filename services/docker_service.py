@@ -18,6 +18,7 @@ from config import settings
 from models import V2ScriptDeployment
 from utils.file_system import fs_util
 from utils.script_config import normalize_script_config_name
+from utils.bot_core_overrides import build_bot_core_override_volumes
 
 
 class DockerService:
@@ -371,6 +372,19 @@ class DockerService:
                             if os.path.exists(source_controller_file):
                                 shutil.copy2(source_controller_file, destination_controller_file)
                                 logger.info(f"Copied controller config: {controller_file}")
+                                # Ensure the controller config has a stable id (recommended: filename == id).
+                                try:
+                                    controller_rel_path = f"instances/{instance_name}/conf/controllers/{controller_file}"
+                                    controller_cfg = fs_util.read_yaml_file(controller_rel_path)
+                                    if isinstance(controller_cfg, dict):
+                                        cfg_id = controller_cfg.get("id")
+                                        if not (isinstance(cfg_id, str) and cfg_id.strip()):
+                                            controller_cfg["id"] = os.path.splitext(controller_file)[0]
+                                            fs_util.dump_dict_to_yaml(controller_rel_path, controller_cfg)
+                                except Exception as e:
+                                    logger.warning(
+                                        f"Failed to backfill id for controller config {controller_file} in instance {instance_name}: {e}"
+                                    )
                             else:
                                 logger.warning(f"Controller config file {controller_file} not found in {controllers_config_dir}")
                                 
@@ -438,6 +452,7 @@ class DockerService:
             os.path.abspath(os.path.join(bots_path, "bots", 'scripts')): {'bind': '/home/hummingbot/scripts', 'mode': 'rw'},
             os.path.abspath(os.path.join(bots_path, "bots", 'controllers')): {'bind': '/home/hummingbot/controllers', 'mode': 'rw'},
         }
+        volumes.update(build_bot_core_override_volumes(bots_path))
 
         # Set up environment variables
         environment = {}

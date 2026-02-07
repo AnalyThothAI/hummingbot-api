@@ -22,6 +22,8 @@ Where things live (on the Hummingbot-API side):
 Naming rules that must align:
 - `controller_type` in YAML must match the folder under `bots/controllers/` (e.g. `generic`).
 - `controller_name` in YAML must match the module filename under that folder (e.g. `clmm_lp_uniswap`).
+- `id` in YAML should be set and **recommended** to equal the YAML basename (without `.yml`).
+  - If `id` is missing/empty, the bot may report `controller_id=null`, which breaks config mapping in the dashboard (units fall back to `Quote`, many fields show `-`).
 - `controllers_config` (deploy input) is a list of **config names** (YAML basenames), not module names.
 
 Discovery tools:
@@ -75,3 +77,14 @@ Inputs: `deployment_type`, `instance_name`, `credentials_profile`, `network_id` 
 - `controller_name` must match module filename; `controller_type` must match `controllers/<type>/`.
 - Prefer `pool_address` for deterministic pool matching.
 - Use `controller_config_*` or `script_config_*` to manage configs.
+
+### Percent Semantics (Avoid Agent Ambiguity)
+There are two different "percent" conventions in this stack:
+- **Gateway swap tools** (`gateway_swap_quote`, `gateway_swap_execute`): `slippagePct` is **0-100 percent**.
+  - `1` = 1%
+  - `0.01` = 0.01% (1 bp)
+- **Controller YAML** (notably CLMM LP controllers): many `*_pct` fields are accepted as either:
+  - ratio: `0.3` (30%)
+  - percent-points: `30` (30%)
+
+Recommendation: In controller YAML, always use **percent-points** for `*_pct` fields (e.g., `position_width_pct: 30`, `stop_loss_pnl_pct: 30`, `take_profit_pnl_pct: 10`, `exit_swap_slippage_pct: 1`) to avoid confusing it with Gateway `slippagePct`.

@@ -3,6 +3,8 @@ from decimal import Decimal
 from math import ceil, floor, log
 from typing import Optional, Tuple
 
+from .components import pct_to_ratio
+
 
 @dataclass(frozen=True)
 class RangePlan:
@@ -16,7 +18,8 @@ class RangeCalculator:
     def geometric_bounds(center_price: Decimal, width_pct: Decimal) -> Optional[Tuple[Decimal, Decimal]]:
         if center_price <= 0:
             return None
-        width = max(Decimal("0"), width_pct) / Decimal("100")
+        # Accept both ratio (0-1) and percentage points (0-100) inputs.
+        width = pct_to_ratio(width_pct)
         factor = (Decimal("1") + width).sqrt()
         lower = center_price / factor
         upper = center_price * factor

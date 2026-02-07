@@ -8,6 +8,30 @@ from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
 
 
+def pct_to_ratio(pct: Decimal) -> Decimal:
+    """
+    Normalize a percentage-like config value into a ratio.
+
+    This codebase historically used mixed semantics for *_pct fields:
+    - Some configs specify ratios (e.g. 0.3 for 30%)
+    - Some configs specify percentages (e.g. 30 for 30%)
+    """
+    if pct is None:
+        return Decimal("0")
+    try:
+        value = Decimal(pct)
+    except Exception:
+        return Decimal("0")
+    if value <= 0:
+        return Decimal("0")
+    # Heuristic: values >= 1 are interpreted as percentage points.
+    # Examples:
+    # - 30 -> 0.30
+    # - 10 -> 0.10
+    # - 0.3 -> 0.3
+    return value / Decimal("100") if value >= Decimal("1") else value
+
+
 class ControllerState(str, Enum):
     IDLE = "IDLE"
     ENTRY_OPEN = "ENTRY_OPEN"

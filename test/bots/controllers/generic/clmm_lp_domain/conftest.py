@@ -2,6 +2,7 @@ import sys
 import types
 from dataclasses import dataclass
 from enum import Enum
+import logging
 
 
 def _ensure_module(name: str):
@@ -21,18 +22,19 @@ def _ensure_attr(module, name: str, value):
 logger_module = _ensure_module("hummingbot.logger")
 
 
-class _HBLogger:
-    def info(self, *args, **kwargs):
-        pass
+class _HBLogger(logging.Logger):
+    """
+    Minimal logger stub compatible with `logging.setLoggerClass(...)`.
 
-    def warning(self, *args, **kwargs):
-        pass
+    Hummingbot's package `__init__` sets a custom logger class; in tests we stub it
+    to avoid importing heavy logger dependencies (e.g. pandas), but it must still
+    derive from `logging.Logger` to keep imports working.
+    """
 
-    def error(self, *args, **kwargs):
-        pass
-
-    def exception(self, *args, **kwargs):
-        pass
+    # Keep default logging.Logger behavior; provide `network` as a no-op helper
+    # used in some Hummingbot components.
+    def network(self, *args, **kwargs):  # pragma: no cover
+        return self.info(*args, **kwargs)
 
 
 _ensure_attr(logger_module, "HummingbotLogger", _HBLogger)
@@ -51,6 +53,18 @@ class _TradeType(Enum):
 
 
 _ensure_attr(common_module, "TradeType", _TradeType)
+
+connector_utils_module = _ensure_module("hummingbot.connector.utils")
+
+
+def _split_hb_trading_pair(trading_pair: str):
+    parts = (trading_pair or "").split("-", 1)
+    base = parts[0] if len(parts) >= 1 else ""
+    quote = parts[1] if len(parts) >= 2 else ""
+    return base, quote
+
+
+_ensure_attr(connector_utils_module, "split_hb_trading_pair", _split_hb_trading_pair)
 
 
 executors_module = _ensure_module("hummingbot.strategy_v2.models.executors")
