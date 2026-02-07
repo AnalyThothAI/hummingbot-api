@@ -2,6 +2,7 @@ from decimal import Decimal
 from typing import Callable, List, Optional, Tuple
 
 from hummingbot.core.data_type.common import TradeType
+from hummingbot.connector.utils import split_hb_trading_pair
 from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionStates
 from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executor_actions import StopExecutorAction
@@ -314,6 +315,24 @@ class CLMMFSM:
             return self._stay(ctx, reason="swap_in_progress")
 
         base_to_sell = snapshot.wallet_base
+        # If the base token is also the chain's native token (e.g. SOL), keep a safety buffer for fees.
+        native_token = getattr(self._config, "native_token_symbol", None)
+        min_native_balance = getattr(self._config, "min_native_balance", Decimal("0"))
+        trading_pair = getattr(self._config, "trading_pair", None)
+        if (
+            isinstance(native_token, str)
+            and native_token
+            and min_native_balance is not None
+            and min_native_balance > 0
+            and isinstance(trading_pair, str)
+            and "-" in trading_pair
+        ):
+            try:
+                base_symbol, _ = split_hb_trading_pair(trading_pair=trading_pair)
+            except Exception:
+                base_symbol = None
+            if base_symbol == native_token:
+                base_to_sell = max(Decimal("0"), base_to_sell - min_native_balance)
         if base_to_sell <= 0:
             return self._transition(ctx, self._exit_done_state(ctx), now, reason="exit_no_base")
 

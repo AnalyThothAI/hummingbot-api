@@ -137,12 +137,17 @@ class CLMMLPBaseController(ControllerBase):
         self._policy_update_task: Optional[asyncio.Task] = None
 
         rate_connector = self._rate_connector
+        # LPPositionExecutor reads price via RateOracle using its own config.trading_pair, which is
+        # the pool trading pair (token0-token1 order). If pool_trading_pair is inverted vs the
+        # strategy trading_pair, RateOracle can often infer the inverse, but that depends on token
+        # symbol normalization. Register both to avoid the executor being stuck in OPENING due to
+        # missing rates on some connectors.
+        pool_pair = self.config.pool_trading_pair or self.config.trading_pair
         rate_pairs = [
-            ConnectorPair(
-                connector_name=rate_connector,
-                trading_pair=self.config.trading_pair,
-            ),
+            ConnectorPair(connector_name=rate_connector, trading_pair=self.config.trading_pair),
         ]
+        if pool_pair and pool_pair != self.config.trading_pair:
+            rate_pairs.append(ConnectorPair(connector_name=rate_connector, trading_pair=pool_pair))
         self.market_data_provider.initialize_rate_sources(rate_pairs)
 
     async def update_processed_data(self):
@@ -188,6 +193,7 @@ class CLMMLPBaseController(ControllerBase):
     def get_custom_info(self) -> Dict:
         snapshot = self._latest_snapshot or self._refresh_snapshot(self.market_data_provider.time())
         now = snapshot.now
+        has_active_lp = bool(snapshot.active_lp)
 
         def _as_float(value: Optional[Decimal]) -> Optional[float]:
             return float(value) if value is not None else None
@@ -217,9 +223,17 @@ class CLMMLPBaseController(ControllerBase):
         unrealized_pnl_quote: Optional[Decimal] = None
         net_pnl_quote: Optional[Decimal] = None
         net_pnl_pct: Optional[Decimal] = None
-        if anchor is not None and anchor > 0 and risk_equity_quote is not None:
-            unrealized_pnl_quote = risk_equity_quote - anchor
-            net_pnl_quote = realized_pnl_quote + unrealized_pnl_quote
+        if anchor is not None and anchor > 0:
+            # "lp_only" PnL semantics:
+            # - When LP is active: unrealized is computed from LP equity.
+            # - When no LP is active: unrealized is 0 and net == realized, to avoid confusing
+            #   negative unrealized displays during IDLE/EXIT phases.
+            if has_active_lp and risk_equity_quote is not None:
+                unrealized_pnl_quote = risk_equity_quote - anchor
+                net_pnl_quote = realized_pnl_quote + unrealized_pnl_quote
+            else:
+                unrealized_pnl_quote = Decimal("0")
+                net_pnl_quote = realized_pnl_quote
             net_pnl_pct = net_pnl_quote / anchor
 
         rebalance_count_1h = 0

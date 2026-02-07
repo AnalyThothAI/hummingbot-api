@@ -11,6 +11,33 @@ Covers three workflows via MCP tools:
 - Deploy V2 (plan-first, controllers or scripts)
 - Bot lifecycle (status/stop/archive)
 
+## How MCP Maps To This Repo
+MCP is just a stdio adapter that calls the Hummingbot-API HTTP endpoints. It does **not** read controllers/configs directly.
+
+Where things live (on the Hummingbot-API side):
+- Controller modules (Python): `bots/controllers/<controller_type>/<controller_name>.py`
+- Global controller configs (YAML): `bots/conf/controllers/<config_name>.yml`
+- Bot-scoped controller configs (YAML, per instance): `bots/instances/<bot_name>/conf/controllers/<controller_name>.yml`
+
+Naming rules that must align:
+- `controller_type` in YAML must match the folder under `bots/controllers/` (e.g. `generic`).
+- `controller_name` in YAML must match the module filename under that folder (e.g. `clmm_lp_uniswap`).
+- `controllers_config` (deploy input) is a list of **config names** (YAML basenames), not module names.
+
+Discovery tools:
+- Global configs: `controller_configs_list_global`
+- Bot configs: `controller_configs_list`
+- Validate a config payload: `controller_config_validate` (needs `controller_type` + `controller_name`)
+
+## MCP Environment Loading
+The MCP process reads `.env` automatically if present (see `mcp/server.py:_load_dotenv`). It:
+- Loads from the MCP process working directory (run from repo root for predictable behavior).
+- Does **not** override existing environment variables.
+
+Common ports:
+- API via `make run` (uvicorn): `http://127.0.0.1:8000`
+- API via `make deploy` (docker-compose): `http://127.0.0.1:18000` (host port mapping)
+
 ## Safety rules (required)
 - Always call `gateway_status` before swap or deploy.
 - Always ask for confirmation before: `gateway_swap_execute`, `gateway_approve`, `bot_deploy_v2_*`, `bot_stop`, `bot_stop_and_archive`.

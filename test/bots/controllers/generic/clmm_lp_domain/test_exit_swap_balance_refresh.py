@@ -55,6 +55,14 @@ class DummyActionFactory:
             executor_config=types.SimpleNamespace(id="swap1")
         )
 
+class CapturingActionFactory(DummyActionFactory):
+    def __init__(self):
+        self.last_kwargs = None
+
+    def build_swap_action(self, **kwargs):
+        self.last_kwargs = kwargs
+        return super().build_swap_action(**kwargs)
+
 
 def _dummy_build_open_proposal(*_args, **_kwargs):
     return None, "price_unavailable"
@@ -103,3 +111,53 @@ def test_exit_swap_waits_multiple_balance_refresh_attempts_when_stale():
     assert ctx.exit_balance_refresh_attempts == 2
     assert ctx.state == ControllerState.EXIT_SWAP
 
+
+def test_exit_swap_keeps_min_native_balance_when_base_is_native():
+    config = DummyConfig()
+    config.trading_pair = "SOL-USDC"
+    config.native_token_symbol = "SOL"
+    config.min_native_balance = Decimal("0.1")
+    action_factory = CapturingActionFactory()
+    fsm = CLMMFSM(
+        config=config,
+        action_factory=action_factory,
+        build_open_proposal=_dummy_build_open_proposal,
+        estimate_position_value=_estimate_position_value,
+        rebalance_engine=RebalanceEngine(config=config, estimate_position_value=_estimate_position_value),
+        exit_policy=ExitPolicy(config=config),
+    )
+    ctx = ControllerContext()
+    ctx.state = ControllerState.EXIT_SWAP
+    ctx.last_exit_reason = "stop_loss"
+
+    snapshot = _make_snapshot(now=0, balance_fresh=True, wallet_base=Decimal("1.0"), wallet_quote=Decimal("0"))
+    decision = fsm.step(snapshot, ctx)
+
+    assert decision.reason == "exit_swap"
+    assert action_factory.last_kwargs is not None
+    assert action_factory.last_kwargs["amount"] == Decimal("0.9")
+
+
+def test_exit_swap_skips_when_only_min_native_balance_remains():
+    config = DummyConfig()
+    config.trading_pair = "SOL-USDC"
+    config.native_token_symbol = "SOL"
+    config.min_native_balance = Decimal("0.1")
+    action_factory = CapturingActionFactory()
+    fsm = CLMMFSM(
+        config=config,
+        action_factory=action_factory,
+        build_open_proposal=_dummy_build_open_proposal,
+        estimate_position_value=_estimate_position_value,
+        rebalance_engine=RebalanceEngine(config=config, estimate_position_value=_estimate_position_value),
+        exit_policy=ExitPolicy(config=config),
+    )
+    ctx = ControllerContext()
+    ctx.state = ControllerState.EXIT_SWAP
+    ctx.last_exit_reason = "stop_loss"
+
+    snapshot = _make_snapshot(now=0, balance_fresh=True, wallet_base=Decimal("0.05"), wallet_quote=Decimal("0"))
+    decision = fsm.step(snapshot, ctx)
+
+    assert decision.reason == "exit_no_base"
+    assert action_factory.last_kwargs is None
