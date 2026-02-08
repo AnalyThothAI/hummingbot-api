@@ -795,6 +795,108 @@ async def _background_stop_and_archive(
             logger.info(f"Removed bot {bot_name_for_orchestrator} from active_bots and cleared MQTT data")
 
 
+async def _background_archive_offline(
+    bot_name: str,
+    container_name: str,
+    archive_locally: bool,
+    s3_bucket: Optional[str],
+    docker_manager: DockerService,
+    bot_archiver: BotArchiver,
+    db_manager: AsyncDatabaseManager,
+    bot_state_sync: BotStateSyncService,
+):
+    """
+    Best-effort stop/archive/remove for bots that are NOT currently reachable via MQTT.
+
+    This handles common failure modes:
+    - Container exited/crashed and is no longer connected to MQTT.
+    - Dashboard "Stop & Archive" should still remove the instance from Docker.
+    """
+    try:
+        logger.info(f"Starting offline stop-and-archive for {bot_name} (container={container_name})")
+
+        # Update bot run stop timestamp (we can't capture final MQTT status here).
+        try:
+            async with db_manager.get_session_context() as session:
+                bot_run_repo = BotRunRepository(session)
+                await bot_run_repo.update_bot_run_stopped(bot_name, final_status=None)
+                logger.info(f"Updated bot run stopped_at for {bot_name} (offline)")
+        except Exception as e:
+            logger.warning(f"Failed updating bot run stopped status for {bot_name} (offline): {e}")
+
+        # Stop the container if it's still running.
+        container_status = docker_manager.get_container_status(container_name)
+        if container_status.get("success") and container_status.get("state", {}).get("status") == "running":
+            max_retries = 5
+            retry_interval = 2
+            for i in range(max_retries):
+                logger.info(
+                    f"[offline] Attempting to stop container {container_name} (attempt {i+1}/{max_retries})"
+                )
+                docker_manager.stop_container(container_name)
+                await asyncio.sleep(retry_interval)
+                status = docker_manager.get_container_status(container_name)
+                if status.get("state", {}).get("status") in {"exited", "dead"}:
+                    break
+
+        # Archive bot data if present on disk.
+        instance_dir = os.path.join("bots", "instances", container_name)
+        if os.path.exists(instance_dir):
+            logger.info(f"[offline] Archiving bot data from {instance_dir}")
+            try:
+                if archive_locally:
+                    bot_archiver.archive_locally(container_name, instance_dir)
+                else:
+                    bot_archiver.archive_and_upload(container_name, instance_dir, bucket_name=s3_bucket)
+                logger.info(f"[offline] Successfully archived bot data for {container_name}")
+            except Exception as e:
+                logger.error(f"[offline] Archive failed for {container_name}: {e}")
+        else:
+            logger.info(f"[offline] Instance dir missing; skipping archive: {instance_dir}")
+
+        # Remove the container (if present).
+        logger.info(f"[offline] Removing container {container_name}")
+        remove_response = docker_manager.remove_container(container_name, force=False)
+        if not remove_response.get("success"):
+            logger.warning("[offline] Graceful container removal failed; attempting force removal")
+            remove_response = docker_manager.remove_container(container_name, force=True)
+
+        if remove_response.get("success"):
+            try:
+                async with db_manager.get_session_context() as session:
+                    bot_run_repo = BotRunRepository(session)
+                    await bot_run_repo.update_bot_run_archived(bot_name)
+                    logger.info(f"[offline] Updated bot run deployment status to ARCHIVED for {bot_name}")
+            except Exception as e:
+                logger.warning(f"[offline] Failed updating bot run archived status for {bot_name}: {e}")
+        else:
+            logger.error(f"[offline] Failed to remove container {container_name}: {remove_response}")
+            try:
+                async with db_manager.get_session_context() as session:
+                    bot_run_repo = BotRunRepository(session)
+                    await bot_run_repo.update_bot_run_stopped(
+                        bot_name,
+                        error_message="Failed to remove container during offline archive process",
+                    )
+            except Exception as e:
+                logger.warning(f"[offline] Failed updating bot run error for {bot_name}: {e}")
+    except Exception as e:
+        logger.error(f"[offline] Error in offline stop-and-archive for {bot_name}: {e}", exc_info=True)
+        try:
+            async with db_manager.get_session_context() as session:
+                bot_run_repo = BotRunRepository(session)
+                await bot_run_repo.update_bot_run_stopped(
+                    bot_name,
+                    error_message=str(e),
+                )
+        except Exception as db_error:
+            logger.warning(f"[offline] Failed updating bot run error for {bot_name}: {db_error}")
+    finally:
+        # Clear confirmed_running state to allow re-tracking if redeployed.
+        bot_state_sync.clear_confirmed_running(bot_name)
+        bot_state_sync.clear_confirmed_running(container_name)
+
+
 @router.post("/stop-and-archive-bot/{bot_name}")
 async def stop_and_archive_bot(
     bot_name: str,
@@ -833,37 +935,40 @@ async def stop_and_archive_bot(
         # Check if bot exists in active bots (could be stored as either format)
         bot_found = (actual_bot_name in active_bots) or (container_name in active_bots)
         
-        if not bot_found:
-            return {
-                "status": "error",
-                "message": f"Bot '{actual_bot_name}' not found in active bots. Active bots: {active_bots}. Cannot perform graceful shutdown.",
-                "details": {
-                    "input_name": bot_name,
-                    "actual_bot_name": actual_bot_name,
-                    "container_name": container_name,
-                    "active_bots": active_bots,
-                    "reason": "Bot must be actively managed via MQTT for graceful shutdown"
-                }
-            }
-        
-        # Use the format that's actually stored in active bots
-        bot_name_for_orchestrator = container_name if container_name in active_bots else actual_bot_name
+        if bot_found:
+            # Use the format that's actually stored in active bots
+            bot_name_for_orchestrator = container_name if container_name in active_bots else actual_bot_name
 
-        # Add the background task
-        background_tasks.add_task(
-            _background_stop_and_archive,
-            bot_name=actual_bot_name,
-            container_name=container_name,
-            bot_name_for_orchestrator=bot_name_for_orchestrator,
-            skip_order_cancellation=skip_order_cancellation,
-            archive_locally=archive_locally,
-            s3_bucket=s3_bucket,
-            bots_manager=bots_manager,
-            docker_manager=docker_manager,
-            bot_archiver=bot_archiver,
-            db_manager=db_manager,
-            bot_state_sync=bot_state_sync
-        )
+            # Add the background task
+            background_tasks.add_task(
+                _background_stop_and_archive,
+                bot_name=actual_bot_name,
+                container_name=container_name,
+                bot_name_for_orchestrator=bot_name_for_orchestrator,
+                skip_order_cancellation=skip_order_cancellation,
+                archive_locally=archive_locally,
+                s3_bucket=s3_bucket,
+                bots_manager=bots_manager,
+                docker_manager=docker_manager,
+                bot_archiver=bot_archiver,
+                db_manager=db_manager,
+                bot_state_sync=bot_state_sync
+            )
+            mode = "graceful_mqtt"
+        else:
+            # Fallback: container may be exited/crashed or MQTT is stale.
+            background_tasks.add_task(
+                _background_archive_offline,
+                bot_name=actual_bot_name,
+                container_name=container_name,
+                archive_locally=archive_locally,
+                s3_bucket=s3_bucket,
+                docker_manager=docker_manager,
+                bot_archiver=bot_archiver,
+                db_manager=db_manager,
+                bot_state_sync=bot_state_sync,
+            )
+            mode = "offline_best_effort"
         
         return {
             "status": "success",
@@ -872,7 +977,8 @@ async def stop_and_archive_bot(
                 "input_name": bot_name,
                 "actual_bot_name": actual_bot_name,
                 "container_name": container_name,
-                "process": "The bot will be gracefully stopped, archived, and removed in the background. This process typically takes 20-30 seconds."
+                "mode": mode,
+                "process": "The bot will be stopped (if possible), archived, and removed in the background. This process typically takes 20-30 seconds."
             }
         }
         
