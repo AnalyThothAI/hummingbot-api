@@ -89,6 +89,18 @@ def test_clmm_lp_controller_pct_fields_are_ratios():
                         "Safety ceiling is 0.2 (20%)."
                     )
 
+        raw_attempts = _parse_yaml_scalar(text, "max_exit_swap_attempts")
+        if raw_attempts is not None and raw_attempts != "" and raw_attempts.lower() not in {"null", "none"}:
+            try:
+                attempts = int(Decimal(raw_attempts))
+            except Exception:
+                offenders.append(f"{path}: max_exit_swap_attempts not an int: {raw_attempts!r}")
+            else:
+                if attempts < 10:
+                    offenders.append(
+                        f"{path}: max_exit_swap_attempts too low: {attempts}. Recommended minimum is 10."
+                    )
+
     assert offenders == []
 
 

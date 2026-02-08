@@ -20,6 +20,11 @@ def test_mcp_bot_ops_skill_has_required_sections_and_guardrails():
     for required in (
         "gateway_swap_quote",
         "gateway_swap_execute",
+        "swap_provider",
+        "`solana-mainnet-beta` -> `jupiter/router`",
+        "`ethereum-base` -> `uniswap/router`",
+        "`ethereum-bsc` -> `uniswap/router`",
+        "pancakeswap/router",  # still a supported connector
         "gateway_allowances",
         "gateway_approve",
         "priceImpactPct",
@@ -31,8 +36,6 @@ def test_mcp_bot_ops_skill_has_required_sections_and_guardrails():
         "UNLIMITED_APPROVE",
         "quote freshness",
         "spender",
-        "pancakeswap/router",
-        "uniswap/router",
     ):
         assert required in text
 
@@ -47,4 +50,3 @@ def test_mcp_bot_ops_skill_has_required_sections_and_guardrails():
         "id == YAML basename",
     ):
         assert required in text
-

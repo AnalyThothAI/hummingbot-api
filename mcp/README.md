@@ -70,8 +70,14 @@ Inputs use the unified fields:
 - `chainNetwork` (e.g., `ethereum-bsc`, `solana-mainnet-beta`)
 - `baseToken`, `quoteToken` (symbol or address)
 - `amount`, `side` (`BUY`/`SELL`)
-- Optional: `connector` (e.g., `pancakeswap/router`), `slippagePct`, `walletAddress`
+- Optional: `connector` (e.g., `uniswap/router`, `pancakeswap/router`, `jupiter/router`), `slippagePct`, `walletAddress`
   - `slippagePct` is a percentage (0-100). `1` = 1%, `0.01` = 0.01% (1 bp).
+  - If `connector` is omitted, Gateway uses the network's configured `swap_provider` (see `gateway_network_config_get`).
+  - Typical defaults in this repo:
+    - `solana-mainnet-beta` -> `jupiter/router`
+    - `ethereum-base` -> `uniswap/router`
+    - `ethereum-bsc` -> `uniswap/router`
+    - `pancakeswap/router` is still supported on BSC as an explicit override.
 
 Important: Do not copy Gateway `slippagePct` values directly into controller YAML `*_pct` fields.
 Controller configs use **ratio** semantics for `*_pct` fields: `0.01` means 1% (and `0.05` means 5%).
@@ -85,7 +91,7 @@ Example (quote):
   "quoteToken": "0x55d398326f99059ff775485246999027b3197955",
   "amount": 1,
   "side": "SELL",
-  "connector": "pancakeswap/router",
+  "connector": "uniswap/router",
   "slippagePct": 1
 }
 ```
@@ -98,7 +104,7 @@ Example (execute):
   "quoteToken": "0x55d398326f99059ff775485246999027b3197955",
   "amount": 1,
   "side": "SELL",
-  "connector": "pancakeswap/router",
+  "connector": "uniswap/router",
   "walletAddress": "0xYourWallet",
   "slippagePct": 1
 }
@@ -108,6 +114,20 @@ Allowance/authorization (EVM only):
 - Check: `gateway_allowances` with `{network_id, address, tokens, spender}`
 - Approve: `gateway_approve` for missing token+spender before `gateway_swap_execute`
   - `spender` should be a connector string with a suffix (contains `/`), e.g. `pancakeswap/router`, `uniswap/router`, `uniswap/clmm`, or a direct spender address (do not strip the suffix).
+
+Gas / transaction settings (Gateway-level):
+- Swap tools in this MCP adapter do **not** accept gas parameters directly.
+- Tune per-network settings via:
+  - `gateway_network_config_get`
+  - `gateway_network_config_update` (mutating; requires care)
+- Tune per-connector settings via:
+  - `gateway_connector_config`
+  - `gateway_connector_config_update`
+
+Common defaults (from Gateway templates; verify actual runtime config via `gateway_network_config_get`):
+- Base (`ethereum-base`): EIP-1559 style (`baseFeeMultiplier: 1.2`, `priorityFee: 0.001` gwei).
+- BSC (`ethereum-bsc`): legacy `gasPrice` (often left blank to auto-fetch from RPC).
+- Solana (`solana-mainnet-beta`): `defaultComputeUnits`, `confirmRetryInterval`, `confirmRetryCount`, `minPriorityFeePerCU`.
 
 ### Bot orchestration
 - `bot_status`

@@ -56,7 +56,7 @@ class CLMMLPBaseConfig(ControllerConfigBase):
 
     exit_full_liquidation: bool = Field(default=False, json_schema_extra={"is_updatable": True})
     exit_swap_slippage_pct: Decimal = Field(default=Decimal("0.01"), json_schema_extra={"is_updatable": True})
-    max_exit_swap_attempts: int = Field(default=5, json_schema_extra={"is_updatable": True})
+    max_exit_swap_attempts: int = Field(default=10, json_schema_extra={"is_updatable": True})
 
     stop_loss_pnl_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     take_profit_pnl_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})

@@ -66,6 +66,8 @@ The MCP process reads `.env` automatically if present (see `mcp/server.py:_load_
 Before calling any of:
 - `gateway_swap_execute`
 - `gateway_approve`
+- `gateway_network_config_update`
+- `gateway_connector_config_update`
 - `bot_deploy_v2_controllers`, `bot_deploy_v2_script`
 - `bot_stop`, `bot_stop_and_archive`
 
@@ -94,6 +96,13 @@ Inputs: `chainNetwork`, `baseToken`, `quoteToken`, `amount`, `side`, optional `c
 Notes:
 - `slippagePct` is 0-100 percent (1 = 1%, 0.01 = 0.01%).
 - Example connectors: `pancakeswap/router`, `uniswap/router`, `jupiter/router`.
+- If `connector` is omitted, Gateway uses the network's configured `swap_provider` (see `gateway_network_config_get`).
+  - Typical defaults in this repo:
+    - `solana-mainnet-beta` -> `jupiter/router`
+    - `ethereum-base` -> `uniswap/router`
+    - `ethereum-bsc` -> `uniswap/router`
+  - `pancakeswap/router` is still supported on BSC, but it is not the default in this repo.
+  - If you need a non-default DEX on a network (e.g., use `pancakeswap/router` on `ethereum-bsc`), set `connector` explicitly in the swap call or update the network `swap_provider` via `gateway_network_config_update` (then `gateway_restart`).
 
 Steps:
 1. Call `gateway_status`.
@@ -116,7 +125,37 @@ Failure modes & recovery (swap):
 - Allowances/approve fails with "Invalid spender": ensure spender contains `/` (e.g., `pancakeswap/router`) or provide an address.
 - Execute returns no tx hash: stop and inspect `gateway_logs`.
 
+## Workflow A.5: Gas & Transaction Settings (Gateway)
+Important: Gas/priority fee settings are **not** parameters of `gateway_swap_quote/execute` in this MCP adapter.
+They are configured at the Gateway level:
+- Network config (per `network_id`): `gateway_network_config_get`, `gateway_network_config_update`
+- Connector config (per connector): `gateway_connector_config`, `gateway_connector_config_update`
+
+Suggested process:
+1. Inspect current network config with `gateway_network_config_get` using `network_id == chainNetwork` (e.g., `ethereum-base`, `ethereum-bsc`, `solana-mainnet-beta`).
+2. If tuning is needed, request confirmation and apply updates via `gateway_network_config_update`.
+3. Inspect connector config with `gateway_connector_config` (e.g., `jupiter`, `uniswap`, `pancakeswap`) and update with `gateway_connector_config_update` if needed.
+4. After config updates, restart Gateway with `gateway_restart` (recommended) and re-check `gateway_status`.
+
+Common defaults (verify via `gateway_network_config_get`):
+- Base (`ethereum-base`): EIP-1559 style with `baseFeeMultiplier` and `priorityFee` (Gateway templates use `baseFeeMultiplier: 1.2`, `priorityFee: 0.001` gwei).
+- BSC (`ethereum-bsc`): legacy `gasPrice` (often left blank to auto-fetch from RPC).
+- Solana (`solana-mainnet-beta`): `defaultComputeUnits`, `confirmRetryInterval`, `confirmRetryCount`, `minPriorityFeePerCU`.
+
+Solana swap tuning (Jupiter):
+- Jupiter connector config includes `priorityLevel` and `maxLamports` (priority fee cap). Use `gateway_connector_config` / `gateway_connector_config_update`.
+
 ## Workflow B: Deploy V2 (plan-first)
+Minimum required deploy inputs (controllers):
+- `instance_name` (string)
+- `credentials_profile` (string)
+- `controllers_config` (array of YAML basenames, e.g. `["clmm_lp_uniswap"]`)
+
+Optional (recommended when deploying on-chain):
+- `gateway_network_id` (chain-network, e.g. `ethereum-bsc`, `solana-mainnet-beta`)
+- `gateway_wallet_address` (wallet to set as Gateway default)
+- `apply_gateway_defaults` (default true)
+
 1. Call `gateway_status`.
 2. Call `deploy_v2_workflow_plan` and inspect: `summary`, `blockers`, `actions`, `notes`.
 3. If `blockers` is non-empty: stop and request the missing inputs.
@@ -141,6 +180,11 @@ Steps:
 2. Build a config payload that includes at least:
    - `controller_name`, `controller_type`, `id`
    - connector + trading/pool fields required by the controller (e.g., `connector_name`, `trading_pair`, `pool_address`)
+   - For CLMM LP controllers (recommended defaults unless user specifies otherwise):
+     - Entry gate: `target_price: 0` (no trigger), keep `trigger_above: true`
+     - Exit liquidation: `exit_full_liquidation: true` (only if you want base->quote on exit)
+     - Swap risk: `exit_swap_slippage_pct` (ratio, e.g. `0.05` = 5%), `max_exit_swap_attempts: 10`
+     - Gas buffer: `native_token_symbol` (e.g. `ETH`/`BNB`/`SOL`) and `min_native_balance`
 3. Validate with `controller_config_validate` (fix any 400 errors).
 4. Save with `controller_config_upsert` using `config_name` (YAML basename).
 

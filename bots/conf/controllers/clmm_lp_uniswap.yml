@@ -23,7 +23,7 @@ rebalance_open_timeout_sec: 300
 
 exit_full_liquidation: true
 exit_swap_slippage_pct: 0.05
-max_exit_swap_attempts: 5
+max_exit_swap_attempts: 10
 
 stop_loss_pnl_pct: 0.3
 stop_loss_pause_sec: 1800

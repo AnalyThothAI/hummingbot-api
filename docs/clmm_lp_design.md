@@ -171,7 +171,7 @@ Controller 维护的钱包与派生数据：
 - `reenter_enabled` 默认 `false`，为 `false` 时止盈/止损后不再自动入场
 - `exit_full_liquidation` 控制止盈/止损后是否执行 base->quote 清算
 - `exit_swap_slippage_pct` 控制清算 swap 的滑点上限
-- `max_exit_swap_attempts` 控制清算 swap 的最大尝试次数
+- `max_exit_swap_attempts` 控制清算 swap 的最大尝试次数（建议主网最少 10 次，避免偶发链上失败导致残留仓位）
 
 示例：`bots/conf/controllers/clmm_lp_uniswap.yml` / `bots/conf/controllers/clmm_lp_meteora.yml`（已给出）。
 
