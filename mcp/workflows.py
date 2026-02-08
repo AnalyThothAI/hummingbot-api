@@ -684,6 +684,9 @@ def _parse_allowances(result: Any) -> Dict[str, Any]:
     if isinstance(result, dict):
         if "allowances" in result and isinstance(result["allowances"], dict):
             return result["allowances"]
+        # Gateway returns `{ spender, approvals }` for allowances.
+        if "approvals" in result and isinstance(result["approvals"], dict):
+            return result["approvals"]
         if all(isinstance(value, (int, float, str)) for value in result.values()):
             return result
     if isinstance(result, list):

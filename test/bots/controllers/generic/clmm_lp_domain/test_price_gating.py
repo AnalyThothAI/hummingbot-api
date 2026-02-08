@@ -94,9 +94,8 @@ def test_rebalance_engine_uses_price_not_executor_state():
 
 def test_rebalance_engine_accepts_hysteresis_percent_points():
     config = DummyConfig()
-    # Historically configs used mixed semantics for *_pct fields. When the user sets "1",
-    # it should be treated as 1% (not 100%).
-    config.hysteresis_pct = Decimal("1")
+    # Ratio semantics: 0.01 == 1%
+    config.hysteresis_pct = Decimal("0.01")
     engine = RebalanceEngine(config=config, estimate_position_value=_estimate_position_value)
     lp_view = _make_lp_view(state=None, lower=Decimal("100"), upper=Decimal("150"))
     snapshot = _make_snapshot(now=1000, price=Decimal("200"), lp_view=lp_view)

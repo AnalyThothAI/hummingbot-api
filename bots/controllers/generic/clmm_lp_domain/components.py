@@ -4,32 +4,21 @@ from decimal import Decimal
 from enum import Enum
 from typing import Deque, Dict, List, Optional, Tuple
 
+from bots.controllers.shared.percent import pct_to_ratio as _pct_to_ratio
 from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executor_actions import ExecutorAction
 
 
 def pct_to_ratio(pct: Decimal) -> Decimal:
-    """
-    Normalize a percentage-like config value into a ratio.
+    """Normalize controller config *_pct values to a ratio (0-1).
 
-    This codebase historically used mixed semantics for *_pct fields:
-    - Some configs specify ratios (e.g. 0.3 for 30%)
-    - Some configs specify percentages (e.g. 30 for 30%)
+    Controller YAML uses ratio semantics: 0.05 == 5%.
+    Percent-points (e.g. 5 == 5%) are intentionally rejected to avoid ambiguity.
+
+    Kept here as a thin wrapper for backward import-compatibility inside the CLMM
+    domain package.
     """
-    if pct is None:
-        return Decimal("0")
-    try:
-        value = Decimal(pct)
-    except Exception:
-        return Decimal("0")
-    if value <= 0:
-        return Decimal("0")
-    # Heuristic: values >= 1 are interpreted as percentage points.
-    # Examples:
-    # - 30 -> 0.30
-    # - 10 -> 0.10
-    # - 0.3 -> 0.3
-    return value / Decimal("100") if value >= Decimal("1") else value
+    return _pct_to_ratio(pct)
 
 
 class ControllerState(str, Enum):

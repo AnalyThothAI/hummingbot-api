@@ -421,8 +421,11 @@ class ActionFactory:
 
     def swap_slippage_pct(self) -> Decimal:
         # `GatewaySwapExecutorConfig.slippage_pct` is percentage points (0-100).
-        # Accept either ratio (0-1) or percentage points (0-100) in config.
-        return pct_to_ratio(getattr(self._config, "exit_swap_slippage_pct", Decimal("0"))) * Decimal("100")
+        # Controller config uses ratio semantics (0-1). Example: 0.05 == 5%.
+        ratio = pct_to_ratio(getattr(self._config, "exit_swap_slippage_pct", Decimal("0")))
+        if ratio > Decimal("0.2"):
+            raise ValueError("exit_swap_slippage_pct too high; max is 0.2 (20%).")
+        return ratio * Decimal("100")
 
     def build_swap_action(
         self,

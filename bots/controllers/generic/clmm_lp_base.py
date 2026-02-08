@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import ConfigDict, Field
+from pydantic import ConfigDict, Field, field_validator
 
 from hummingbot.core.data_type.common import MarketDict
 from hummingbot.core.utils.async_utils import safe_ensure_future
@@ -45,7 +45,8 @@ class CLMMLPBaseConfig(ControllerConfigBase):
 
     position_value_quote: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
 
-    position_width_pct: Decimal = Field(default=Decimal("12"), json_schema_extra={"is_updatable": True})
+    # Ratio semantics: 0.12 == 12%
+    position_width_pct: Decimal = Field(default=Decimal("0.12"), json_schema_extra={"is_updatable": True})
     rebalance_enabled: bool = Field(default=False, json_schema_extra={"is_updatable": True})
     rebalance_seconds: int = Field(default=60, json_schema_extra={"is_updatable": True})
     hysteresis_pct: Decimal = Field(default=Decimal("0.002"), json_schema_extra={"is_updatable": True})
@@ -67,6 +68,52 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     min_native_balance: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     balance_update_timeout_sec: int = Field(default=10, json_schema_extra={"is_updatable": True})
     balance_refresh_timeout_sec: int = Field(default=30, json_schema_extra={"is_updatable": True})
+
+    @field_validator(
+        "position_width_pct",
+        "hysteresis_pct",
+        "exit_swap_slippage_pct",
+        "stop_loss_pnl_pct",
+        "take_profit_pnl_pct",
+        mode="before",
+    )
+    @classmethod
+    def parse_ratio_decimal(cls, v):
+        if isinstance(v, str):
+            if v == "":
+                return Decimal("0")
+            return Decimal(v)
+        return v
+
+    @field_validator(
+        "position_width_pct",
+        "hysteresis_pct",
+        "exit_swap_slippage_pct",
+        "stop_loss_pnl_pct",
+        "take_profit_pnl_pct",
+        mode="after",
+    )
+    @classmethod
+    def validate_ratio_0_1(cls, v, info):
+        if v is None:
+            return v
+        if v < 0:
+            raise ValueError(f"{info.field_name} must be >= 0 (ratio)")
+        if v > 1:
+            raise ValueError(
+                f"{info.field_name} must be a ratio in [0, 1] (e.g. 0.05 for 5%). Got: {v}."
+            )
+        return v
+
+    @field_validator("exit_swap_slippage_pct", mode="after")
+    @classmethod
+    def validate_exit_swap_slippage_pct(cls, v):
+        # Guardrail: slippage is high-risk; cap to prevent accidental 500% style configs.
+        if v is None:
+            return v
+        if v > Decimal("0.2"):
+            raise ValueError("exit_swap_slippage_pct too high; max is 0.2 (20%).")
+        return v
 
     def update_markets(self, markets: MarketDict) -> MarketDict:
         pool_pair = self.pool_trading_pair or self.trading_pair

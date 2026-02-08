@@ -18,7 +18,7 @@ class RangeCalculator:
     def geometric_bounds(center_price: Decimal, width_pct: Decimal) -> Optional[Tuple[Decimal, Decimal]]:
         if center_price <= 0:
             return None
-        # Accept both ratio (0-1) and percentage points (0-100) inputs.
+        # Controller config uses ratio semantics (0-1). Example: 0.12 == 12%.
         width = pct_to_ratio(width_pct)
         factor = (Decimal("1") + width).sqrt()
         lower = center_price / factor

@@ -7,9 +7,9 @@ trading_pair: BORT-USDT
 pool_address: '0x9e227088422901b5d8a9bd07cfe2844e202fcf15'
 total_amount_quote: '10'
 position_value_quote: '10'
-position_width_pct: '30'
-stop_loss_pnl_pct: '30'
-take_profit_pnl_pct: '10'
+position_width_pct: 0.30
+stop_loss_pnl_pct: 0.30
+take_profit_pnl_pct: 0.10
 initial_positions:
 - connector_name: uniswap/clmm
   trading_pair: BORT-USDT

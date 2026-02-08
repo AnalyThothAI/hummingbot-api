@@ -11,7 +11,7 @@ target_price: 0
 trigger_above: true
 
 position_value_quote: 0.3
-position_width_pct: 8
+position_width_pct: 0.08
 ratio_edge_buffer_pct: 0.02
 strategy_type: 0
 

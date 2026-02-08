@@ -11,7 +11,7 @@ target_price: 0
 trigger_above: true
 
 position_value_quote: 40
-position_width_pct: 28
+position_width_pct: 0.28
 ratio_clamp_tick_multiplier: 2
 
 rebalance_enabled: false

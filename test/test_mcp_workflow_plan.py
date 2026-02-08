@@ -19,6 +19,9 @@ class _FakeClient:
         return {}
 
     def post(self, path, params=None, json_body=None):
+        if path == "/gateway/allowances":
+            # Gateway returns `approvals` (token -> allowance string in token units).
+            return {"spender": "0xspender", "approvals": {"USDT": "0"}}
         return {}
 
     def delete(self, path, params=None):
@@ -70,3 +73,18 @@ class McpWorkflowPlanTests(unittest.TestCase):
 
         self.assertTrue(any("uniquified" in note for note in plan["notes"]))
         self.assertFalse(client.called_instances)
+
+    @unittest.skipIf(build_deploy_v2_workflow_plan is None, "mcp dependencies not installed")
+    def test_plan_adds_gateway_approve_action_when_allowance_missing(self):
+        client = _FakeClient()
+        plan = build_deploy_v2_workflow_plan(
+            {
+                "network_id": "ethereum-bsc",
+                "wallet_address": "0xwallet",
+                "spender": "pancakeswap/router",
+                "tokens": [{"symbol": "USDT"}],
+            },
+            client,
+        )
+
+        self.assertTrue(any(action.get("tool") == "gateway_approve" for action in plan["actions"]))

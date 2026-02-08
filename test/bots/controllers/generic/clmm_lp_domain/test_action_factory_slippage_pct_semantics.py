@@ -4,6 +4,8 @@ import sys
 import types
 from decimal import Decimal
 
+import pytest
+
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
 HBOT_ROOT = os.path.join(ROOT, "hummingbot")
@@ -65,7 +67,7 @@ def test_swap_slippage_pct_accepts_ratio():
     assert af.swap_slippage_pct() == Decimal("1")
 
 
-def test_swap_slippage_pct_accepts_percent_points():
-    af = _make_action_factory(DummyConfig(Decimal("1")))  # 1%
-    assert af.swap_slippage_pct() == Decimal("1")
-
+def test_swap_slippage_pct_rejects_large_ratio_guardrail():
+    af = _make_action_factory(DummyConfig(Decimal("0.25")))  # 25%
+    with pytest.raises(ValueError):
+        af.swap_slippage_pct()

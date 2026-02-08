@@ -74,8 +74,8 @@ Inputs use the unified fields:
   - `slippagePct` is a percentage (0-100). `1` = 1%, `0.01` = 0.01% (1 bp).
 
 Important: Do not copy Gateway `slippagePct` values directly into controller YAML `*_pct` fields.
-Controller configs may accept `*_pct` as ratio (`0.01` meaning 1%) or percent-points (`1` meaning 1%).
-To avoid ambiguity, prefer percent-points in YAML (e.g., `exit_swap_slippage_pct: 1` for 1%).
+Controller configs use **ratio** semantics for `*_pct` fields: `0.01` means 1% (and `0.05` means 5%).
+Percent-points values like `5`/`30` are intentionally rejected to avoid ambiguity.
 
 Example (quote):
 ```json
@@ -107,6 +107,7 @@ Example (execute):
 Allowance/authorization (EVM only):
 - Check: `gateway_allowances` with `{network_id, address, tokens, spender}`
 - Approve: `gateway_approve` for missing token+spender before `gateway_swap_execute`
+  - `spender` should be a connector string with a suffix (contains `/`), e.g. `pancakeswap/router`, `uniswap/router`, `uniswap/clmm`, or a direct spender address (do not strip the suffix).
 
 ### Bot orchestration
 - `bot_status`

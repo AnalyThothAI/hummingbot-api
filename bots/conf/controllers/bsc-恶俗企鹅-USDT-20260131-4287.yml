@@ -8,7 +8,7 @@ pool_address: '0xec9a0f0d2f749a0ba2454d2139b3942c3265e1df'
 target_price: 0
 trigger_above: true
 position_value_quote: 30
-position_width_pct: 48
+position_width_pct: 0.48
 ratio_clamp_tick_multiplier: 2
 rebalance_enabled: true
 rebalance_seconds: 60
