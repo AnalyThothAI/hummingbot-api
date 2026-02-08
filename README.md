@@ -11,7 +11,7 @@ make setup    # Creates .env (prompts for passwords)
 make deploy   # Starts all services
 ```
 
-That's it! The API is now running at http://localhost:8000
+That's it! The API is now running at http://localhost:18000 (docker-compose) or http://localhost:8000 (uvicorn dev mode)
 
 ## Available Commands
 
@@ -30,8 +30,8 @@ After `make deploy`, these services are available:
 
 | Service | URL | Description |
 |---------|-----|-------------|
-| **API** | http://localhost:8000 | REST API |
-| **Swagger UI** | http://localhost:8000/docs | Interactive API documentation |
+| **API** | http://localhost:18000 | REST API |
+| **Swagger UI** | http://localhost:18000/docs | Interactive API documentation |
 | **PostgreSQL** | localhost:5432 | Database |
 | **EMQX** | localhost:1883 | MQTT broker |
 | **EMQX Dashboard** | http://localhost:18083 | Broker admin (admin/public) |

@@ -10,6 +10,11 @@ if TYPE_CHECKING:
 else:
     McpHttpClient = Any
 
+
+class UnknownToolError(Exception):
+    """Raised when a requested tool name is not registered (protocol-level error)."""
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -1394,7 +1399,16 @@ def tool_definitions() -> List[Dict[str, Any]]:
         {
             "name": spec.name,
             "description": spec.description,
-            "inputSchema": spec.input_schema,
+            # For no-arg tools, prefer an explicit empty-object schema.
+            # This matches MCP examples and helps clients validate tool calls.
+            "inputSchema": (
+                {**spec.input_schema, "additionalProperties": False}
+                if spec.input_schema.get("type") == "object"
+                and spec.input_schema.get("properties") == {}
+                and "additionalProperties" not in spec.input_schema
+                and "required" not in spec.input_schema
+                else spec.input_schema
+            ),
         }
         for spec in _TOOL_SPECS
     ]
@@ -1403,5 +1417,5 @@ def tool_definitions() -> List[Dict[str, Any]]:
 def dispatch_tool(name: str, arguments: dict, http_client: McpHttpClient) -> Any:
     spec = _TOOL_INDEX.get(name)
     if spec is None:
-        raise ValueError(f"Unknown tool: {name}")
+        raise UnknownToolError(f"Unknown tool: {name}")
     return spec.handler(arguments or {}, http_client)

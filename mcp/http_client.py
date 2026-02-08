@@ -31,17 +31,26 @@ class McpHttpClient:
 
     def get(self, path: str, params: Optional[dict] = None) -> Any:
         """Send GET request."""
-        response = self._client.get(f"{self.base_url}{path}", params=params)
+        try:
+            response = self._client.get(f"{self.base_url}{path}", params=params)
+        except httpx.RequestError as exc:
+            raise McpHttpError(0, str(exc)) from exc
         return self._handle_response(response)
 
     def post(self, path: str, params: Optional[dict] = None, json_body: Optional[dict] = None) -> Any:
         """Send POST request."""
-        response = self._client.post(f"{self.base_url}{path}", params=params, json=json_body)
+        try:
+            response = self._client.post(f"{self.base_url}{path}", params=params, json=json_body)
+        except httpx.RequestError as exc:
+            raise McpHttpError(0, str(exc)) from exc
         return self._handle_response(response)
 
     def delete(self, path: str, params: Optional[dict] = None) -> Any:
         """Send DELETE request."""
-        response = self._client.delete(f"{self.base_url}{path}", params=params)
+        try:
+            response = self._client.delete(f"{self.base_url}{path}", params=params)
+        except httpx.RequestError as exc:
+            raise McpHttpError(0, str(exc)) from exc
         return self._handle_response(response)
 
     @staticmethod

@@ -7,25 +7,31 @@ cd "$ROOT_DIR"
 usage() {
   cat <<'EOF'
 Usage:
-  scripts/ops/redeploy.sh [all|gateway|api|dashboard|verify] [--dev] [--no-build] [--no-recreate]
+  scripts/redeploy.sh [all|gateway|api|dashboard|hummingbot|verify] [--dev] [--no-build] [--no-recreate] [--no-cache] [--hummingbot-image <tag>]
 
 What it does:
   - Rebuilds and/or recreates Docker Compose services so your code changes take effect.
+  - Optionally builds a local Hummingbot bot image from ./hummingbot (git submodule).
   - Optionally runs lightweight HTTP smoke checks.
 
 Flags:
   --dev         Use docker-compose.dev.yml overlay (only affects hummingbot-api hot-reload mounts).
   --no-build    Skip image build step (restart/recreate only).
   --no-recreate Skip --force-recreate (let Compose decide).
+  --no-cache    Disable Docker build cache (applies to docker-compose builds and the hummingbot image build).
+  --hummingbot-image <tag>  Tag to use for the local Hummingbot image (default: hummingbot/hummingbot:local).
 
 Examples:
-  scripts/ops/redeploy.sh gateway
-  scripts/ops/redeploy.sh all
-  scripts/ops/redeploy.sh api --dev
-  scripts/ops/redeploy.sh verify
+  scripts/redeploy.sh gateway
+  scripts/redeploy.sh all
+  scripts/redeploy.sh api --dev
+  scripts/redeploy.sh hummingbot --no-cache
+  scripts/redeploy.sh verify
 
 Notes:
   - This script does NOT restart bot instance containers, because a restart can trigger on-chain actions.
+  - After building the local Hummingbot image, select it in the dashboard "Hummingbot Image" dropdown
+    (e.g. hummingbot/hummingbot:local) when deploying a new instance.
 EOF
 }
 
@@ -45,6 +51,25 @@ compose() {
     files+=(-f docker-compose.dev.yml)
   fi
   docker compose "${files[@]}" "$@"
+}
+
+build_hummingbot_image() {
+  local image="${HUMMINGBOT_IMAGE:-hummingbot/hummingbot:local}"
+  local context="$ROOT_DIR/hummingbot"
+  local dockerfile="$context/Dockerfile"
+
+  [[ -f "$dockerfile" ]] || die "Missing $dockerfile (is the ./hummingbot submodule initialized?)"
+
+  echo "build(hummingbot): $image"
+  local -a args
+  args=(build -t "$image" -f "$dockerfile")
+  if [[ "${NO_CACHE:-0}" == "1" ]]; then
+    args+=(--no-cache)
+  fi
+  # build_ext can be memory-hungry; allow overriding parallelism.
+  args+=(--build-arg "BUILD_EXT_JOBS=${HB_BUILD_EXT_JOBS:-2}")
+  args+=("$context")
+  docker "${args[@]}"
 }
 
 wait_http() {
@@ -68,7 +93,11 @@ redeploy_service() {
   local -a args
   args=(up -d)
   if [[ "${NO_BUILD:-0}" != "1" ]]; then
-    args+=(--build)
+    if [[ "${NO_CACHE:-0}" == "1" ]]; then
+      compose build --no-cache "$service"
+    else
+      args+=(--build)
+    fi
   fi
   if [[ "${NO_RECREATE:-0}" != "1" ]]; then
     args+=(--force-recreate)
@@ -179,12 +208,20 @@ main() {
   need_cmd curl
   need_cmd python3
 
+  # Allow global help before the target (e.g. `scripts/redeploy.sh --help`).
+  if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    usage
+    exit 0
+  fi
+
   local target="${1:-}"
   shift || true
 
   DEV_MODE=0
   NO_BUILD=0
   NO_RECREATE=0
+  NO_CACHE=0
+  HUMMINGBOT_IMAGE="hummingbot/hummingbot:local"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --dev)
@@ -195,6 +232,14 @@ main() {
         ;;
       --no-recreate)
         NO_RECREATE=1
+        ;;
+      --no-cache)
+        NO_CACHE=1
+        ;;
+      --hummingbot-image)
+        shift || true
+        [[ -n "${1:-}" ]] || die "--hummingbot-image requires a tag value"
+        HUMMINGBOT_IMAGE="$1"
         ;;
       -h|--help)
         usage
@@ -219,6 +264,9 @@ main() {
       ;;
     dashboard)
       redeploy_service dashboard
+      ;;
+    hummingbot)
+      build_hummingbot_image
       ;;
     all)
       # Keep dependencies stable; only rebuild app-facing services by default.

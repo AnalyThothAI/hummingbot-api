@@ -7,7 +7,7 @@ import os
 import sys
 from typing import Any, Optional
 
-from mcp.handlers import dispatch_tool
+from mcp.handlers import UnknownToolError, dispatch_tool
 from mcp.http_client import McpHttpClient, McpHttpError
 from mcp.tools import tool_definitions
 
@@ -78,21 +78,33 @@ class McpServer:
         try:
             result = dispatch_tool(name, arguments, self.http_client)
             return self._tool_result(msg_id, result)
-        except McpHttpError as exc:
-            return self._tool_error(msg_id, f"HTTP {exc.status_code}: {exc.message}")
-        except ValueError as exc:
+        except UnknownToolError as exc:
             return self._error(msg_id, -32602, str(exc))
+        except McpHttpError as exc:
+            if exc.status_code > 0:
+                return self._tool_error(msg_id, f"HTTP {exc.status_code}: {exc.message}")
+            return self._tool_error(msg_id, f"Request error: {exc.message}")
+        except ValueError as exc:
+            # MCP spec treats tool input validation errors as tool execution errors, not protocol errors.
+            return self._tool_error(msg_id, str(exc))
         except Exception as exc:  # pragma: no cover - defensive
             return self._error(msg_id, -32603, f"Server error: {exc}")
 
     @staticmethod
     def _tool_result(msg_id: Any, data: Any) -> dict:
-        text = json.dumps(data, ensure_ascii=False)
+        structured_content: Any = None
+        try:
+            text = json.dumps(data, ensure_ascii=False)
+            structured_content = data
+        except TypeError:
+            # Fall back to string output if data isn't JSON-serializable.
+            text = str(data)
         return {
             "jsonrpc": "2.0",
             "id": msg_id,
             "result": {
                 "content": [{"type": "text", "text": text}],
+                **({"structuredContent": structured_content} if structured_content is not None else {}),
                 "isError": False,
             },
         }

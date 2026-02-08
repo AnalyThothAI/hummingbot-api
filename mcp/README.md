@@ -18,13 +18,17 @@ MCP_HUMMINGBOT_API_PASSWORD=admin \
 If you run the API directly with uvicorn (not docker-compose), use `http://127.0.0.1:8000`.
 
 ## Environment variables
-- `MCP_HUMMINGBOT_API_URL` (default: `http://127.0.0.1:18000`)
+- `MCP_HUMMINGBOT_API_URL` (default: `http://127.0.0.1:8000`)
 - `MCP_HUMMINGBOT_API_USERNAME` (required)
 - `MCP_HUMMINGBOT_API_PASSWORD` (required)
 - `MCP_HUMMINGBOT_API_TIMEOUT_SECONDS` (optional, default: `10`)
 
 The MCP process reads `.env` automatically if present (simple loader, no extra deps).
 `make run` starts the API, but does not start MCP.
+
+### Port note (docker-compose vs uvicorn)
+- `make deploy` uses docker-compose and maps the API to `http://127.0.0.1:18000` on the host.
+- `make run` starts uvicorn directly and defaults to `http://127.0.0.1:8000`.
 
 ## Tools
 ### Gateway
