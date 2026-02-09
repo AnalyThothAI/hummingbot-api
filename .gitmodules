@@ -1,6 +1,6 @@
 [submodule "hummingbot"]
 	path = hummingbot
-	url = https://github.com/hummingbot/hummingbot.git
+	url = https://github.com/AnalyThothAI/hummingbot.git
 [submodule "gateway"]
 	path = gateway
 	url = https://github.com/AnalyThothAI/gateway.git
