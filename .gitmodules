@@ -3,4 +3,4 @@
 	url = https://github.com/hummingbot/hummingbot.git
 [submodule "gateway"]
 	path = gateway
-	url = https://github.com/hummingbot/gateway.git
+	url = https://github.com/AnalyThothAI/gateway.git
