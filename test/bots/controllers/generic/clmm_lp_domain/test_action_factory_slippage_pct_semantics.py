@@ -6,14 +6,6 @@ from decimal import Decimal
 
 import pytest
 
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
-HBOT_ROOT = os.path.join(ROOT, "hummingbot")
-for path in (ROOT, HBOT_ROOT):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
-
 dummy_gateway_module = types.ModuleType("hummingbot.core.gateway.gateway_http_client")
 
 

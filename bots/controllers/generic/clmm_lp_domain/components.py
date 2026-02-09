@@ -161,6 +161,8 @@ class Snapshot:
     swaps: Dict[str, SwapView]
     active_lp: List[LPView]
     active_swaps: List[SwapView]
+    # Timestamp of the last successful wallet balance update (MarketDataProvider time source).
+    balance_update_ts: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -209,6 +211,7 @@ class ControllerContext:
     pending_realized_anchor: Optional[Decimal] = None
     force_balance_refresh_until_ts: float = 0.0
     force_balance_refresh_reason: Optional[str] = None
+    force_balance_refresh_since_ts: float = 0.0
     exit_balance_refresh_attempts: int = 0
 
 

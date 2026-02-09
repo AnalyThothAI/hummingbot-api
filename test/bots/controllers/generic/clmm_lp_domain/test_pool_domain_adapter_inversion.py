@@ -2,14 +2,6 @@ import os
 import sys
 from decimal import Decimal
 
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
-HBOT_ROOT = os.path.join(ROOT, "hummingbot")
-for path in (ROOT, HBOT_ROOT):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
-
 from bots.controllers.generic.clmm_lp_domain.components import PoolDomainAdapter
 
 
@@ -72,4 +64,3 @@ def test_executor_token_order_inverted_detection_prefers_config_tokens():
     domain = PoolDomainAdapter.from_config("MEME-USDT", "USDT-MEME")
     executor = _DummyExecutor(_DummyExecutorConfig(base_token="USDT", quote_token="MEME", trading_pair="USDT-MEME"))
     assert domain.executor_token_order_inverted(executor) is True
-

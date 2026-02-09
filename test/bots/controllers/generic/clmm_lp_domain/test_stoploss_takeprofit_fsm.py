@@ -3,14 +3,6 @@ import sys
 import types
 from decimal import Decimal
 
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
-HBOT_ROOT = os.path.join(ROOT, "hummingbot")
-for path in (ROOT, HBOT_ROOT):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
-
 from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionStates
 
 from bots.controllers.generic.clmm_lp_domain.clmm_fsm import CLMMFSM
@@ -154,3 +146,44 @@ def test_fsm_triggers_take_profit_in_active_and_transitions_to_take_profit_stop(
     assert ctx.pending_close_lp_id == "lp1"
     assert ctx.pending_realized_anchor == Decimal("100")
 
+
+def test_take_profit_has_priority_over_rebalance_when_both_trigger():
+    config = DummyConfig()
+    config.rebalance_enabled = True
+    config.rebalance_seconds = 1
+    config.take_profit_pnl_pct = Decimal("0.10")  # 10%
+
+    fsm = CLMMFSM(
+        config=config,
+        action_factory=DummyActionFactory(),
+        build_open_proposal=_dummy_build_open_proposal,
+        estimate_position_value=_estimate_position_value,
+        rebalance_engine=RebalanceEngine(config=config, estimate_position_value=_estimate_position_value),
+        exit_policy=ExitPolicy(config=config),
+    )
+
+    ctx = ControllerContext()
+    ctx.state = ControllerState.ACTIVE
+    ctx.anchor_value_quote = Decimal("100")
+    ctx.out_of_range_since = 900.0
+
+    lp_view = LPView(
+        executor_id="lp1",
+        is_active=True,
+        is_done=False,
+        close_type=None,
+        state=LPPositionStates.IN_RANGE.value,
+        position_address="0xabc",
+        base_amount=Decimal("0"),
+        quote_amount=Decimal("111"),
+        base_fee=Decimal("0"),
+        quote_fee=Decimal("0"),
+        lower_price=Decimal("1"),
+        upper_price=Decimal("2"),
+        out_of_range_since=None,
+    )
+    snapshot = _make_snapshot(now=1000, price=Decimal("3"), lp_view=lp_view)  # out-of-range + TP
+
+    decision = fsm.step(snapshot, ctx)
+    assert decision.reason == "take_profit"
+    assert ctx.state == ControllerState.TAKE_PROFIT_STOP

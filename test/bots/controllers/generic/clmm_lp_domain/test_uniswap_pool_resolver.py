@@ -4,15 +4,6 @@ import types
 import asyncio
 from types import SimpleNamespace
 
-import pytest
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
-HBOT_ROOT = os.path.join(ROOT, "hummingbot")
-for path in (ROOT, HBOT_ROOT):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
-
 # ---- Stubs for hummingbot dependencies ----
 dummy_async_utils = types.ModuleType("hummingbot.core.utils.async_utils")
 
@@ -133,8 +124,7 @@ sys.modules.pop("bots.controllers.generic.clmm_lp_uniswap", None)
 from bots.controllers.generic.clmm_lp_uniswap import _UniswapPoolDomainResolver
 
 
-@pytest.mark.asyncio
-async def test_pool_info_uses_token0_token1_order_from_address_sort():
+def test_pool_info_uses_token0_token1_order_from_address_sort():
     pool_info = {
         "baseTokenAddress": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "quoteTokenAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -158,14 +148,13 @@ async def test_pool_info_uses_token0_token1_order_from_address_sort():
         market_data_provider=SimpleNamespace(time=lambda: 0),
     )
 
-    pool_pair, error = await resolver._resolve_pool_trading_pair(cfg.pool_address)
+    pool_pair, error = asyncio.run(resolver._resolve_pool_trading_pair(cfg.pool_address))
 
     assert error is None
     assert pool_pair == "AAA-BBB"
 
 
-@pytest.mark.asyncio
-async def test_pool_info_missing_addresses_does_not_fallback():
+def test_pool_info_missing_addresses_does_not_fallback():
     pool_info = {}
     gateway = _GatewayStub(pool_info=pool_info, tokens={})
     _GatewayHttpClient._instance = gateway
@@ -182,7 +171,7 @@ async def test_pool_info_missing_addresses_does_not_fallback():
         market_data_provider=SimpleNamespace(time=lambda: 0),
     )
 
-    pool_pair, error = await resolver._resolve_pool_trading_pair(cfg.pool_address)
+    pool_pair, error = asyncio.run(resolver._resolve_pool_trading_pair(cfg.pool_address))
 
     assert pool_pair is None
     assert error == "pool_data_invalid"

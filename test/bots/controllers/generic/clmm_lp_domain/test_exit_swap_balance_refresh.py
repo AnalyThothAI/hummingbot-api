@@ -3,14 +3,6 @@ import sys
 import types
 from decimal import Decimal
 
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
-HBOT_ROOT = os.path.join(ROOT, "hummingbot")
-for path in (ROOT, HBOT_ROOT):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
-
 for module_name in (
     "bots.controllers.generic.clmm_lp_domain.components",
     "bots.controllers.generic.clmm_lp_domain.clmm_fsm",
@@ -72,7 +64,14 @@ def _estimate_position_value(_lp, _price):
     return Decimal("0")
 
 
-def _make_snapshot(*, now: float, balance_fresh: bool, wallet_base: Decimal, wallet_quote: Decimal) -> Snapshot:
+def _make_snapshot(
+    *,
+    now: float,
+    balance_fresh: bool,
+    wallet_base: Decimal,
+    wallet_quote: Decimal,
+    balance_update_ts: float = 0.0,
+) -> Snapshot:
     return Snapshot(
         now=now,
         current_price=Decimal("1"),
@@ -83,6 +82,7 @@ def _make_snapshot(*, now: float, balance_fresh: bool, wallet_base: Decimal, wal
         swaps={},
         active_lp=[],
         active_swaps=[],
+        balance_update_ts=balance_update_ts,
     )
 
 
@@ -100,15 +100,28 @@ def test_exit_swap_waits_multiple_balance_refresh_attempts_when_stale():
     ctx.state = ControllerState.EXIT_SWAP
     ctx.last_exit_reason = "stop_loss"
 
-    snapshot = _make_snapshot(now=0, balance_fresh=False, wallet_base=Decimal("0"), wallet_quote=Decimal("10"))
+    snapshot = _make_snapshot(now=1000, balance_fresh=False, wallet_base=Decimal("0"), wallet_quote=Decimal("10"))
     decision1 = fsm.step(snapshot, ctx)
     assert decision1.reason == "exit_refresh_balance"
     assert ctx.exit_balance_refresh_attempts == 1
     assert ctx.state == ControllerState.EXIT_SWAP
 
+    snapshot = _make_snapshot(now=1001, balance_fresh=False, wallet_base=Decimal("0"), wallet_quote=Decimal("10"))
     decision2 = fsm.step(snapshot, ctx)
     assert decision2.reason == "exit_refresh_balance"
+    assert ctx.exit_balance_refresh_attempts == 1
+    assert ctx.state == ControllerState.EXIT_SWAP
+
+    snapshot = _make_snapshot(now=1002.1, balance_fresh=False, wallet_base=Decimal("0"), wallet_quote=Decimal("10"))
+    decision3 = fsm.step(snapshot, ctx)
+    assert decision3.reason == "exit_refresh_balance"
     assert ctx.exit_balance_refresh_attempts == 2
+    assert ctx.state == ControllerState.EXIT_SWAP
+
+    snapshot = _make_snapshot(now=1006.1, balance_fresh=False, wallet_base=Decimal("0"), wallet_quote=Decimal("10"))
+    decision4 = fsm.step(snapshot, ctx)
+    assert decision4.reason == "exit_wait_balance"
+    assert ctx.exit_balance_refresh_attempts >= 4
     assert ctx.state == ControllerState.EXIT_SWAP
 
 
@@ -161,3 +174,31 @@ def test_exit_swap_skips_when_only_min_native_balance_remains():
 
     assert decision.reason == "exit_no_base"
     assert action_factory.last_kwargs is None
+
+
+def test_exit_swap_waits_until_balance_updated_after_entering_exit_swap():
+    config = DummyConfig()
+    fsm = CLMMFSM(
+        config=config,
+        action_factory=DummyActionFactory(),
+        build_open_proposal=_dummy_build_open_proposal,
+        estimate_position_value=_estimate_position_value,
+        rebalance_engine=RebalanceEngine(config=config, estimate_position_value=_estimate_position_value),
+        exit_policy=ExitPolicy(config=config),
+    )
+    ctx = ControllerContext()
+    ctx.state = ControllerState.EXIT_SWAP
+    ctx.state_since_ts = 1000.0
+    ctx.last_exit_reason = "stop_loss"
+
+    snapshot = _make_snapshot(
+        now=1000.1,
+        balance_fresh=True,
+        wallet_base=Decimal("0"),
+        wallet_quote=Decimal("10"),
+        balance_update_ts=999.0,  # pre-exit snapshot that can still be "fresh" by ttl
+    )
+    decision = fsm.step(snapshot, ctx)
+
+    assert decision.reason == "exit_refresh_balance"
+    assert ctx.state == ControllerState.EXIT_SWAP

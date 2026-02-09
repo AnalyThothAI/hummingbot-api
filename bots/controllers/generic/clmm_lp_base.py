@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
 
-from pydantic import ConfigDict, Field, field_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from hummingbot.core.data_type.common import MarketDict
 from hummingbot.core.utils.async_utils import safe_ensure_future
@@ -68,6 +68,19 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     min_native_balance: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     balance_update_timeout_sec: int = Field(default=10, json_schema_extra={"is_updatable": True})
     balance_refresh_timeout_sec: int = Field(default=30, json_schema_extra={"is_updatable": True})
+
+    @model_validator(mode="after")
+    def default_exit_full_liquidation_on_stoploss(self):
+        # If user didn't explicitly set `exit_full_liquidation`, auto-enable it when stoploss is configured.
+        # This matches the "stoploss == close + liquidate" expectation and avoids silent non-liquidation exits.
+        fields_set = getattr(self, "model_fields_set", set())
+        if "exit_full_liquidation" in fields_set:
+            return self
+        
+        if self.stop_loss_pnl_pct is not None and self.stop_loss_pnl_pct > 0:
+            self.exit_full_liquidation = True
+      
+        return self
 
     @field_validator(
         "position_width_pct",
@@ -216,9 +229,14 @@ class CLMMLPBaseController(ControllerBase):
         force_balance = self._ctx.force_balance_refresh_until_ts > now
         self._balance_manager.schedule_refresh(now, force=force_balance)
         # 一旦余额快照刷新完成，清理强制刷新标记。
-        if force_balance and self._balance_manager.is_fresh(now):
+        if (
+            force_balance
+            and self._ctx.force_balance_refresh_since_ts > 0
+            and self._balance_manager.last_update_ts >= self._ctx.force_balance_refresh_since_ts
+        ):
             self._ctx.force_balance_refresh_until_ts = 0.0
             self._ctx.force_balance_refresh_reason = None
+            self._ctx.force_balance_refresh_since_ts = 0.0
         # 构建本 tick 的一致性快照。
         snapshot = self._refresh_snapshot(now)
         self._latest_snapshot = snapshot
@@ -524,6 +542,7 @@ class CLMMLPBaseController(ControllerBase):
         wallet_base: Decimal,
         wallet_quote: Decimal,
         balance_fresh: bool,
+        balance_update_ts: float,
         current_price: Optional[Decimal],
     ) -> Snapshot:
         return self._snapshot_builder.build(
@@ -533,6 +552,7 @@ class CLMMLPBaseController(ControllerBase):
             wallet_base=wallet_base,
             wallet_quote=wallet_quote,
             balance_fresh=balance_fresh,
+            balance_update_ts=balance_update_ts,
         )
 
     def _refresh_snapshot(self, now: float) -> Snapshot:
@@ -541,11 +561,13 @@ class CLMMLPBaseController(ControllerBase):
         price_ctx = self._resolve_price_context(now)
         self._latest_price_context = price_ctx
         balance_fresh = self._balance_manager.is_fresh(now)
+        balance_update_ts = self._balance_manager.last_update_ts
         raw_snapshot = self._build_snapshot(
             now,
             wallet_base=self._balance_manager.wallet_base,
             wallet_quote=self._balance_manager.wallet_quote,
             balance_fresh=balance_fresh,
+            balance_update_ts=balance_update_ts,
             current_price=price_ctx.value,
         )
         return raw_snapshot
@@ -576,9 +598,13 @@ class CLMMLPBaseController(ControllerBase):
     def _request_force_balance_refresh(self, now: float, reason: str) -> None:
         ttl = max(2, int(self.config.balance_update_timeout_sec))
         deadline = now + ttl
+        if self._ctx.force_balance_refresh_until_ts <= now:
+            self._ctx.force_balance_refresh_since_ts = now
         if deadline > self._ctx.force_balance_refresh_until_ts:
             self._ctx.force_balance_refresh_until_ts = deadline
             self._ctx.force_balance_refresh_reason = reason
+            if self._ctx.force_balance_refresh_since_ts <= 0:
+                self._ctx.force_balance_refresh_since_ts = now
 
     def _estimate_position_value(self, lp_view: LPView, current_price: Decimal) -> Decimal:
         base_amount = abs(lp_view.base_amount)

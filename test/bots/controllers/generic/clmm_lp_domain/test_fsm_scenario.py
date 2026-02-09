@@ -3,12 +3,6 @@ import sys
 import types
 from decimal import Decimal
 
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
-HBOT_ROOT = os.path.join(ROOT, "hummingbot")
-for path in (ROOT, HBOT_ROOT):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
 from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionStates
 from hummingbot.strategy_v2.models.executors import CloseType
 
@@ -133,11 +127,14 @@ def _make_snapshot(
     wallet_base: Decimal = Decimal("0"),
     wallet_quote: Decimal = Decimal("0"),
     balance_fresh: bool = True,
+    balance_update_ts: float | None = None,
 ):
     lp_views = lp_views or []
     swaps = swaps or []
     lp_map = {lp.executor_id: lp for lp in lp_views}
     swap_map = {swap.executor_id: swap for swap in swaps}
+    if balance_update_ts is None:
+        balance_update_ts = float(now) if balance_fresh else 0.0
     return Snapshot(
         now=now,
         current_price=price,
@@ -148,6 +145,7 @@ def _make_snapshot(
         swaps=swap_map,
         active_lp=[lp for lp in lp_views if lp.is_active],
         active_swaps=[swap for swap in swaps if swap.is_active],
+        balance_update_ts=balance_update_ts,
     )
 
 

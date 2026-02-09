@@ -4,14 +4,6 @@ import types
 import asyncio
 from decimal import Decimal
 
-import pytest
-
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../.."))
-HBOT_ROOT = os.path.join(ROOT, "hummingbot")
-for path in (ROOT, HBOT_ROOT):
-    if path not in sys.path:
-        sys.path.insert(0, path)
-
 dummy_async_utils = types.ModuleType("hummingbot.core.utils.async_utils")
 
 
@@ -97,8 +89,7 @@ class _Logger:
         pass
 
 
-@pytest.mark.asyncio
-async def test_price_provider_returns_unavailable_on_gateway_error():
+def test_price_provider_returns_unavailable_on_gateway_error():
     _GatewayHttpClient._instance = _GatewayStub(error="network_error")
     provider = PriceProvider(
         connector_name="uniswap/router",
@@ -107,15 +98,17 @@ async def test_price_provider_returns_unavailable_on_gateway_error():
         logger=lambda: _Logger(),
     )
 
-    await provider._refresh_price()
-    ctx = provider.get_price_context(now=100)
+    async def _run():
+        await provider._refresh_price()
+        return provider.get_price_context(now=100)
+
+    ctx = asyncio.run(_run())
 
     assert ctx.value is None
     assert ctx.source == "unavailable"
 
 
-@pytest.mark.asyncio
-async def test_price_provider_sets_price_on_success():
+def test_price_provider_sets_price_on_success():
     _GatewayHttpClient._instance = _GatewayStub(price="2.5")
     provider = PriceProvider(
         connector_name="uniswap/router",
@@ -124,8 +117,11 @@ async def test_price_provider_sets_price_on_success():
         logger=lambda: _Logger(),
     )
 
-    await provider._refresh_price()
-    ctx = provider.get_price_context(now=200)
+    async def _run():
+        await provider._refresh_price()
+        return provider.get_price_context(now=200)
+
+    ctx = asyncio.run(_run())
 
     assert ctx.value == Decimal("2.5")
     assert ctx.source == "gateway_direct:uniswap/router"

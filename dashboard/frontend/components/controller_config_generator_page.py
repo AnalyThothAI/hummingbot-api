@@ -505,6 +505,19 @@ def _render_field(
         )
 
     if field_type == "boolean":
+        if name == "exit_full_liquidation":
+            touched_key = f"{key_prefix}__touched_exit_full_liquidation"
+
+            def _mark_touched():
+                st.session_state[touched_key] = True
+
+            return st.checkbox(
+                label,
+                value=_as_bool(default_value),
+                key=widget_key,
+                disabled=locked,
+                on_change=_mark_touched,
+            )
         return st.checkbox(label, value=_as_bool(default_value), key=widget_key, disabled=locked)
 
     if field_type == "integer":
@@ -1140,6 +1153,19 @@ def render_config_generator_page() -> None:
         st.markdown("**Parameters**")
         with st.container(border=True):
             param_values = _render_grouped_form(schema, defaults, locked_fields, hidden_fields, key_prefix)
+            # Default behavior for future CLMM LP strategy configs:
+            # when stoploss is configured, enable full liquidation by default unless the user explicitly
+            # toggled the `exit_full_liquidation` field.
+            if "stop_loss_pnl_pct" in param_values and "exit_full_liquidation" in param_values:
+                touched_key = f"{key_prefix}__touched_exit_full_liquidation"
+                if not st.session_state.get(touched_key):
+                    try:
+                        stop_loss_value = float(param_values.get("stop_loss_pnl_pct") or 0)
+                    except (TypeError, ValueError):
+                        stop_loss_value = 0.0
+                    if stop_loss_value > 0 and not _as_bool(param_values.get("exit_full_liquidation")):
+                        st.session_state[f"{key_prefix}_exit_full_liquidation"] = True
+                        st.rerun()
             st.session_state[param_values_key] = param_values
 
         if not pool_mode:

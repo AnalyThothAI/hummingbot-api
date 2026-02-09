@@ -42,6 +42,7 @@ class SnapshotBuilder:
         wallet_base: Decimal,
         wallet_quote: Decimal,
         balance_fresh: bool = False,
+        balance_update_ts: float = 0.0,
     ) -> Snapshot:
         lp: Dict[str, LPView] = {}
         swaps: Dict[str, SwapView] = {}
@@ -75,6 +76,7 @@ class SnapshotBuilder:
             swaps=swaps,
             active_lp=active_lp,
             active_swaps=active_swaps,
+            balance_update_ts=balance_update_ts,
         )
 
     def _parse_lp_view(self, executor: ExecutorInfo) -> LPView:
@@ -185,6 +187,10 @@ class BalanceManager:
     def has_snapshot(self) -> bool:
         return self._has_balance_snapshot
 
+    @property
+    def last_update_ts(self) -> float:
+        return self._last_balance_update_ts
+
     def schedule_refresh(self, now: float, force: bool = False) -> None:
         if self._wallet_update_task is not None and not self._wallet_update_task.done():
             return
@@ -200,8 +206,11 @@ class BalanceManager:
                     return
 
         primary_name = self._config.router_connector or self._config.connector_name
-        connector = self._market_data_provider.connectors.get(primary_name)
-        if connector is None:
+        primary_connector = self._market_data_provider.connectors.get(primary_name)
+        fallback_connector = None
+        if self._config.router_connector and self._config.connector_name and self._config.connector_name != primary_name:
+            fallback_connector = self._market_data_provider.connectors.get(self._config.connector_name)
+        if primary_connector is None and fallback_connector is None:
             return
         self._last_balance_attempt_ts = now
         self._wallet_update_task = safe_ensure_future(self._update_wallet_balances())
@@ -223,7 +232,6 @@ class BalanceManager:
         timeout = float(max(1, self._config.balance_update_timeout_sec))
         router_name = self._config.router_connector
         primary_name = router_name or self._config.connector_name
-        primary_connector = self._market_data_provider.connectors.get(primary_name)
         token_symbols = [self._domain.base_token, self._domain.quote_token]
         if self._config.native_token_symbol:
             token_symbols.append(self._config.native_token_symbol)
@@ -245,48 +253,64 @@ class BalanceManager:
                 )
                 return False
 
-        if primary_connector is None:
-            return
-        if not await _safe_update(primary_connector, primary_name):
+        candidates = []
+        primary_connector = self._market_data_provider.connectors.get(primary_name)
+        if primary_connector is not None:
+            candidates.append((primary_name, primary_connector))
+        if router_name and self._config.connector_name and self._config.connector_name != primary_name:
+            fallback_connector = self._market_data_provider.connectors.get(self._config.connector_name)
+            if fallback_connector is not None:
+                candidates.append((self._config.connector_name, fallback_connector))
+        if not candidates:
             return
 
-        available_balances = getattr(primary_connector, "available_balances", None)
-        base_present = True
-        quote_present = True
-        if isinstance(available_balances, dict):
-            base_present = self._domain.base_token in available_balances
-            quote_present = self._domain.quote_token in available_balances
+        last_missing = None
+        for name, conn in candidates:
+            if not await _safe_update(conn, name):
+                continue
 
-        new_wallet_base = Decimal(str(primary_connector.get_available_balance(self._domain.base_token) or 0))
-        new_wallet_quote = Decimal(str(primary_connector.get_available_balance(self._domain.quote_token) or 0))
-        if not base_present or not quote_present:
-            missing_tokens = []
-            if not base_present:
-                missing_tokens.append(self._domain.base_token)
-            if not quote_present:
-                missing_tokens.append(self._domain.quote_token)
+            available_balances = getattr(conn, "available_balances", None)
+            base_present = True
+            quote_present = True
+            if isinstance(available_balances, dict):
+                base_present = self._domain.base_token in available_balances
+                quote_present = self._domain.quote_token in available_balances
+
+            new_wallet_base = Decimal(str(conn.get_available_balance(self._domain.base_token) or 0))
+            new_wallet_quote = Decimal(str(conn.get_available_balance(self._domain.quote_token) or 0))
+            if not base_present or not quote_present:
+                missing_tokens = []
+                if not base_present:
+                    missing_tokens.append(self._domain.base_token)
+                if not quote_present:
+                    missing_tokens.append(self._domain.quote_token)
+                last_missing = (name, missing_tokens)
+                continue
+
+            self._wallet_base = new_wallet_base
+            self._wallet_quote = new_wallet_quote
+            self._wallet_source = name
+            self._last_balance_update_ts = self._market_data_provider.time()
+            self._has_balance_snapshot = True
+            if not self._logged_balance_snapshot:
+                self._logger().info(
+                    "balance_snapshot_ready | source=%s base=%s quote=%s",
+                    self._wallet_source,
+                    self._wallet_base,
+                    self._wallet_quote,
+                )
+                self._logged_balance_snapshot = True
+            return
+
+        if last_missing is not None:
+            name, missing_tokens = last_missing
             self._logger().warning(
                 "balance_snapshot_ignored | source=%s missing=%s last_base=%s last_quote=%s",
-                primary_name,
+                name,
                 ",".join(missing_tokens),
                 self._wallet_base,
                 self._wallet_quote,
             )
-            return
-
-        self._wallet_base = new_wallet_base
-        self._wallet_quote = new_wallet_quote
-        self._wallet_source = primary_name
-        self._last_balance_update_ts = self._market_data_provider.time()
-        self._has_balance_snapshot = True
-        if not self._logged_balance_snapshot:
-            self._logger().info(
-                "balance_snapshot_ready | source=%s base=%s quote=%s",
-                self._wallet_source,
-                self._wallet_base,
-                self._wallet_quote,
-            )
-            self._logged_balance_snapshot = True
 
 
 class PriceProvider:

@@ -186,18 +186,6 @@ class CLMMFSM:
             equity = self._compute_risk_equity_value(snapshot, lp_view, current_price, ctx.anchor_value_quote)
         signal = self._rebalance_engine.evaluate(snapshot, ctx, lp_view)
         ctx.rebalance_signal_reason = signal.reason
-        if signal.should_rebalance:
-            self._rebalance_engine.record_rebalance(now, ctx)
-            ctx.pending_open_lp_id = None
-            ctx.pending_close_lp_id = lp_view.executor_id
-            stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
-            return self._transition(
-                ctx,
-                ControllerState.REBALANCE_STOP,
-                now,
-                reason=signal.reason,
-                actions=[stop_action],
-            )
         if self._exit_policy.should_take_profit(ctx.anchor_value_quote, equity):
             ctx.last_exit_reason = "take_profit"
             if ctx.pending_realized_anchor is None:
@@ -210,6 +198,18 @@ class CLMMFSM:
                 ControllerState.TAKE_PROFIT_STOP,
                 now,
                 reason="take_profit",
+                actions=[stop_action],
+            )
+        if signal.should_rebalance:
+            self._rebalance_engine.record_rebalance(now, ctx)
+            ctx.pending_open_lp_id = None
+            ctx.pending_close_lp_id = lp_view.executor_id
+            stop_action = StopExecutorAction(controller_id=self._config.id, executor_id=lp_view.executor_id)
+            return self._transition(
+                ctx,
+                ControllerState.REBALANCE_STOP,
+                now,
+                reason=signal.reason,
                 actions=[stop_action],
             )
         return self._stay(ctx, reason="active")
@@ -296,11 +296,7 @@ class CLMMFSM:
 
     def _handle_exit_swap(self, snapshot: Snapshot, ctx: ControllerContext) -> Decision:
         now = snapshot.now
-        if not snapshot.balance_fresh and ctx.exit_balance_refresh_attempts < self._exit_balance_refresh_max_attempts:
-            self._request_balance_refresh(ctx, now, reason="exit_refresh")
-            ctx.exit_balance_refresh_attempts += 1
-            return self._stay(ctx, reason="exit_refresh_balance")
-
+        # Always resolve pending swap completion first, even if balances are stale.
         if self._resolve_pending_swap(snapshot, ctx, is_exit=True):
             return self._transition(ctx, self._exit_done_state(ctx), now, reason="exit_swap_done")
 
@@ -308,11 +304,26 @@ class CLMMFSM:
         if pending_guard is not None:
             return pending_guard
 
+        if any(snapshot.active_swaps):
+            return self._stay(ctx, reason="swap_in_progress")
+
         if self._exit_attempts_exhausted(ctx, self._config.max_exit_swap_attempts):
             return self._transition(ctx, self._exit_done_state(ctx), now, reason="exit_swap_failed")
 
-        if any(snapshot.active_swaps):
-            return self._stay(ctx, reason="swap_in_progress")
+        # EXIT swap depends on wallet balances that can lag behind LP close tx confirmation.
+        # Do not proceed (or conclude "no base") until we have a fresh snapshot; otherwise we can silently
+        # skip liquidation when the true wallet_base is temporarily unavailable/ignored.
+        if (not snapshot.balance_fresh) or (snapshot.balance_update_ts < ctx.state_since_ts):
+            self._request_balance_refresh(ctx, now, reason="exit_refresh")
+            ttl = max(2, int(getattr(self._config, "balance_update_timeout_sec", 0)))
+            elapsed = max(0.0, now - ctx.state_since_ts)
+            attempts = int(elapsed // ttl) + 1 if ttl > 0 else 1
+            if attempts > ctx.exit_balance_refresh_attempts:
+                ctx.exit_balance_refresh_attempts = attempts
+            wait_reason = "exit_refresh_balance"
+            if ctx.exit_balance_refresh_attempts > self._exit_balance_refresh_max_attempts:
+                wait_reason = "exit_wait_balance"
+            return self._stay(ctx, reason=wait_reason)
 
         base_to_sell = snapshot.wallet_base
         # If the base token is also the chain's native token (e.g. SOL), keep a safety buffer for fees.
@@ -611,7 +622,26 @@ class CLMMFSM:
             return None
         if lp_view is None:
             return None
-        return self._estimate_position_value(lp_view, current_price)
+        # During executor transitions (OPENING/CLOSING) the LP executor can report 0 amounts.
+        # Treat equity as unknown to avoid false stoploss/take-profit triggers while rebalancing.
+        if self._is_lp_in_transition(lp_view):
+            return None
+        equity = self._estimate_position_value(lp_view, current_price)
+        # Closed executors may momentarily report 0 amounts if the close event data is missing.
+        # Avoid recording "100% loss" style metrics from incomplete snapshots.
+        if self._is_lp_closed(lp_view):
+            has_amounts = any(
+                v > 0
+                for v in (
+                    abs(lp_view.base_amount),
+                    abs(lp_view.quote_amount),
+                    abs(lp_view.base_fee),
+                    abs(lp_view.quote_fee),
+                )
+            )
+            if not has_amounts:
+                return None
+        return equity
 
     def _select_lp(self, snapshot: Snapshot, ctx: ControllerContext) -> Optional[LPView]:
         if ctx.pending_open_lp_id and ctx.pending_open_lp_id in snapshot.lp:
@@ -743,6 +773,10 @@ class CLMMFSM:
     def _request_balance_refresh(self, ctx: ControllerContext, now: float, *, reason: str) -> None:
         ttl = max(2, int(self._config.balance_update_timeout_sec))
         deadline = now + ttl
+        if ctx.force_balance_refresh_until_ts <= now:
+            ctx.force_balance_refresh_since_ts = now
         if deadline > ctx.force_balance_refresh_until_ts:
             ctx.force_balance_refresh_until_ts = deadline
             ctx.force_balance_refresh_reason = reason
+            if ctx.force_balance_refresh_since_ts <= 0:
+                ctx.force_balance_refresh_since_ts = now
