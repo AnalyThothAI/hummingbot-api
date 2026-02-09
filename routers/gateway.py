@@ -763,8 +763,64 @@ async def add_network_token(
 
         chain, network = parts
 
-        # Use symbol as name if name is not provided
-        token_name = token_request.name if token_request.name else token_request.symbol
+        # Canonicalize token symbols to avoid case-mismatch issues downstream.
+        # Many parts of the stack treat token symbols as identifiers (e.g. balances dict keys),
+        # while strategy configs typically use upper-case symbols in trading pairs.
+        raw_symbol = (token_request.symbol or "").strip()
+        if not raw_symbol:
+            raise HTTPException(status_code=400, detail="Token symbol is required")
+        token_symbol = raw_symbol.upper()
+
+        # Prevent token list corruption: same address added under multiple symbols.
+        # This creates ambiguous balance keys and trading-pair parsing issues downstream.
+        try:
+            existing = await accounts_service.gateway_client.get_tokens(chain, network)
+            existing_tokens = existing.get("tokens") if isinstance(existing, dict) else None
+            if isinstance(existing_tokens, list):
+                req_address = (token_request.address or "").strip()
+                req_cmp = req_address.lower() if req_address.lower().startswith("0x") else req_address
+                for token in existing_tokens:
+                    if not isinstance(token, dict):
+                        continue
+                    existing_addr = (token.get("address") or "").strip()
+                    if not existing_addr:
+                        continue
+                    existing_cmp = existing_addr.lower() if existing_addr.lower().startswith("0x") else existing_addr
+                    if existing_cmp != req_cmp:
+                        continue
+
+                    existing_symbol = (token.get("symbol") or "").strip()
+                    if existing_symbol and existing_symbol.upper() != token_symbol:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=(
+                                f"Token address already exists in {network_id} as symbol '{existing_symbol}'. "
+                                f"Refusing to add the same address as '{token_symbol}'. "
+                                "Delete the token by address and re-add if you need to change the symbol."
+                            ),
+                        )
+
+                    # Idempotent: token already present with matching (case-insensitive) symbol.
+                    return {
+                        "success": True,
+                        "message": f"Token {token_symbol} already exists in {network_id}.",
+                        "restart_required": False,
+                        "token": {
+                            "symbol": token_symbol,
+                            "address": req_address,
+                            "network_id": network_id,
+                        },
+                    }
+        except HTTPException:
+            raise
+        except Exception:
+            # Token listing is a best-effort preflight. If it fails, continue with add_token and let
+            # Gateway handle duplicates or validation errors.
+            pass
+
+        # Use the user-provided name if set; otherwise default to the raw (non-uppercased) symbol
+        # to keep display names readable (e.g. "Buttcoin" instead of "BUTTCOIN").
+        token_name = token_request.name.strip() if token_request.name else raw_symbol
         chain_id = None
         try:
             network_config = await accounts_service.gateway_client.get_config(network_id)
@@ -776,7 +832,7 @@ async def add_network_token(
             chain=chain,
             network=network,
             address=token_request.address,
-            symbol=token_request.symbol,
+            symbol=token_symbol,
             name=token_name,
             decimals=token_request.decimals,
             chain_id=chain_id,
@@ -787,11 +843,11 @@ async def add_network_token(
 
         return {
             "success": True,
-            "message": f"Token {token_request.symbol} added to {network_id}. Restart Gateway for changes to take effect.",
+            "message": f"Token {token_symbol} added to {network_id}. Restart Gateway for changes to take effect.",
             "restart_required": True,
             "restart_endpoint": "POST /gateway/restart",
             "token": {
-                "symbol": token_request.symbol,
+                "symbol": token_symbol,
                 "address": token_request.address,
                 "network_id": network_id,
                 "chain_id": chain_id,

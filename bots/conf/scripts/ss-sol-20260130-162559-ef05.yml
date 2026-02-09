@@ -1,5 +1,0 @@
-candles_config: []
-controllers_config:
-- clmm_lp_meteora.yml
-markets: {}
-script_file_name: v2_with_controllers.py

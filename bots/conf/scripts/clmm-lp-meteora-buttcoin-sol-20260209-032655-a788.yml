@@ -1,5 +1,5 @@
 candles_config: []
 controllers_config:
-- clmm_lp_meteora.yml
+- clmm_lp_meteora_buttcoin_sol_030_w30_sl10.yml
 markets: {}
 script_file_name: v2_with_controllers.py

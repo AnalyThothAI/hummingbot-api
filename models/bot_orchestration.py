@@ -1,6 +1,13 @@
+import os
 from typing import Any, Dict, Optional, List
 from pydantic import BaseModel, Field
 from enum import Enum
+
+
+def _default_hummingbot_image() -> str:
+    # Keep existing behavior as the fallback, but allow deployments to override the
+    # default image without patching code (e.g. different nodes/environments).
+    return os.getenv("HUMMINGBOT_DEFAULT_IMAGE", "qinghuanlyke/hummingbot-lp:latest")
 
 
 class BotAction(BaseModel):
@@ -98,7 +105,7 @@ class V2ScriptDeployment(BaseModel):
     """Configuration for deploying a bot with a script"""
     instance_name: str = Field(description="Unique name for the bot instance")
     credentials_profile: str = Field(description="Name of the credentials profile to use")
-    image: str = Field(default="qinghuanlyke/hummingbot-lp:latest", description="Docker image for the Hummingbot instance")
+    image: str = Field(default_factory=_default_hummingbot_image, description="Docker image for the Hummingbot instance")
     script: Optional[str] = Field(default=None, description="Name of the script to run (without .py extension)")
     script_config: Optional[str] = Field(default=None, description="Name of the script configuration file (without .yml extension)")
     gateway_network_id: Optional[str] = Field(
@@ -139,5 +146,5 @@ class V2ControllerDeployment(BaseModel):
         default=True,
         description="Append timestamp suffix to instance name to avoid collisions",
     )
-    image: str = Field(default="qinghuanlyke/hummingbot-lp:latest", description="Docker image for the Hummingbot instance")
+    image: str = Field(default_factory=_default_hummingbot_image, description="Docker image for the Hummingbot instance")
     headless: bool = Field(default=False, description="Run in headless mode (no UI)")

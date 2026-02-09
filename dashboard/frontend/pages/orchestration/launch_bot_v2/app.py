@@ -1,3 +1,4 @@
+import os
 import re
 import secrets
 import time
@@ -10,6 +11,7 @@ from frontend.st_utils import backend_api_request, get_backend_api_client, initi
 UNLIMITED_ALLOWANCE_THRESHOLD = Decimal("10000000000")
 APPROVAL_PENDING_TIMEOUT_SEC = 30
 APPROVAL_AUTO_REFRESH_SEC = 30
+DEFAULT_HUMMINGBOT_IMAGE = os.getenv("HUMMINGBOT_DEFAULT_IMAGE", "qinghuanlyke/hummingbot-lp:latest")
 
 initialize_st_page(icon="🙌", show_readme=False)
 
@@ -416,9 +418,9 @@ def render_bot_config(auto_name_hint: bool = False):
                 available_images = filter_hummingbot_images(all_images)
 
                 if not available_images:
-                    available_images = ["qinghuanlyke/hummingbot-lp:latest"]
+                    available_images = [DEFAULT_HUMMINGBOT_IMAGE]
 
-                default_image = "qinghuanlyke/hummingbot-lp:latest"
+                default_image = DEFAULT_HUMMINGBOT_IMAGE
                 if default_image not in available_images:
                     available_images.insert(0, default_image)
 
@@ -432,7 +434,7 @@ def render_bot_config(auto_name_hint: bool = False):
                 st.error(f"Failed to fetch available images: {e}")
                 image_name = st.text_input(
                     "Hummingbot Image",
-                    value="qinghuanlyke/hummingbot-lp:latest",
+                    value=DEFAULT_HUMMINGBOT_IMAGE,
                     key="image_input"
                 )
 

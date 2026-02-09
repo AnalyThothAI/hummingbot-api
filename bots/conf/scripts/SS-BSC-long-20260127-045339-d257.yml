@@ -1,5 +1,0 @@
-candles_config: []
-controllers_config:
-- clmm_lp_uniswap-deploy-20260127-045339-9e33.yml
-markets: {}
-script_file_name: v2_with_controllers.py
