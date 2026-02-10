@@ -52,7 +52,11 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     hysteresis_pct: Decimal = Field(default=Decimal("0.002"), json_schema_extra={"is_updatable": True})
     cooldown_seconds: int = Field(default=30, json_schema_extra={"is_updatable": True})
     max_rebalances_per_hour: int = Field(default=20, json_schema_extra={"is_updatable": True})
-    rebalance_open_timeout_sec: int = Field(default=300, json_schema_extra={"is_updatable": True})
+    # NOTE: For gateway-based LP operations, the open call can take longer than aiohttp's default
+    # (300s) under chain congestion. This timeout must be high enough to allow the LP executor's
+    # internal retry + on-chain reconciliation loop to operate, otherwise the controller will
+    # cancel the executor before it can recover/retry.
+    rebalance_open_timeout_sec: int = Field(default=900, json_schema_extra={"is_updatable": True})
 
     exit_full_liquidation: bool = Field(default=False, json_schema_extra={"is_updatable": True})
     exit_swap_slippage_pct: Decimal = Field(default=Decimal("0.02"), json_schema_extra={"is_updatable": True})
