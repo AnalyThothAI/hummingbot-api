@@ -62,6 +62,7 @@ The MCP process reads `.env` automatically if present (simple loader, no extra d
 - `gateway_clmm_pool_info`
 - `gateway_clmm_pools`
 - `gateway_clmm_open`
+- `gateway_clmm_position_info`
 - `gateway_clmm_close`
 - `gateway_clmm_collect_fees`
 - `gateway_clmm_positions_owned`

@@ -45,3 +45,21 @@ class McpToolDefinitionsTests(unittest.TestCase):
 
         self.assertIn("network_id", schema)
         self.assertIn("config_updates", schema)
+
+    def test_gateway_clmm_position_info_tool_exists(self):
+        definitions = {tool["name"]: tool for tool in tool_definitions()}
+
+        self.assertIn("gateway_clmm_position_info", definitions)
+        schema = definitions["gateway_clmm_position_info"]["inputSchema"]
+
+        for key in ("connector", "network", "position_address"):
+            self.assertIn(key, schema["properties"])
+        for key in ("connector", "network", "position_address"):
+            self.assertIn(key, schema["required"])
+
+    def test_gateway_clmm_positions_owned_pool_address_is_optional(self):
+        definitions = {tool["name"]: tool for tool in tool_definitions()}
+        schema = definitions["gateway_clmm_positions_owned"]["inputSchema"]
+
+        self.assertIn("pool_address", schema["properties"])
+        self.assertNotIn("pool_address", schema.get("required", []))

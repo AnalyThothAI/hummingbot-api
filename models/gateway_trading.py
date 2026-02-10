@@ -2,9 +2,20 @@
 Models for Gateway DEX trading operations.
 Supports unified swaps via Gateway trading/swap endpoints and CLMM liquidity positions.
 """
-from typing import Optional, List, Dict, Any
-from pydantic import BaseModel, Field
+from typing import Optional, List, Dict, Any, Annotated
+from pydantic import BaseModel, Field, BeforeValidator
 from decimal import Decimal
+
+
+# Some connectors (e.g., Uniswap V3 on EVM) use numeric token IDs for positions.
+# Accept JSON numbers from external callers and normalize to str across request models.
+def _position_address_before_validator(value: object) -> object:
+    if isinstance(value, int):
+        return str(value)
+    return value
+
+
+PositionAddress = Annotated[str, BeforeValidator(_position_address_before_validator)]
 
 
 # ============================================
@@ -123,7 +134,7 @@ class CLMMAddLiquidityRequest(BaseModel):
     """Request to add MORE liquidity to an EXISTING CLMM position"""
     connector: str = Field(description="CLMM connector (e.g., 'meteora', 'raydium', 'uniswap')")
     network: str = Field(description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta')")
-    position_address: str = Field(description="Existing position address to add liquidity to")
+    position_address: PositionAddress = Field(description="Existing position address to add liquidity to")
     base_token_amount: Optional[Decimal] = Field(default=None, description="Amount of base token to add")
     quote_token_amount: Optional[Decimal] = Field(default=None, description="Amount of quote token to add")
     slippage_pct: Optional[Decimal] = Field(default=1.0, description="Maximum slippage percentage (default: 1.0)")
@@ -134,7 +145,7 @@ class CLMMRemoveLiquidityRequest(BaseModel):
     """Request to remove SOME liquidity from a CLMM position (partial removal)"""
     connector: str = Field(description="CLMM connector (e.g., 'meteora', 'raydium', 'uniswap')")
     network: str = Field(description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta')")
-    position_address: str = Field(description="Position address to remove liquidity from")
+    position_address: PositionAddress = Field(description="Position address to remove liquidity from")
     percentage: Decimal = Field(description="Percentage of liquidity to remove (0-100)")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
 
@@ -143,7 +154,7 @@ class CLMMClosePositionRequest(BaseModel):
     """Request to CLOSE a CLMM position completely (removes all liquidity and closes position)"""
     connector: str = Field(description="CLMM connector (e.g., 'meteora', 'raydium', 'uniswap')")
     network: str = Field(description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta')")
-    position_address: str = Field(description="Position address to close")
+    position_address: PositionAddress = Field(description="Position address to close")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
 
 
@@ -151,7 +162,7 @@ class CLMMCollectFeesRequest(BaseModel):
     """Request to collect fees from a CLMM position"""
     connector: str = Field(description="CLMM connector (e.g., 'meteora', 'raydium', 'uniswap')")
     network: str = Field(description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta')")
-    position_address: str = Field(description="Position address to collect fees from")
+    position_address: PositionAddress = Field(description="Position address to collect fees from")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
 
 
@@ -165,10 +176,10 @@ class CLMMCollectFeesResponse(BaseModel):
 
 
 class CLMMPositionsOwnedRequest(BaseModel):
-    """Request to get all CLMM positions owned by a wallet for a specific pool"""
+    """Request to get CLMM positions owned by a wallet (optionally filtered by pool)."""
     connector: str = Field(description="CLMM connector (e.g., 'meteora', 'raydium', 'uniswap')")
     network: str = Field(description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta')")
-    pool_address: str = Field(description="Pool contract address to filter positions")
+    pool_address: Optional[str] = Field(default=None, description="Optional pool contract address to filter positions")
     wallet_address: Optional[str] = Field(default=None, description="Wallet address (optional, uses default if not provided)")
 
 
@@ -195,7 +206,28 @@ class CLMMGetPositionInfoRequest(BaseModel):
     """Request to get detailed info about a specific CLMM position"""
     connector: str = Field(description="CLMM connector (e.g., 'meteora', 'raydium', 'uniswap')")
     network: str = Field(description="Network ID in 'chain-network' format (e.g., 'solana-mainnet-beta')")
-    position_address: str = Field(description="Position address to query")
+    position_address: PositionAddress = Field(description="Position address to query")
+
+
+class CLMMPositionInfoDetails(BaseModel):
+    """Detailed information about a specific CLMM position (Gateway position-info)."""
+
+    position_address: str = Field(description="Position address (or token ID on EVM CLMMs like Uniswap V3)")
+    pool_address: str = Field(description="Pool address")
+    base_token_address: str = Field(description="Base token contract address")
+    quote_token_address: str = Field(description="Quote token contract address")
+    base_token_amount: Decimal = Field(description="Base token amount in position")
+    quote_token_amount: Decimal = Field(description="Quote token amount in position")
+    base_fee_amount: Decimal = Field(description="Base token uncollected fees")
+    quote_fee_amount: Decimal = Field(description="Quote token uncollected fees")
+    lower_bin_id: Optional[int] = Field(default=None, description="Lower bound id (bin id on Solana DLMM, tick on Uniswap V3)")
+    upper_bin_id: Optional[int] = Field(default=None, description="Upper bound id (bin id on Solana DLMM, tick on Uniswap V3)")
+    lower_price: Decimal = Field(description="Lower price bound")
+    upper_price: Decimal = Field(description="Upper price bound")
+    price: Decimal = Field(description="Current price")
+    reward_token_address: Optional[str] = Field(default=None, description="Reward token contract address (if supported)")
+    reward_amount: Optional[Decimal] = Field(default=None, description="Reward amount (if supported)")
+    in_range: Optional[bool] = Field(default=None, description="Whether position is currently in range (computed)")
 
 
 class CLMMPoolInfoRequest(BaseModel):

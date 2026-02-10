@@ -322,6 +322,14 @@ def _gateway_clmm_open(arguments: dict, http_client: McpHttpClient) -> Any:
     return http_client.post("/gateway/clmm/open", json_body=payload)
 
 
+def _gateway_clmm_position_info(arguments: dict, http_client: McpHttpClient) -> Any:
+    payload = _pick_params(arguments, ["connector", "network", "position_address"])
+    for key in ("connector", "network", "position_address"):
+        if key not in payload:
+            raise ValueError(f"{key} is required")
+    return http_client.post("/gateway/clmm/position-info", json_body=payload)
+
+
 def _gateway_clmm_close(arguments: dict, http_client: McpHttpClient) -> Any:
     payload = _pick_params(arguments, ["connector", "network", "position_address", "wallet_address"])
     for key in ("connector", "network", "position_address"):
@@ -340,7 +348,7 @@ def _gateway_clmm_collect_fees(arguments: dict, http_client: McpHttpClient) -> A
 
 def _gateway_clmm_positions_owned(arguments: dict, http_client: McpHttpClient) -> Any:
     payload = _pick_params(arguments, ["connector", "network", "pool_address", "wallet_address"])
-    for key in ("connector", "network", "pool_address"):
+    for key in ("connector", "network"):
         if key not in payload:
             raise ValueError(f"{key} is required")
     return http_client.post("/gateway/clmm/positions_owned", json_body=payload)
@@ -991,6 +999,20 @@ _TOOL_SPECS: List[ToolSpec] = [
         handler=_gateway_clmm_open,
     ),
     ToolSpec(
+        name="gateway_clmm_position_info",
+        description="Get CLMM position info (DB-independent; uses Gateway trading/clmm/position-info).",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "connector": {"type": "string"},
+                "network": {"type": "string"},
+                "position_address": {"type": "string"},
+            },
+            "required": ["connector", "network", "position_address"],
+        },
+        handler=_gateway_clmm_position_info,
+    ),
+    ToolSpec(
         name="gateway_clmm_close",
         description="Close a CLMM position.",
         input_schema={
@@ -1022,7 +1044,7 @@ _TOOL_SPECS: List[ToolSpec] = [
     ),
     ToolSpec(
         name="gateway_clmm_positions_owned",
-        description="List CLMM positions owned for a pool.",
+        description="List CLMM positions owned (optionally filter by pool_address).",
         input_schema={
             "type": "object",
             "properties": {
@@ -1031,7 +1053,7 @@ _TOOL_SPECS: List[ToolSpec] = [
                 "pool_address": {"type": "string"},
                 "wallet_address": {"type": "string"},
             },
-            "required": ["connector", "network", "pool_address"],
+            "required": ["connector", "network"],
         },
         handler=_gateway_clmm_positions_owned,
     ),

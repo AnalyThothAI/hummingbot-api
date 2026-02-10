@@ -23,7 +23,9 @@ from models import (
     CLMMCollectFeesRequest,
     CLMMCollectFeesResponse,
     CLMMPositionsOwnedRequest,
+    CLMMGetPositionInfoRequest,
     CLMMPositionInfo,
+    CLMMPositionInfoDetails,
     CLMMPoolInfoResponse,
     CLMMPoolListItem,
     CLMMPoolListResponse,
@@ -934,37 +936,31 @@ async def close_clmm_position(
                 wallet_address=request.wallet_address
             )
 
-        # If no pool_address from database, we can't query Gateway
-        if not pool_address:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Position {request.position_address} not found in database. Pool address is required."
-            )
-
         # Fetch pending fees and current price BEFORE closing (Gateway doesn't always return these in response)
         base_fee_to_collect = Decimal("0")
         quote_fee_to_collect = Decimal("0")
         close_price = None
 
         try:
-            positions_list = await accounts_service.gateway_client.clmm_positions_owned(
+            # Use position-info so we can close positions created outside our DB (e.g., executor/controller opened).
+            # This endpoint does not require poolAddress or DB state.
+            position_info = await accounts_service.gateway_client.clmm_position_info(
                 connector=request.connector,
                 chain_network=request.network,  # request.network is already in 'chain-network' format
-                wallet_address=wallet_address,
-                pool_address=pool_address
+                position_address=request.position_address
             )
 
-            # Find our specific position and get pending fees and current price
-            if positions_list and isinstance(positions_list, list):
-                for pos in positions_list:
-                    if pos and pos.get("address") == request.position_address:
-                        base_fee_to_collect = Decimal(str(pos.get("baseFeeAmount", 0)))
-                        quote_fee_to_collect = Decimal(str(pos.get("quoteFeeAmount", 0)))
-                        close_price = float(pos.get("price", 0)) if pos.get("price") else None
-                        logger.info(f"Before closing: price={close_price}, pending fees base={base_fee_to_collect}, quote={quote_fee_to_collect}")
-                        break
+            if position_info and isinstance(position_info, dict) and "error" not in position_info:
+                # Best-effort: keep pool_address for logs/debugging (not required for close).
+                pool_address = pool_address or position_info.get("poolAddress")
+                base_fee_to_collect = Decimal(str(position_info.get("baseFeeAmount", 0) or 0))
+                quote_fee_to_collect = Decimal(str(position_info.get("quoteFeeAmount", 0) or 0))
+                close_price = float(position_info.get("price")) if position_info.get("price") is not None else None
+                logger.info(
+                    f"Before closing: price={close_price}, pending fees base={base_fee_to_collect}, quote={quote_fee_to_collect}"
+                )
             else:
-                logger.warning(f"Could not find position {request.position_address} in positions_owned response")
+                logger.warning(f"Could not fetch position info before closing: {position_info}")
         except Exception as e:
             logger.warning(f"Could not fetch position state before closing: {e}", exc_info=True)
 
@@ -975,6 +971,14 @@ async def close_clmm_position(
             wallet_address=wallet_address,
             position_address=request.position_address
         )
+
+        if not result:
+            raise HTTPException(status_code=500, detail="No response from Gateway close-position endpoint")
+
+        # GatewayClient returns {"error": ..., "status": ...} for non-2xx responses.
+        if isinstance(result, dict) and "error" in result:
+            status_code = int(result.get("status") or 500)
+            raise HTTPException(status_code=status_code, detail=result.get("error"))
 
         transaction_hash = result.get("signature") or result.get("txHash") or result.get("hash")
         if not transaction_hash:
@@ -1133,35 +1137,25 @@ async def collect_fees_from_clmm_position(
                 wallet_address=request.wallet_address
             )
 
-        # If no pool_address from database, we can't query Gateway
-        if not pool_address:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Position {request.position_address} not found in database. Pool address is required."
-            )
-
         # Fetch pending fees BEFORE collecting (Gateway doesn't always return collected amounts in response)
         base_fee_to_collect = Decimal("0")
         quote_fee_to_collect = Decimal("0")
 
         try:
-            positions_list = await accounts_service.gateway_client.clmm_positions_owned(
+            # Use position-info so we can collect fees for positions created outside our DB.
+            position_info = await accounts_service.gateway_client.clmm_position_info(
                 connector=request.connector,
                 chain_network=request.network,  # request.network is already in 'chain-network' format
-                wallet_address=wallet_address,
-                pool_address=pool_address
+                position_address=request.position_address
             )
 
-            # Find our specific position and get pending fees
-            if positions_list and isinstance(positions_list, list):
-                for pos in positions_list:
-                    if pos and pos.get("address") == request.position_address:
-                        base_fee_to_collect = Decimal(str(pos.get("baseFeeAmount", 0)))
-                        quote_fee_to_collect = Decimal(str(pos.get("quoteFeeAmount", 0)))
-                        logger.info(f"Pending fees before collection: base={base_fee_to_collect}, quote={quote_fee_to_collect}")
-                        break
+            if position_info and isinstance(position_info, dict) and "error" not in position_info:
+                pool_address = pool_address or position_info.get("poolAddress")
+                base_fee_to_collect = Decimal(str(position_info.get("baseFeeAmount", 0) or 0))
+                quote_fee_to_collect = Decimal(str(position_info.get("quoteFeeAmount", 0) or 0))
+                logger.info(f"Pending fees before collection: base={base_fee_to_collect}, quote={quote_fee_to_collect}")
             else:
-                logger.warning(f"Could not find position {request.position_address} in positions_owned response")
+                logger.warning(f"Could not fetch position info before fee collection: {position_info}")
         except Exception as e:
             logger.warning(f"Could not fetch pending fees before collection: {e}", exc_info=True)
 
@@ -1175,6 +1169,11 @@ async def collect_fees_from_clmm_position(
 
         if not result:
             raise HTTPException(status_code=500, detail="No response from Gateway collect-fees endpoint")
+
+        # GatewayClient returns {"error": ..., "status": ...} for non-2xx responses.
+        if isinstance(result, dict) and "error" in result:
+            status_code = int(result.get("status") or 500)
+            raise HTTPException(status_code=status_code, detail=result.get("error"))
 
         transaction_hash = result.get("signature") or result.get("txHash") or result.get("hash")
         if not transaction_hash:
@@ -1258,16 +1257,16 @@ async def get_clmm_positions_owned(
     accounts_service: AccountsService = Depends(get_accounts_service)
 ):
     """
-    Get all CLMM liquidity positions owned by a wallet for a specific pool.
+    Get CLMM liquidity positions owned by a wallet (optionally filtered by pool).
 
     Example:
         connector: 'meteora'
         network: 'solana-mainnet-beta'
-        pool_address: '2sf5NYcY4zUPXUSmG6f66mskb24t5F8S11pC1Nz5nQT3'
+        pool_address: '2sf5NYcY4zUPXUSmG6f66mskb24t5F8S11pC1Nz5nQT3'  # optional
         wallet_address: (optional, uses default if not provided)
 
     Returns:
-        List of CLMM position information for the specified pool
+        List of CLMM position information
     """
     try:
         if not await accounts_service.gateway_client.ping():
@@ -1343,6 +1342,80 @@ async def get_clmm_positions_owned(
     except Exception as e:
         logger.error(f"Error getting CLMM positions owned: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error getting CLMM positions owned: {str(e)}")
+
+
+@router.post("/clmm/position-info", response_model=CLMMPositionInfoDetails)
+async def get_clmm_position_info(
+    request: CLMMGetPositionInfoRequest,
+    accounts_service: AccountsService = Depends(get_accounts_service),
+):
+    """
+    Get detailed CLMM position info for a connector + position_address.
+
+    This is a DB-independent query backed by Gateway `trading/clmm/position-info`.
+    It is safe to use for positions opened by executors/controllers (not recorded in our DB).
+    """
+    try:
+        if not await accounts_service.gateway_client.ping():
+            raise HTTPException(status_code=503, detail="Gateway service is not available")
+
+        result = await accounts_service.gateway_client.clmm_position_info(
+            connector=request.connector,
+            chain_network=request.network,  # request.network is already in 'chain-network' format
+            position_address=request.position_address,
+        )
+
+        if result is None:
+            raise HTTPException(status_code=500, detail="Failed to get position info from Gateway")
+
+        # GatewayClient returns {"error": ..., "status": ...} for non-2xx responses.
+        if isinstance(result, dict) and "error" in result:
+            status_code = int(result.get("status") or 500)
+            raise HTTPException(status_code=status_code, detail=result.get("error"))
+
+        if not isinstance(result, dict):
+            raise HTTPException(status_code=500, detail="Unexpected response type from Gateway position-info endpoint")
+
+        current_price = Decimal(str(result.get("price", 0) or 0))
+        lower_price = Decimal(str(result.get("lowerPrice", 0) or 0))
+        upper_price = Decimal(str(result.get("upperPrice", 0) or 0))
+
+        in_range = None
+        if current_price > 0 and lower_price > 0 and upper_price > 0:
+            in_range = lower_price <= current_price <= upper_price
+
+        reward_amount = result.get("rewardAmount")
+        reward_amount_decimal = Decimal(str(reward_amount)) if reward_amount is not None else None
+
+        lower_bin_id = result.get("lowerBinId")
+        upper_bin_id = result.get("upperBinId")
+
+        return CLMMPositionInfoDetails(
+            position_address=str(result.get("address", "")),
+            pool_address=str(result.get("poolAddress", "")),
+            base_token_address=str(result.get("baseTokenAddress", "")),
+            quote_token_address=str(result.get("quoteTokenAddress", "")),
+            base_token_amount=Decimal(str(result.get("baseTokenAmount", 0) or 0)),
+            quote_token_amount=Decimal(str(result.get("quoteTokenAmount", 0) or 0)),
+            base_fee_amount=Decimal(str(result.get("baseFeeAmount", 0) or 0)),
+            quote_fee_amount=Decimal(str(result.get("quoteFeeAmount", 0) or 0)),
+            lower_bin_id=int(lower_bin_id) if lower_bin_id is not None else None,
+            upper_bin_id=int(upper_bin_id) if upper_bin_id is not None else None,
+            lower_price=lower_price,
+            upper_price=upper_price,
+            price=current_price,
+            reward_token_address=result.get("rewardTokenAddress"),
+            reward_amount=reward_amount_decimal,
+            in_range=in_range,
+        )
+
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.error(f"Error getting CLMM position info: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Error getting CLMM position info: {str(e)}")
 
 
 @router.get("/clmm/positions/{position_address}/events")
@@ -1490,5 +1563,3 @@ async def search_clmm_positions(
     except Exception as e:
         logger.error(f"Error searching CLMM positions: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Error searching CLMM positions: {str(e)}")
-
-

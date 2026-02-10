@@ -197,6 +197,21 @@ Steps:
 - Stop: `bot_stop` (confirm)
 - Stop + archive: `bot_stop_and_archive` (confirm)
 
+## Workflow E: CLMM Exit (Close LP -> Optional Swap)
+Goal: close a CLMM LP position safely, then (optionally) swap all exposure into a single token (e.g., USDC).
+
+1. If a bot/controller might re-open liquidity, stop it first: `bot_stop` (confirm).
+2. If you don't know the position id/address yet, discover it via `gateway_clmm_positions_owned` (optional `pool_address`).
+3. Read-only verification (recommended): `gateway_clmm_position_info` with `{connector, network, position_address}`.
+   - Use this to confirm token addresses, amounts, pending fees, and whether the range is in-range.
+4. Close the position: `gateway_clmm_close` (confirm).
+   - This is DB-independent; it can close positions opened by executors/controllers even if the API never recorded them.
+5. If you want to consolidate to one token:
+   - Follow **Workflow A** (Unified Swap): `gateway_swap_quote` -> re-quote -> `gateway_swap_execute` (confirm).
+6. Verify on-chain tx status:
+   - CLMM: check Gateway logs, and/or re-run `gateway_clmm_position_info` (expect 404/closed).
+   - Swap: `gateway_swaps_status` (tx hash) and poll until confirmed.
+
 ## Idempotency Rules (avoid double execution)
 - Swap:
   - If a tx hash already exists, do not call `gateway_swap_execute` again; poll status instead.
