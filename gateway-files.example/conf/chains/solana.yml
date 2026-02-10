@@ -1,5 +1,0 @@
-defaultNetwork: mainnet-beta
-# Replace with your wallet address (public key). Do not commit private keys.
-defaultWallet: YOUR_SOLANA_WALLET_ADDRESS
-rpcProvider: url
-
