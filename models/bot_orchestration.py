@@ -108,6 +108,13 @@ class V2ScriptDeployment(BaseModel):
     image: str = Field(default_factory=_default_hummingbot_image, description="Docker image for the Hummingbot instance")
     script: Optional[str] = Field(default=None, description="Name of the script to run (without .py extension)")
     script_config: Optional[str] = Field(default=None, description="Name of the script configuration file (without .yml extension)")
+    script_config_content: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "Inline script config payload. When provided, the backend writes this YAML into the instance "
+            "instead of reading from bots/conf/scripts."
+        ),
+    )
     gateway_network_id: Optional[str] = Field(
         default=None,
         description="Gateway network ID in 'chain-network' format (e.g., 'ethereum-bsc')",

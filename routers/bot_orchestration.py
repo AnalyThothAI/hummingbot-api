@@ -1113,13 +1113,9 @@ async def deploy_v2_controllers(
         if deployment.max_controller_drawdown_quote is not None:
             script_config_content["max_controller_drawdown_quote"] = deployment.max_controller_drawdown_quote
 
-        # Save the script config to the scripts directory
-        scripts_dir = os.path.join("conf", "scripts")
-
-        script_config_path = os.path.join(scripts_dir, script_config_filename)
-        fs_util.dump_dict_to_yaml(script_config_path, script_config_content)
-
-        logging.info(f"Generated script config: {script_config_filename} with content: {script_config_content}")
+        logging.info(
+            f"Generated script config (instance-scoped): {script_config_filename} with content: {script_config_content}"
+        )
 
         # Create the V2ScriptDeployment with the generated script config
         instance_config = V2ScriptDeployment(
@@ -1128,6 +1124,7 @@ async def deploy_v2_controllers(
             image=deployment.image,
             script="v2_with_controllers.py",
             script_config=script_config_filename,
+            script_config_content=script_config_content,
             gateway_network_id=deployment.gateway_network_id,
             gateway_wallet_address=deployment.gateway_wallet_address,
         )

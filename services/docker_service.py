@@ -322,6 +322,7 @@ class DockerService:
         use_host_network, system_platform, in_container = self._resolve_bot_network_mode()
         script_config_content = None
         script_config_name = normalize_script_config_name(config.script_config)
+        inline_script_config = getattr(config, "script_config_content", None)
         if not os.path.exists(instance_dir):
             os.makedirs(instance_dir)
             os.makedirs(os.path.join(instance_dir, 'data'))
@@ -347,51 +348,65 @@ class DockerService:
             
             os.makedirs(destination_scripts_config_dir, exist_ok=True)
             
-            # Copy the specific script config file
-            source_script_config_file = os.path.join(script_config_dir, script_config_name)
             destination_script_config_file = os.path.join(destination_scripts_config_dir, script_config_name)
-            
-            if os.path.exists(source_script_config_file):
-                shutil.copy2(source_script_config_file, destination_script_config_file)
-                
-                # Load the script config to find referenced controllers
+
+            if isinstance(inline_script_config, dict) and inline_script_config:
+                # Controller deployments generate an instance-scoped script config (no global conf/scripts pollution).
                 try:
-                    # Path relative to fs_util base_path (which is "bots")
-                    script_config_relative_path = f"conf/scripts/{script_config_name}"
-                    script_config_content = fs_util.read_yaml_file(script_config_relative_path)
-                    controllers_list = script_config_content.get('controllers_config', [])
-                    
-                    # If there are controllers referenced, copy them
-                    if controllers_list:
-                        os.makedirs(destination_controllers_config_dir, exist_ok=True)
-                        
-                        for controller_file in controllers_list:
-                            source_controller_file = os.path.join(controllers_config_dir, controller_file)
-                            destination_controller_file = os.path.join(destination_controllers_config_dir, controller_file)
-                            
-                            if os.path.exists(source_controller_file):
-                                shutil.copy2(source_controller_file, destination_controller_file)
-                                logger.info(f"Copied controller config: {controller_file}")
-                                # Ensure the controller config has a stable id (recommended: filename == id).
-                                try:
-                                    controller_rel_path = f"instances/{instance_name}/conf/controllers/{controller_file}"
-                                    controller_cfg = fs_util.read_yaml_file(controller_rel_path)
-                                    if isinstance(controller_cfg, dict):
-                                        cfg_id = controller_cfg.get("id")
-                                        if not (isinstance(cfg_id, str) and cfg_id.strip()):
-                                            controller_cfg["id"] = os.path.splitext(controller_file)[0]
-                                            fs_util.dump_dict_to_yaml(controller_rel_path, controller_cfg)
-                                except Exception as e:
-                                    logger.warning(
-                                        f"Failed to backfill id for controller config {controller_file} in instance {instance_name}: {e}"
-                                    )
-                            else:
-                                logger.warning(f"Controller config file {controller_file} not found in {controllers_config_dir}")
-                                
+                    script_config_content = inline_script_config
+                    script_rel_path = f"instances/{instance_name}/conf/scripts/{script_config_name}"
+                    fs_util.dump_dict_to_yaml(script_rel_path, inline_script_config)
                 except Exception as e:
-                    logger.error(f"Error reading script config file {script_config_name}: {e}")
+                    logger.error(f"Error writing inline script config file {script_config_name}: {e}")
             else:
-                logger.warning(f"Script config file {script_config_name} not found in {script_config_dir}")
+                # Script deployments reference a persisted script config under bots/conf/scripts.
+                source_script_config_file = os.path.join(script_config_dir, script_config_name)
+
+                if os.path.exists(source_script_config_file):
+                    shutil.copy2(source_script_config_file, destination_script_config_file)
+
+                    # Load the script config to find referenced controllers
+                    try:
+                        # Path relative to fs_util base_path (which is "bots")
+                        script_config_relative_path = f"conf/scripts/{script_config_name}"
+                        script_config_content = fs_util.read_yaml_file(script_config_relative_path)
+                    except Exception as e:
+                        logger.error(f"Error reading script config file {script_config_name}: {e}")
+                else:
+                    logger.warning(f"Script config file {script_config_name} not found in {script_config_dir}")
+
+            # If there are controllers referenced, copy them
+            try:
+                controllers_list = []
+                if isinstance(script_config_content, dict):
+                    controllers_list = script_config_content.get('controllers_config', []) or []
+                if controllers_list:
+                    os.makedirs(destination_controllers_config_dir, exist_ok=True)
+
+                    for controller_file in controllers_list:
+                        source_controller_file = os.path.join(controllers_config_dir, controller_file)
+                        destination_controller_file = os.path.join(destination_controllers_config_dir, controller_file)
+
+                        if os.path.exists(source_controller_file):
+                            shutil.copy2(source_controller_file, destination_controller_file)
+                            logger.info(f"Copied controller config: {controller_file}")
+                            # Ensure the controller config has a stable id (recommended: filename == id).
+                            try:
+                                controller_rel_path = f"instances/{instance_name}/conf/controllers/{controller_file}"
+                                controller_cfg = fs_util.read_yaml_file(controller_rel_path)
+                                if isinstance(controller_cfg, dict):
+                                    cfg_id = controller_cfg.get("id")
+                                    if not (isinstance(cfg_id, str) and cfg_id.strip()):
+                                        controller_cfg["id"] = os.path.splitext(controller_file)[0]
+                                        fs_util.dump_dict_to_yaml(controller_rel_path, controller_cfg)
+                            except Exception as e:
+                                logger.warning(
+                                    f"Failed to backfill id for controller config {controller_file} in instance {instance_name}: {e}"
+                                )
+                        else:
+                            logger.warning(f"Controller config file {controller_file} not found in {controllers_config_dir}")
+            except Exception as e:
+                logger.error(f"Error copying controller configs referenced by {script_config_name}: {e}")
         # Path relative to fs_util base_path (which is "bots")
         conf_file_path = f"instances/{instance_name}/conf/conf_client.yml"
         client_config = fs_util.read_yaml_file(conf_file_path)
