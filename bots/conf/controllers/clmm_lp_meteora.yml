@@ -20,7 +20,7 @@ rebalance_seconds: 60
 hysteresis_pct: 0.002
 cooldown_seconds: 30
 max_rebalances_per_hour: 20
-rebalance_open_timeout_sec: 300
+rebalance_open_timeout_sec: 900
 
 exit_full_liquidation: true
 exit_swap_slippage_pct: 0.03
