@@ -46,7 +46,20 @@ class V2WithControllers(StrategyV2Base):
         if not self._is_stop_triggered:
             self.check_manual_kill_switch()
             self.control_max_drawdown()
+            self.check_controller_stop_requests()
             self.send_performance_report()
+
+    def check_controller_stop_requests(self):
+        """
+        Allow controllers to request stopping the whole bot instance (strategy) after they
+        have finalized an exit sequence (e.g. stoploss close + liquidation).
+        """
+        for controller_id, controller in self.controllers.items():
+            if getattr(controller, "stop_strategy_requested", False):
+                self.logger().info(f"Controller {controller_id} requested strategy stop.")
+                self._is_stop_triggered = True
+                HummingbotApplication.main_application().stop()
+                return
 
     def control_max_drawdown(self):
         if self.config.max_controller_drawdown_quote:

@@ -703,9 +703,17 @@ class CLMMFSM:
         return False
 
     def _can_reenter(self, ctx: ControllerContext) -> bool:
-        if self._config.reenter_enabled:
-            return True
-        return ctx.last_exit_reason not in {"stop_loss", "take_profit"}
+        # Stop-loss is treated as a hard stop for re-entry. Even if reenter_enabled is true,
+        # we do not automatically re-open positions after a stoploss exit.
+        if ctx.last_exit_reason == "stop_loss":
+            return False
+
+        # Take-profit can optionally allow re-entry (useful for "harvest and continue" loops).
+        if ctx.last_exit_reason == "take_profit":
+            return bool(self._config.reenter_enabled)
+
+        # Default: allow entering when idle/triggered.
+        return True
 
     def _transition(
         self,

@@ -66,6 +66,10 @@ class CLMMLPBaseConfig(ControllerConfigBase):
     take_profit_pnl_pct: Decimal = Field(default=Decimal("0"), json_schema_extra={"is_updatable": True})
     stop_loss_pause_sec: int = Field(default=1800, json_schema_extra={"is_updatable": True})
     reenter_enabled: bool = Field(default=False, json_schema_extra={"is_updatable": True})
+    # When enabled, requests stopping the whole bot instance (strategy) after a stoploss exit
+    # is fully completed (LP closed, optional exit swap done). Useful when you want stoploss to
+    # "halt the machine" instead of idling.
+    stop_strategy_on_stoploss: bool = Field(default=False, json_schema_extra={"is_updatable": True})
 
     budget_key: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
     native_token_symbol: Optional[str] = Field(default=None, json_schema_extra={"is_updatable": True})
@@ -202,6 +206,7 @@ class CLMMLPBaseController(ControllerBase):
         self._latest_price_context: Optional[PriceContext] = None
         self._last_lp_position: Dict[str, Optional[str]] = {}
         self._last_tick_log_ts: float = 0.0
+        self._stop_strategy_requested: bool = False
 
         self._last_policy_update_ts: float = 0.0
         self._policy_update_interval_sec: float = 600.0
@@ -266,7 +271,27 @@ class CLMMLPBaseController(ControllerBase):
         decision = self._fsm.step(snapshot, self._ctx)
         self._log_decision_actions(decision)
         self._log_decision_metrics(decision, snapshot)
+        self._maybe_request_strategy_stop(snapshot)
         return decision.actions
+
+    @property
+    def stop_strategy_requested(self) -> bool:
+        return bool(self._stop_strategy_requested)
+
+    def _maybe_request_strategy_stop(self, snapshot: Snapshot) -> None:
+        if self._stop_strategy_requested:
+            return
+        if not getattr(self.config, "stop_strategy_on_stoploss", False):
+            return
+        if self._ctx.last_exit_reason != "stop_loss":
+            return
+        if self._ctx.state not in {ControllerState.COOLDOWN, ControllerState.IDLE}:
+            return
+        # Only request stop once all exit executors have finalized.
+        if snapshot.active_lp or snapshot.active_swaps:
+            return
+        self._stop_strategy_requested = True
+        self.logger().info("Stoploss exit completed; requesting strategy stop (stop_strategy_on_stoploss=true).")
 
     def get_custom_info(self) -> Dict:
         snapshot = self._latest_snapshot or self._refresh_snapshot(self.market_data_provider.time())
