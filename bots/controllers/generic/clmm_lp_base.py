@@ -215,8 +215,8 @@ class CLMMLPBaseController(ControllerBase):
         self._policy_update_task: Optional[asyncio.Task] = None
 
         rate_connector = self._rate_connector
-        # LPPositionExecutor reads price via RateOracle using its own config.trading_pair, which is
-        # the pool trading pair (token0-token1 order). If pool_trading_pair is inverted vs the
+        # Official LPExecutor reports values against its pool trading pair.
+        # If pool_trading_pair is inverted vs the
         # strategy trading_pair, RateOracle can often infer the inverse, but that depends on token
         # symbol normalization. Register both to avoid the executor being stuck in OPENING due to
         # missing rates on some connectors.
@@ -606,7 +606,7 @@ class CLMMLPBaseController(ControllerBase):
         for executor in self.executors_info:
             if executor.controller_id != self.config.id:
                 continue
-            if executor.type != "lp_position_executor":
+            if executor.type != "lp_executor":
                 continue
             current_lp_ids.add(executor.id)
             custom = executor.custom_info or {}

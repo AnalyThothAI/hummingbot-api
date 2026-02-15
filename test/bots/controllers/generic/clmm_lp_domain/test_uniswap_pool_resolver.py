@@ -176,3 +176,33 @@ def test_pool_info_missing_addresses_does_not_fallback():
     assert pool_pair is None
     assert error == "pool_data_invalid"
     assert gateway.api_request_called is False
+
+
+def test_pool_info_accepts_weth_eth_symbol_alias_match():
+    pool_info = {
+        "baseTokenAddress": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "quoteTokenAddress": "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    }
+    tokens = {
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa": {"token": {"symbol": "WETH"}},
+        "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {"token": {"symbol": "USDC"}},
+    }
+    gateway = _GatewayStub(pool_info=pool_info, tokens=tokens)
+    _GatewayHttpClient._instance = gateway
+
+    cfg = SimpleNamespace(
+        connector_name="uniswap/clmm",
+        trading_pair="ETH-USDC",
+        pool_address="0xpool",
+    )
+    resolver = _UniswapPoolDomainResolver(
+        config=cfg,
+        ctx=SimpleNamespace(),
+        apply_domain=lambda _domain: None,
+        market_data_provider=SimpleNamespace(time=lambda: 0),
+    )
+
+    pool_pair, error = asyncio.run(resolver._resolve_pool_trading_pair(cfg.pool_address))
+
+    assert error is None
+    assert pool_pair == "WETH-USDC"

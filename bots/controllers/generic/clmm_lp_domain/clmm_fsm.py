@@ -3,7 +3,7 @@ from typing import Callable, List, Optional, Tuple
 
 from hummingbot.core.data_type.common import TradeType
 from hummingbot.connector.utils import split_hb_trading_pair
-from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionStates
+from hummingbot.strategy_v2.executors.lp_executor.data_types import LPExecutorStates
 from hummingbot.strategy_v2.models.executors import CloseType
 from hummingbot.strategy_v2.models.executor_actions import StopExecutorAction
 
@@ -667,14 +667,13 @@ class CLMMFSM:
     def _is_lp_open(self, lp_view: LPView) -> bool:
         state = lp_view.state
         if state in {
-            LPPositionStates.IN_RANGE.value,
-            LPPositionStates.OUT_OF_RANGE.value,
+            LPExecutorStates.IN_RANGE.value,
+            LPExecutorStates.OUT_OF_RANGE.value,
         }:
             return True
         if state in {
-            LPPositionStates.COMPLETE.value,
-            LPPositionStates.NOT_ACTIVE.value,
-            LPPositionStates.RETRIES_EXCEEDED.value,
+            LPExecutorStates.COMPLETE.value,
+            LPExecutorStates.NOT_ACTIVE.value,
         }:
             return False
         return bool(lp_view.position_address)
@@ -682,21 +681,21 @@ class CLMMFSM:
     def _is_lp_closed(self, lp_view: LPView) -> bool:
         if lp_view.is_done:
             return True
-        if lp_view.state == LPPositionStates.COMPLETE.value:
+        if lp_view.state == LPExecutorStates.COMPLETE.value:
             return True
-        if lp_view.state == LPPositionStates.NOT_ACTIVE.value and not lp_view.position_address:
+        if lp_view.state == LPExecutorStates.NOT_ACTIVE.value and not lp_view.position_address:
             return True
         return False
 
     @staticmethod
     def _is_lp_in_transition(lp_view: LPView) -> bool:
         return lp_view.state in {
-            LPPositionStates.OPENING.value,
-            LPPositionStates.CLOSING.value,
+            LPExecutorStates.OPENING.value,
+            LPExecutorStates.CLOSING.value,
         }
 
     def _is_lp_failed(self, lp_view: LPView) -> bool:
-        if lp_view.state == LPPositionStates.RETRIES_EXCEEDED.value:
+        if lp_view.max_retries_reached:
             return True
         if lp_view.close_type == CloseType.FAILED:
             return True

@@ -184,6 +184,21 @@ class _LPPositionStates(Enum):
 
 _ensure_attr(lp_types_module, "LPPositionStates", _LPPositionStates)
 
+lp_executor_types_module = _ensure_module("hummingbot.strategy_v2.executors.lp_executor.data_types")
+_ensure_attr(lp_executor_types_module, "LPExecutorConfig", object)
+
+
+class _LPExecutorStates(Enum):
+    NOT_ACTIVE = "NOT_ACTIVE"
+    OPENING = "OPENING"
+    IN_RANGE = "IN_RANGE"
+    OUT_OF_RANGE = "OUT_OF_RANGE"
+    CLOSING = "CLOSING"
+    COMPLETE = "COMPLETE"
+
+
+_ensure_attr(lp_executor_types_module, "LPExecutorStates", _LPExecutorStates)
+
 swap_types_module = _ensure_module("hummingbot.strategy_v2.executors.gateway_swap_executor.data_types")
 _ensure_attr(swap_types_module, "GatewaySwapExecutorConfig", object)
 
@@ -200,6 +215,13 @@ class _ConnectorPair:  # pragma: no cover
 
 
 _ensure_attr(executors_data_types_module, "ConnectorPair", _ConnectorPair)
+
+
+class _ExecutorConfigBase:  # pragma: no cover
+    pass
+
+
+_ensure_attr(executors_data_types_module, "ExecutorConfigBase", _ExecutorConfigBase)
 
 
 # Minimal controller config/controller stubs to avoid importing the full Hummingbot client stack.

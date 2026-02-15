@@ -73,6 +73,17 @@ class PoolDomainAdapter:
                     return False
                 if parts[0] == self.quote_token and parts[1] == self.base_token:
                     return True
+
+        # LPExecutorConfig stores the pair under `market.trading_pair`.
+        market = getattr(config, "market", None)
+        market_pair = getattr(market, "trading_pair", None)
+        if isinstance(market_pair, str):
+            parts = market_pair.split("-")
+            if len(parts) == 2:
+                if parts[0] == self.base_token and parts[1] == self.quote_token:
+                    return False
+                if parts[0] == self.quote_token and parts[1] == self.base_token:
+                    return True
         return None
 
     @staticmethod
@@ -136,6 +147,7 @@ class LPView:
     lower_price: Optional[Decimal]
     upper_price: Optional[Decimal]
     out_of_range_since: Optional[float]
+    max_retries_reached: bool = False
 
 
 @dataclass(frozen=True)

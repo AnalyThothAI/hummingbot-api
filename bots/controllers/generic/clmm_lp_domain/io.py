@@ -7,8 +7,9 @@ from hummingbot.core.gateway.gateway_http_client import GatewayHttpClient
 from hummingbot.core.utils.async_utils import safe_ensure_future
 from hummingbot.logger import HummingbotLogger
 from hummingbot.connector.utils import split_hb_trading_pair
+from hummingbot.strategy_v2.executors.data_types import ConnectorPair
 from hummingbot.strategy_v2.executors.gateway_swap_executor.data_types import GatewaySwapExecutorConfig
-from hummingbot.strategy_v2.executors.lp_position_executor.data_types import LPPositionExecutorConfig
+from hummingbot.strategy_v2.executors.lp_executor.data_types import LPExecutorConfig
 from hummingbot.strategy_v2.models.executor_actions import CreateExecutorAction
 from hummingbot.strategy_v2.models.executors_info import ExecutorInfo
 
@@ -49,8 +50,8 @@ class SnapshotBuilder:
         for executor in executors_info:
             if executor.controller_id != self._controller_id:
                 continue
-            if executor.type == "lp_position_executor":
-                lp[executor.id] = self._parse_lp_view(executor)
+            if executor.type == "lp_executor":
+                lp[executor.id] = self._parse_lp_view(executor, now=now)
             elif executor.type == "gateway_swap_executor":
                 level_id = getattr(executor.config, "level_id", None)
                 swaps[executor.id] = SwapView(
@@ -79,7 +80,7 @@ class SnapshotBuilder:
             balance_update_ts=balance_update_ts,
         )
 
-    def _parse_lp_view(self, executor: ExecutorInfo) -> LPView:
+    def _parse_lp_view(self, executor: ExecutorInfo, *, now: float) -> LPView:
         custom = executor.custom_info or {}
         lp_base_amount = Decimal(str(custom.get("base_amount", 0)))
         lp_quote_amount = Decimal(str(custom.get("quote_amount", 0)))
@@ -98,6 +99,9 @@ class SnapshotBuilder:
             exec_base = getattr(config, "base_token", None)
             exec_quote = getattr(config, "quote_token", None)
             exec_pair = getattr(config, "trading_pair", None)
+            if exec_pair is None:
+                market = getattr(config, "market", None)
+                exec_pair = getattr(market, "trading_pair", None)
             self._logger().info(
                 "lp_inversion | executor_id=%s source=%s inverted=%s pool_trading_pair=%s pool_inverted=%s "
                 "exec_base=%s exec_quote=%s exec_pair=%s raw_base=%s raw_quote=%s mapped_base=%s mapped_quote=%s",
@@ -123,7 +127,16 @@ class SnapshotBuilder:
         if lower is not None and upper is not None:
             lower, upper = self._domain.pool_bounds_to_strategy(lower, upper, inverted)
         out_of_range_since = custom.get("out_of_range_since")
-        out_of_range_since = float(out_of_range_since) if out_of_range_since is not None else None
+        if out_of_range_since is None:
+            out_of_range_seconds = custom.get("out_of_range_seconds")
+            if out_of_range_seconds is not None:
+                try:
+                    seconds = max(0.0, float(out_of_range_seconds))
+                    out_of_range_since = now - seconds
+                except (TypeError, ValueError):
+                    out_of_range_since = None
+        else:
+            out_of_range_since = float(out_of_range_since)
 
         return LPView(
             executor_id=executor.id,
@@ -139,6 +152,7 @@ class SnapshotBuilder:
             lower_price=lower,
             upper_price=upper,
             out_of_range_since=out_of_range_since,
+            max_retries_reached=bool(custom.get("max_retries_reached", False)),
         )
 
     @staticmethod
@@ -481,7 +495,7 @@ class ActionFactory:
             executor_config=executor_config,
         )
 
-    def _create_lp_executor_config(self, proposal: "OpenProposal", now: float) -> Optional[LPPositionExecutorConfig]:
+    def _create_lp_executor_config(self, proposal: "OpenProposal", now: float) -> Optional[LPExecutorConfig]:
         if proposal.open_base <= 0 and proposal.open_quote <= 0:
             return None
         lower_price, upper_price = proposal.lower, proposal.upper
@@ -492,28 +506,23 @@ class ActionFactory:
         lp_lower_price, lp_upper_price = self._domain.strategy_bounds_to_pool(lower_price, upper_price)
 
         side = self._get_side_from_amounts(lp_base_amt, lp_quote_amt)
-        executor_config = LPPositionExecutorConfig(
+        executor_config = LPExecutorConfig(
             timestamp=now,
-            connector_name=self._config.connector_name,
+            market=ConnectorPair(
+                connector_name=self._config.connector_name,
+                trading_pair=self._domain.pool_trading_pair,
+            ),
             pool_address=self._config.pool_address,
-            trading_pair=self._domain.pool_trading_pair,
-            base_token=self._domain.pool_base_token,
-            quote_token=self._domain.pool_quote_token,
             lower_price=lp_lower_price,
             upper_price=lp_upper_price,
             base_amount=lp_base_amt,
             quote_amount=lp_quote_amt,
             side=side,
             keep_position=False,
-            budget_key=self._budget_key,
         )
         extra_params = self._extra_lp_params()
         if extra_params:
             executor_config.extra_params = extra_params
-        reservation_id = self._reserve_budget(proposal.open_base, proposal.open_quote)
-        if reservation_id is None:
-            return None
-        executor_config.budget_reservation_id = reservation_id
         return executor_config
 
     @staticmethod

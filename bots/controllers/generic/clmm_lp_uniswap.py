@@ -37,6 +37,10 @@ class CLMMLPUniswapConfig(clmm_lp_base.CLMMLPBaseConfig):
 
 
 class _UniswapPoolDomainResolver:
+    _symbol_alias_map = {
+        "WETH": "ETH",
+    }
+
     def __init__(
         self,
         *,
@@ -142,9 +146,22 @@ class _UniswapPoolDomainResolver:
             strat_base, strat_quote = split_hb_trading_pair(self._config.trading_pair)
         except Exception:
             return None, "trading_pair_invalid"
-        if {strat_base, strat_quote} != {token0_symbol, token1_symbol}:
+        strategy_symbols = {
+            self._normalize_symbol(strat_base),
+            self._normalize_symbol(strat_quote),
+        }
+        pool_symbols = {
+            self._normalize_symbol(token0_symbol),
+            self._normalize_symbol(token1_symbol),
+        }
+        if strategy_symbols != pool_symbols:
             return None, "trading_pair_mismatch"
         return pool_pair, None
+
+    @classmethod
+    def _normalize_symbol(cls, symbol: str) -> str:
+        normalized = (symbol or "").upper()
+        return cls._symbol_alias_map.get(normalized, normalized)
 
 
 class CLMMLPUniswapController(clmm_lp_base.CLMMLPBaseController):
